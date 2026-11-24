@@ -9,10 +9,10 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 use simlin_base::datamodel;
-use simlin_engine::layout::config::LayoutConfig;
-use simlin_engine::layout::eval_stats::{MetricSample, ModelStats};
-use simlin_engine::layout::metrics::{MetricWeights, compute_layout_metrics};
-use simlin_engine::layout::{LAYOUT_SEEDS, generate_best_layout, generate_layout_with_config};
+use simlin_layout::config::LayoutConfig;
+use simlin_layout::eval_stats::{MetricSample, ModelStats};
+use simlin_layout::metrics::{MetricWeights, compute_layout_metrics};
+use simlin_layout::{LAYOUT_SEEDS, generate_best_layout, generate_layout_with_config};
 
 use crate::corpus::MAIN_MODEL;
 

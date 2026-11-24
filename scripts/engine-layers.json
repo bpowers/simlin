@@ -37,14 +37,6 @@
         "vm_vector_elm_map",
         "vm_vector_sort_order"
       ]
-    },
-    "layout": {
-      "uses": [
-        "compiler"
-      ],
-      "modules": [
-        "layout"
-      ]
     }
   }
 }

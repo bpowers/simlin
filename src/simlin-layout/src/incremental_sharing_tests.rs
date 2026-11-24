@@ -10,10 +10,8 @@ use simlin_base::shared_vec::changed_by;
 use simlin_edit::apply_patch;
 
 fn world3() -> Project {
-    simlin_formats::compat::open_vensim(include_str!(
-        "../../../../test/metasd/WRLD3-03/wrld3-03.mdl"
-    ))
-    .expect("world3 opens")
+    simlin_formats::compat::open_vensim(include_str!("../../../test/metasd/WRLD3-03/wrld3-03.mdl"))
+        .expect("world3 opens")
 }
 
 fn tweaked(equation: &Equation) -> Equation {

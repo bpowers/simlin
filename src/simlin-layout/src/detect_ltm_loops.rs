@@ -10,7 +10,7 @@
 //! importance series and cycle partitions -- from the incremental salsa LTM
 //! pipeline, falling back to persisted `loop_metadata` when any step fails.
 
-use crate::ltm_dominance::{FeedbackLoop, LoopPolarity};
+use simlin_engine::ltm_dominance::{FeedbackLoop, LoopPolarity};
 
 /// Try to detect feedback loops using LTM analysis via the incremental
 /// salsa compilation path. Compiles the project, detects loops, augments
@@ -19,8 +19,8 @@ use crate::ltm_dominance::{FeedbackLoop, LoopPolarity};
 /// `None` if any step fails, signaling the caller to fall back to persisted
 /// loop_metadata.
 pub(super) fn try_detect_ltm_loops(
-    db: &crate::db::SimlinDb,
-    source_project: crate::db::SourceProject,
+    db: &simlin_engine::db::SimlinDb,
+    source_project: simlin_engine::db::SourceProject,
     model_name: &str,
 ) -> Option<(Vec<FeedbackLoop>, Vec<f64>)> {
     try_detect_ltm_loops_incremental(db, source_project, model_name)
@@ -28,8 +28,8 @@ pub(super) fn try_detect_ltm_loops(
 
 /// Incremental salsa path for LTM loop detection.
 fn try_detect_ltm_loops_incremental(
-    db: &crate::db::SimlinDb,
-    source_project: crate::db::SourceProject,
+    db: &simlin_engine::db::SimlinDb,
+    source_project: simlin_engine::db::SourceProject,
     actual_name: &str,
 ) -> Option<(Vec<FeedbackLoop>, Vec<f64>)> {
     let actual_name_owned = actual_name.to_string();
@@ -38,7 +38,7 @@ fn try_detect_ltm_loops_incremental(
     let (source_model, detected) = {
         let canonical_name = simlin_base::canonicalize(&actual_name_owned);
         let source_model = *source_project.models(db).get(canonical_name.as_ref())?;
-        let detected = crate::db::model_detected_loops(db, source_model, source_project);
+        let detected = simlin_engine::db::model_detected_loops(db, source_model, source_project);
         (source_model, detected)
     };
 
@@ -48,14 +48,14 @@ fn try_detect_ltm_loops_incremental(
     }
 
     // Phase 2: LTM compile and simulate.
-    let vm_result = crate::db::compile_project_incremental(
+    let vm_result = simlin_engine::db::compile_project_incremental(
         db,
         source_project,
         &actual_name_owned,
-        crate::db::LtmOverlay::On,
+        simlin_engine::db::LtmOverlay::On,
     )
     .ok()
-    .and_then(|compiled_sim| crate::vm::Vm::new(compiled_sim).ok())
+    .and_then(|compiled_sim| simlin_engine::Vm::new(compiled_sim).ok())
     .and_then(|mut vm| {
         vm.run_to_end().ok()?;
         Some(vm)
@@ -66,11 +66,11 @@ fn try_detect_ltm_loops_incremental(
     // it says which `(loop, slot)`s normalize together, and its per-loop
     // vector length is the loop's slot count.
     let loop_partitions = if vm_result.is_some() {
-        crate::db::model_ltm_variables(db, source_model, source_project)
+        simlin_engine::db::model_ltm_variables(db, source_model, source_project)
             .loop_partitions
             .clone()
     } else {
-        indexmap::IndexMap::new()
+        simlin_engine::indexmap::IndexMap::new()
     };
 
     let vm = vm_result?;
@@ -84,8 +84,8 @@ fn try_detect_ltm_loops_incremental(
     // element's contribution, sign preserved; a scalar loop's series is
     // already one per step (issue #463).
     let per_element_rel_scores =
-        crate::ltm_post::compute_rel_loop_scores(&results, &loop_partitions);
-    let importance_by_loop = crate::ltm_post::aggregate_per_element_argmax_abs(
+        simlin_engine::ltm_post::compute_rel_loop_scores(&results, &loop_partitions);
+    let importance_by_loop = simlin_engine::ltm_post::aggregate_per_element_argmax_abs(
         &per_element_rel_scores,
         results.step_count,
     );
@@ -100,11 +100,13 @@ fn try_detect_ltm_loops_incremental(
         // when the layout pipeline learns to surface confidence it should
         // pass `dl.polarity_confidence` through alongside the polarity.
         let polarity = match dl.polarity {
-            crate::db::DetectedLoopPolarity::Reinforcing
-            | crate::db::DetectedLoopPolarity::MostlyReinforcing => LoopPolarity::Reinforcing,
-            crate::db::DetectedLoopPolarity::Balancing
-            | crate::db::DetectedLoopPolarity::MostlyBalancing => LoopPolarity::Balancing,
-            crate::db::DetectedLoopPolarity::Undetermined => LoopPolarity::Undetermined,
+            simlin_engine::db::DetectedLoopPolarity::Reinforcing
+            | simlin_engine::db::DetectedLoopPolarity::MostlyReinforcing => {
+                LoopPolarity::Reinforcing
+            }
+            simlin_engine::db::DetectedLoopPolarity::Balancing
+            | simlin_engine::db::DetectedLoopPolarity::MostlyBalancing => LoopPolarity::Balancing,
+            simlin_engine::db::DetectedLoopPolarity::Undetermined => LoopPolarity::Undetermined,
         };
 
         let variables: Vec<String> = {
@@ -117,7 +119,7 @@ fn try_detect_ltm_loops_incremental(
             let mut vars: Vec<String> = dl
                 .variables
                 .iter()
-                .map(|v| crate::ltm::strip_subscript(v).to_string())
+                .map(|v| simlin_engine::ltm::strip_subscript(v).to_string())
                 .collect();
             if let Some(first) = vars.first().cloned() {
                 vars.push(first);
@@ -216,7 +218,7 @@ mod tests {
     /// production supplies.
     #[test]
     fn uncoupled_a2a_loop_gets_solo_dominance_group() {
-        let datamodel = crate::test_common::TestProject::new("main")
+        let datamodel = simlin_engine::test_common::TestProject::new("main")
             .with_sim_time(0.0, 5.0, 1.0)
             .named_dimension("R", &["r1", "r2"])
             .array_with_ranges("rate[R]", vec![("r1", "0.05"), ("r2", "0.2")])
@@ -225,8 +227,8 @@ mod tests {
             .stock("iso", "50", &[], &["iso_out"], None)
             .flow("iso_out", "iso * 0.1", None)
             .build_datamodel();
-        let mut db = crate::db::SimlinDb::default();
-        let sync = crate::db::sync_from_datamodel_incremental(&mut db, &datamodel, None);
+        let mut db = simlin_engine::db::SimlinDb::default();
+        let sync = simlin_engine::db::sync_from_datamodel_incremental(&mut db, &datamodel, None);
 
         let (loops, _) = try_detect_ltm_loops(&db, sync.project, "main")
             .expect("LTM loop detection must succeed on this fixture");

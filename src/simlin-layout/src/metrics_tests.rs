@@ -3,7 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use super::*;
-use crate::layout::taste::{Degradation, degrade};
+use crate::taste::{Degradation, degrade};
 use proptest::prelude::*;
 use simlin_base::datamodel::view_element::{self, LabelSide, LinkShape};
 use simlin_diagram::common::segment_length_in_rect;
@@ -1432,7 +1432,7 @@ fn auto_cost(dir: &str) -> f64 {
         annealing_random_seed: REF_PAIR_SEED,
         ..LayoutConfig::default()
     };
-    let view = crate::layout::generate_layout_with_config(&project, "main", config.clone(), None)
+    let view = crate::generate_layout_with_config(&project, "main", config.clone(), None)
         .expect("auto layout generation must succeed for the anchor model");
     compute_layout_metrics(&view, &config).weighted_cost(&MetricWeights::default())
 }

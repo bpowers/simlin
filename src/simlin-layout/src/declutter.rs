@@ -1350,8 +1350,8 @@ mod tests {
         // Four auxes jammed into a tight cluster. The declutter separates and
         // then compacts them; the tightest arrangement it may stop at is the
         // metric's comfortable clearance, never closer.
-        use crate::layout::config::LayoutConfig;
-        use crate::layout::metrics::compute_layout_metrics;
+        use crate::config::LayoutConfig;
+        use crate::metrics::compute_layout_metrics;
         let mut elements = vec![
             aux_at(1, 100.0, 100.0, "first name"),
             aux_at(2, 112.0, 104.0, "second name"),

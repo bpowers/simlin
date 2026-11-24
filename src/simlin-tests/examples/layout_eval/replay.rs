@@ -16,7 +16,7 @@ use std::time::Instant;
 use simlin_base::datamodel::{self, StockFlow, Variable};
 use simlin_base::{ModelOperation, ModelPatch, ProjectPatch, canonicalize};
 use simlin_edit::apply_patch;
-use simlin_engine::layout::{compute_layout_metadata, generate_best_layout, incremental_layout};
+use simlin_layout::{compute_layout_metadata, generate_best_layout, incremental_layout};
 
 use crate::corpus::MAIN_MODEL;
 
@@ -47,7 +47,7 @@ fn build_units<'a>(
 
     let mut placed: BTreeSet<String> = BTreeSet::new();
     let mut units: Vec<Vec<&Variable>> = Vec::new();
-    let mut chains: Vec<&simlin_engine::layout::metadata::StockFlowChain> =
+    let mut chains: Vec<&simlin_layout::metadata::StockFlowChain> =
         metadata.chains.iter().collect();
     chains.sort_by(|a, b| {
         b.all_vars

@@ -13,7 +13,7 @@ use simlin_formats::mdl::writer::test_models::{first_save_is_a_fixed_point, rich
 /// `project` with a stock-and-flow view laid out for it, kept by its save.
 fn a_save_with_a_view_is_a_fixed_point(project: Project) -> std::result::Result<(), TestCaseError> {
     let mut project = project;
-    let view = simlin_engine::layout::generate_layout(&project, "main", None)
+    let view = simlin_layout::generate_layout(&project, "main", None)
         .map_err(|e| TestCaseError::fail(format!("layout: {e}")))?;
     project.models[0].views = vec![datamodel::View::StockFlow(view)];
     first_save_is_a_fixed_point(&project).map_err(TestCaseError::fail)

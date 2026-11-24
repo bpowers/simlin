@@ -14,7 +14,7 @@
 //! row does not depend on the defect the finding reports.
 
 use super::*;
-use crate::layout::edit_scenarios::{
+use crate::edit_scenarios::{
     Scenario, ScenarioKind, build_scenario, first_difference, run_scenario, sync_view,
 };
 use simlin_base::datamodel::view_element::{self, LabelSide};

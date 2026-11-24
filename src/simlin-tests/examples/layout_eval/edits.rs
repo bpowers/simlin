@@ -15,9 +15,9 @@ use std::fmt::Write as _;
 
 use serde::Serialize;
 use simlin_base::datamodel::{self, StockFlow};
-use simlin_engine::layout::edit_audit::{ChangeKind, Displacement, Finding, view_changes};
-use simlin_engine::layout::edit_scenarios::{ScenarioKind, build_scenario, run_scenario};
-use simlin_engine::layout::generate_best_layout;
+use simlin_layout::edit_audit::{ChangeKind, Displacement, Finding, view_changes};
+use simlin_layout::edit_scenarios::{ScenarioKind, build_scenario, run_scenario};
+use simlin_layout::generate_best_layout;
 
 use crate::corpus::{self, MAIN_MODEL, ModelSpec};
 use crate::render;

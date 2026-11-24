@@ -12,9 +12,9 @@
 use std::collections::HashMap;
 
 use super::*;
-use crate::layout::config::LayoutConfig;
-use crate::layout::metrics::compute_layout_metrics;
-use crate::test_common::TestProject;
+use crate::config::LayoutConfig;
+use crate::metrics::compute_layout_metrics;
+use simlin_engine::test_common::TestProject;
 
 /// `TestProject::build_datamodel` synthesizes a single model named `"main"`.
 const MAIN_MODEL: &str = "main";

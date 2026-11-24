@@ -3,7 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use super::*;
-use crate::layout::metrics::compute_layout_metrics;
+use crate::metrics::compute_layout_metrics;
 use simlin_base::project_patch::{ModelOperation, ModelPatch};
 
 const TEST_MODEL: &str = "main";
@@ -341,7 +341,7 @@ fn flow_named(view: &datamodel::StockFlow, name: &str) -> view_element::Flow {
 
 /// Every pair of shapes that overlap, where one of them is in `uids`.
 fn overlaps_involving(view: &datamodel::StockFlow, uids: &HashSet<i32>) -> Vec<(i32, i32)> {
-    use crate::layout::metrics::node_shape_box;
+    use crate::metrics::node_shape_box;
     let shapes: Vec<(i32, simlin_diagram::common::Rect)> = view
         .elements
         .iter()
@@ -708,7 +708,7 @@ fn a_stock_added_to_a_drawn_chain_lands_clear_of_side_flows() {
     // pipe long enough that its cloud sits where a downstream stock would
     // naturally go. An agent adds a reservoir fed from tank: it must not land
     // on the drain's cloud.
-    use crate::layout::metrics::node_shape_box;
+    use crate::metrics::node_shape_box;
     let project = project_with(vec![
         datamodel::Variable::Stock(stock("tank", &[], &["drain"])),
         datamodel::Variable::Flow(flow("drain", "tank * 0.1")),

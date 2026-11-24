@@ -395,7 +395,7 @@ fn separate_created_clouds(
     let shapes: Vec<(i32, simlin_diagram::common::Rect)> = elements
         .iter()
         .filter(|e| !matches!(e, ViewElement::Cloud(_)))
-        .filter_map(|e| crate::layout::metrics::node_shape_box(e).map(|r| (e.get_uid(), r)))
+        .filter_map(|e| crate::metrics::node_shape_box(e).map(|r| (e.get_uid(), r)))
         .collect();
     let mut settled: HashSet<i32> = HashSet::new();
     for &(uid, idx) in order {

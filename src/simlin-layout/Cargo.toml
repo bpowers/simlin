@@ -1,0 +1,37 @@
+[package]
+name = "simlin-layout"
+version = "0.1.0"
+authors = ["Bobby Powers <bobbypowers@gmail.com>"]
+license = "Apache-2.0"
+edition = "2024"
+description = "Lays out a system dynamics model's stock-and-flow diagram, whole or after an edit"
+
+[lib]
+crate-type = ["rlib"]
+
+[features]
+# The layout-quality eval statistics (`eval_stats`). Its only consumer is
+# simlin-tests' `layout_eval` example, whose `instruments` feature turns this
+# on, so the 1,300-line module leaves every wasm/native production build. It is
+# `cfg(any(test, ...))`, so its own tests run under a plain `cargo test`.
+layout_eval = ["simlin-edit/invariants"]
+
+[dependencies]
+simlin-base = { path = "../simlin-base" }
+simlin-diagram = { path = "../simlin-diagram" }
+simlin-edit = { path = "../simlin-edit" }
+simlin-engine = { path = "../simlin-engine", default-features = false }
+serde = { version = "1", features = ["derive"] }
+rand = { version = "0.9", default-features = false, features = ["std_rng"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rayon = "1"
+
+[dev-dependencies]
+simlin-base = { path = "../simlin-base", features = ["test-support"] }
+simlin-diagram = { path = "../simlin-diagram", features = ["test-support"] }
+simlin-edit = { path = "../simlin-edit", features = ["test-support"] }
+simlin-engine = { path = "../simlin-engine", features = ["test-support"] }
+simlin-formats = { path = "../simlin-formats", features = ["test-support"] }
+rand = "0.9"
+proptest = "1.5"

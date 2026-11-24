@@ -2,6 +2,11 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
+//! A model's stock-and-flow diagram laid out: whole, or kept in line with the
+//! model after an edit without moving what the edit did not touch.
+
+#![forbid(unsafe_code)]
+
 mod aliases;
 pub mod annealing;
 mod aux_placement;
@@ -66,12 +71,12 @@ use self::placement::{
 use self::sfdp::{SfdpConfig, compute_layout_from_initial_with_callback, should_trigger_annealing};
 use self::text::{estimate_label_bounds, format_label_with_line_breaks};
 use self::uid::UidManager;
-use crate::ltm_dominance::{FeedbackLoop, LoopPolarity, PartitionSurface};
 use simlin_base::common::canonicalize;
 use simlin_base::datamodel;
 use simlin_base::datamodel::view_element::{self, FlowPoint, LabelSide, LinkShape};
 use simlin_base::datamodel::{Rect, ViewElement};
 use simlin_diagram::flow_geometry::clamp_to_face_span;
+use simlin_engine::ltm_dominance::{FeedbackLoop, LoopPolarity, PartitionSurface};
 
 /// A queued element during chain layout BFS traversal.
 struct WorkItem {
@@ -3134,14 +3139,21 @@ fn resolve_model_name<'a>(project: &'a datamodel::Project, model_name: &'a str) 
 /// exclusive access for a layout.
 fn ensure_db_state<'a>(
     project: &datamodel::Project,
-    db_state: Option<(&'a crate::db::SimlinDb, crate::db::SourceProject)>,
-    local_db: &'a mut Option<crate::db::SimlinDb>,
-) -> (&'a crate::db::SimlinDb, crate::db::SourceProject) {
+    db_state: Option<(
+        &'a simlin_engine::db::SimlinDb,
+        simlin_engine::db::SourceProject,
+    )>,
+    local_db: &'a mut Option<simlin_engine::db::SimlinDb>,
+) -> (
+    &'a simlin_engine::db::SimlinDb,
+    simlin_engine::db::SourceProject,
+) {
     match db_state {
         Some((db, sp)) => (db, sp),
         None => {
-            let db: &crate::db::SimlinDb = local_db.insert(crate::db::SimlinDb::default());
-            let source_project = crate::db::sync_from_datamodel(db, project).project;
+            let db: &simlin_engine::db::SimlinDb =
+                local_db.insert(simlin_engine::db::SimlinDb::default());
+            let source_project = simlin_engine::db::sync_from_datamodel(db, project).project;
             (db, source_project)
         }
     }
@@ -3254,7 +3266,7 @@ fn rendered_dependency_ident(
 /// arrow from each name they typed; the synthesized helpers are invisible, and
 /// a table is a layout reference (not a data-flow read), so neither shows up
 /// among the plain heads (#650). Sorted and deduplicated.
-fn drawn_reads(var_deps: &crate::db::VariableDeps) -> Vec<String> {
+fn drawn_reads(var_deps: &simlin_engine::db::VariableDeps) -> Vec<String> {
     let helpers: HashMap<&str, _> = var_deps
         .implicit_vars
         .iter()
@@ -3344,7 +3356,10 @@ fn build_feedback_loops_from_metadata(
 pub fn compute_metadata(
     project: &datamodel::Project,
     model_name: &str,
-    db_state: Option<(&crate::db::SimlinDb, crate::db::SourceProject)>,
+    db_state: Option<(
+        &simlin_engine::db::SimlinDb,
+        simlin_engine::db::SourceProject,
+    )>,
 ) -> Option<ComputedMetadata> {
     compute_metadata_parts(project, model_name, db_state, true)
 }
@@ -3356,7 +3371,10 @@ pub fn compute_metadata(
 pub fn compute_dependency_metadata(
     project: &datamodel::Project,
     model_name: &str,
-    db_state: Option<(&crate::db::SimlinDb, crate::db::SourceProject)>,
+    db_state: Option<(
+        &simlin_engine::db::SimlinDb,
+        simlin_engine::db::SourceProject,
+    )>,
 ) -> Option<ComputedMetadata> {
     compute_metadata_parts(project, model_name, db_state, false)
 }
@@ -3364,7 +3382,10 @@ pub fn compute_dependency_metadata(
 fn compute_metadata_parts(
     project: &datamodel::Project,
     model_name: &str,
-    db_state: Option<(&crate::db::SimlinDb, crate::db::SourceProject)>,
+    db_state: Option<(
+        &simlin_engine::db::SimlinDb,
+        simlin_engine::db::SourceProject,
+    )>,
     with_loops: bool,
 ) -> Option<ComputedMetadata> {
     let model = project.get_model(model_name)?;
@@ -3438,7 +3459,7 @@ fn compute_metadata_parts(
 
     // Use a salsa db for dependency extraction and LTM detection, creating
     // a temporary one if the caller didn't provide one.
-    let mut local_db: Option<crate::db::SimlinDb> = None;
+    let mut local_db: Option<simlin_engine::db::SimlinDb> = None;
     let (db, source_project) = ensure_db_state(project, db_state, &mut local_db);
 
     let actual_model_name = resolve_model_name(project, model_name);
@@ -3490,15 +3511,19 @@ fn compute_metadata_parts(
                 // The input-agnostic dependency set: a diagram has no module
                 // instance in hand, and the memo is the one the compiler's
                 // own dependency graph reads for an uninstantiated model.
-                let empty_inputs = crate::db::ModuleInputSet::empty(db);
-                let var_deps =
-                    crate::db::variable_direct_dependencies(db, sv, source_project, empty_inputs);
+                let empty_inputs = simlin_engine::db::ModuleInputSet::empty(db);
+                let var_deps = simlin_engine::db::variable_direct_dependencies(
+                    db,
+                    sv,
+                    source_project,
+                    empty_inputs,
+                );
                 let combined = drawn_reads(var_deps);
                 if combined.is_empty() {
                     // Check whether the equation actually parsed. If the AST
                     // is None, the equation has syntax errors and we fall back
                     // to string heuristics for approximate layout deps.
-                    let parsed = crate::db::parse_source_variable(db, sv, source_project);
+                    let parsed = simlin_engine::db::parse_source_variable(db, sv, source_project);
                     if parsed.variable.ast().is_none() {
                         return Some(extract_equation_deps(var, &all_idents));
                     }
@@ -3611,7 +3636,7 @@ fn compute_metadata_parts(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    let dominant_periods = crate::ltm_dominance::calculate_dominant_periods(
+    let dominant_periods = simlin_engine::ltm_dominance::calculate_dominant_periods(
         &feedback_loops,
         &times,
         partition_surface,
@@ -4005,7 +4030,10 @@ pub const LAYOUT_SEEDS: [u64; 4] = [42, 123, 456, 789];
 pub fn generate_layout(
     project: &datamodel::Project,
     model_name: &str,
-    db_state: Option<(&crate::db::SimlinDb, crate::db::SourceProject)>,
+    db_state: Option<(
+        &simlin_engine::db::SimlinDb,
+        simlin_engine::db::SourceProject,
+    )>,
 ) -> Result<datamodel::StockFlow, String> {
     let config = LayoutConfig::default();
     let not_found = || format!("model '{}' not found in project", model_name);
@@ -4019,7 +4047,10 @@ pub fn generate_layout_with_config(
     project: &datamodel::Project,
     model_name: &str,
     mut config: LayoutConfig,
-    db_state: Option<(&crate::db::SimlinDb, crate::db::SourceProject)>,
+    db_state: Option<(
+        &simlin_engine::db::SimlinDb,
+        simlin_engine::db::SourceProject,
+    )>,
 ) -> Result<datamodel::StockFlow, String> {
     config.validate();
     let not_found = || format!("model '{}' not found in project", model_name);
@@ -4035,7 +4066,10 @@ pub fn generate_layout_with_config(
 pub fn generate_best_layout(
     project: &datamodel::Project,
     model_name: &str,
-    db_state: Option<(&crate::db::SimlinDb, crate::db::SourceProject)>,
+    db_state: Option<(
+        &simlin_engine::db::SimlinDb,
+        simlin_engine::db::SourceProject,
+    )>,
 ) -> Result<datamodel::StockFlow, String> {
     let config = LayoutConfig::default();
     let seeds = LAYOUT_SEEDS;
@@ -4079,7 +4113,10 @@ pub fn generate_best_layout(
 pub fn compute_layout_metadata(
     project: &datamodel::Project,
     model_name: &str,
-    db_state: Option<(&crate::db::SimlinDb, crate::db::SourceProject)>,
+    db_state: Option<(
+        &simlin_engine::db::SimlinDb,
+        simlin_engine::db::SourceProject,
+    )>,
 ) -> Option<ComputedMetadata> {
     compute_metadata(project, model_name, db_state)
 }

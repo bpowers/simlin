@@ -58,9 +58,9 @@ mod report;
 mod sweep;
 mod taste;
 
-use simlin_engine::layout::LAYOUT_SEEDS;
-use simlin_engine::layout::eval_stats::{Comparison, CorpusReport, ModelStats, compare};
-use simlin_engine::layout::metrics::MetricWeights;
+use simlin_layout::LAYOUT_SEEDS;
+use simlin_layout::eval_stats::{Comparison, CorpusReport, ModelStats, compare};
+use simlin_layout::metrics::MetricWeights;
 
 use corpus::{ModelSpec, Reference};
 use knobs::Knobs;

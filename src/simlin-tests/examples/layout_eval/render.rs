@@ -6,8 +6,8 @@
 
 use simlin_base::datamodel;
 use simlin_diagram::{PngRenderOpts, render_svg, svg_to_png};
-use simlin_engine::layout::config::LayoutConfig;
-use simlin_engine::layout::metrics::{
+use simlin_layout::config::LayoutConfig;
+use simlin_layout::metrics::{
     Defect, DefectKind, LayoutMetrics, MetricWeights, analyze_layout, compute_layout_metrics,
 };
 

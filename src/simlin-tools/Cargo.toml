@@ -18,6 +18,7 @@ simlin-base = { path = "../simlin-base" }
 simlin-edit = { path = "../simlin-edit" }
 simlin-engine = { path = "../simlin-engine", default-features = false }
 simlin-formats = { path = "../simlin-formats", default-features = false }
+simlin-layout = { path = "../simlin-layout" }
 simlin-save-check = { path = "../simlin-save-check" }
 indexmap = "2"
 serde = { version = "1", features = ["derive"] }

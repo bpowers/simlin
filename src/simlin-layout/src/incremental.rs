@@ -1412,7 +1412,7 @@ fn without(idents: Vec<String>, placed: &HashSet<String>) -> Vec<String> {
 /// The union of what `elements` draw -- shapes, pipes, and labels at their
 /// current sides -- or `None` when they draw nothing.
 fn footprint_bounds(elements: &[ViewElement]) -> Option<Bounds> {
-    use crate::layout::metrics::{element_label_props_for, node_shape_box, pipe_rects};
+    use crate::metrics::{element_label_props_for, node_shape_box, pipe_rects};
     use simlin_diagram::label::label_bounds;
     let mut rects: Vec<Bounds> = Vec::new();
     for elem in elements {
@@ -1667,7 +1667,7 @@ fn retarget_flow(
             ViewElement::Cloud(c) => c.flow_uid != flow_uid,
             _ => true,
         })
-        .filter_map(crate::layout::metrics::node_shape_box)
+        .filter_map(crate::metrics::node_shape_box)
         .collect();
 
     let (ends, current) = {
@@ -2010,7 +2010,7 @@ fn route_created_flows_around_stocks(elements: &mut [ViewElement], created: &Has
 /// `VALVE_CLAMP_MARGIN` from the pipe's ends; a pipe with no clear position
 /// keeps its valve.
 fn keep_created_valves_clear(elements: &mut [ViewElement], created: &HashSet<i32>) {
-    use crate::layout::metrics::node_shape_box;
+    use crate::metrics::node_shape_box;
     use simlin_diagram::common::Rect;
     use simlin_diagram::constants::AUX_RADIUS;
     use simlin_edit::editing::{VALVE_CLAMP_MARGIN, arc_position, path_length, point_at_arc};
@@ -2093,7 +2093,7 @@ fn record_flow_geometry(state: &mut LayoutState, flows: &HashSet<i32>) {
 /// clearance. `moves` accepts the uids this pass created or rebuilt; a stock a
 /// flow attaches to stays, since moving it would tear the pipe.
 fn keep_created_nodes_clear(elements: &mut [ViewElement], moves: impl Fn(i32) -> bool) {
-    use crate::layout::metrics::node_shape_box;
+    use crate::metrics::node_shape_box;
     use simlin_diagram::common::Rect;
     use simlin_diagram::constants::AUX_RADIUS;
     const MAX_RINGS: usize = 24;
@@ -2265,7 +2265,10 @@ pub fn incremental_layout(
     project: &datamodel::Project,
     model_name: &str,
     patch: &simlin_base::project_patch::ModelPatch,
-    db_state: Option<(&crate::db::SimlinDb, crate::db::SourceProject)>,
+    db_state: Option<(
+        &simlin_engine::db::SimlinDb,
+        simlin_engine::db::SourceProject,
+    )>,
 ) -> Result<datamodel::StockFlow, String> {
     if old_view.elements.is_empty() {
         return generate_best_layout(project, model_name, db_state);

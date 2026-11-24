@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use crate::ltm_dominance::{DominantPeriod, FeedbackLoop};
+use simlin_engine::ltm_dominance::{DominantPeriod, FeedbackLoop};
 
 /// A stock-flow chain: one or more stocks connected by flows.
 #[derive(Clone, serde::Serialize)]

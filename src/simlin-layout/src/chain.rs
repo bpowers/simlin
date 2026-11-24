@@ -475,7 +475,7 @@ pub fn compute_chain_positions(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::metadata::ComputedMetadata;
+    use crate::metadata::ComputedMetadata;
 
     #[test]
     fn test_find_free_stock_position_keeps_natural_when_unoccupied() {

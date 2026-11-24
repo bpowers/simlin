@@ -667,7 +667,7 @@ fn datamodel_to_render(
     let db_state = db_locked
         .current_source_project()
         .map(|sp| (&*db_locked, sp));
-    let layout = simlin_engine::layout::generate_best_layout(&datamodel, model_name, db_state)?;
+    let layout = simlin_layout::generate_best_layout(&datamodel, model_name, db_state)?;
 
     let mut with_layout = (*datamodel).clone();
     if let Some(model) = with_layout.get_model_mut(model_name) {

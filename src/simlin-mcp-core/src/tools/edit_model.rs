@@ -499,12 +499,12 @@ fn sync_diagram(
     let synced = if let (Some(old_sf), Some(patch)) = (old_view, model_patch) {
         if !old_sf.elements.is_empty() {
             let old_sf = old_sf.clone();
-            simlin_engine::layout::incremental_layout(&old_sf, project, model_name, patch, None)
+            simlin_layout::incremental_layout(&old_sf, project, model_name, patch, None)
         } else {
-            simlin_engine::layout::generate_best_layout(project, model_name, None)
+            simlin_layout::generate_best_layout(project, model_name, None)
         }
     } else {
-        simlin_engine::layout::generate_best_layout(project, model_name, None)
+        simlin_layout::generate_best_layout(project, model_name, None)
     };
 
     install_synced_view(project, model_name, synced)
@@ -719,8 +719,7 @@ mod tests {
             ),
         )
         .expect("the patch applies");
-        let synced =
-            simlin_engine::layout::generate_best_layout(&project, "main", None).expect("layout");
+        let synced = simlin_layout::generate_best_layout(&project, "main", None).expect("layout");
         let first = simlin_base::datamodel::StockFlow {
             elements: Vec::new().into(),
             zoom: 2.0,

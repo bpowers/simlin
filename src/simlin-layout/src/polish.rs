@@ -21,7 +21,7 @@
 // where they fall never raises the metric's crossing and strike terms.
 
 use super::*;
-use crate::layout::metrics::{
+use crate::metrics::{
     COMFORTABLE_CLEARANCE, LABEL_INSET, MetricWeights, OWN_LINK_STRIKE_FACTOR,
     alias_label_props_for, alias_source_names, element_label_props_for, node_shape_box, pipe_rects,
 };

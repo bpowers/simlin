@@ -19,6 +19,7 @@ Exception: protobuf files must follow standard versioning (we have a DB with ser
 | `src/simlin-edit`     | Rust        | Patches to a project, diagram gestures, equation views            | [CLAUDE.md](/src/simlin-edit/CLAUDE.md)     |
 | `src/simlin-engine`   | Rust        | Compiles, type-checks, and simulates SD models                    | [CLAUDE.md](/src/simlin-engine/CLAUDE.md)   |
 | `src/simlin-formats`  | Rust        | Reads and writes XMILE, Vensim, systems, JSON and protobuf files  | [CLAUDE.md](/src/simlin-formats/CLAUDE.md)  |
+| `src/simlin-layout`   | Rust        | Lays out a model's diagram, whole or after an edit                | [CLAUDE.md](/src/simlin-layout/CLAUDE.md)   |
 | `src/simlin-save-check` | Rust      | Whether saving a project in a format keeps what it means          | [CLAUDE.md](/src/simlin-save-check/CLAUDE.md) |
 | `src/simlin-tools`    | Rust        | The agent tool surface: sessions answering tool calls with JSON   | [CLAUDE.md](/src/simlin-tools/CLAUDE.md)    |
 | `src/simlin-wasmgen`  | Rust        | Compiles a model to a self-contained wasm module                  | [CLAUDE.md](/src/simlin-wasmgen/CLAUDE.md)  |

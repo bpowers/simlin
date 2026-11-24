@@ -169,7 +169,7 @@ pub unsafe extern "C" fn simlin_project_diagram_sync(
             // Clone required: old_sf borrows from datamodel_locked, but
             // incremental_layout also needs &datamodel_locked for the project.
             let old_sf = old_sf.clone();
-            simlin_engine::layout::incremental_layout(
+            simlin_layout::incremental_layout(
                 &old_sf,
                 &datamodel_locked,
                 model_name_str,
@@ -177,14 +177,14 @@ pub unsafe extern "C" fn simlin_project_diagram_sync(
                 db_state,
             )
         } else {
-            simlin_engine::layout::generate_best_layout(&datamodel_locked, model_name_str, db_state)
+            simlin_layout::generate_best_layout(&datamodel_locked, model_name_str, db_state)
         }
     } else if patch_was_provided && old_view.is_some_and(|sf| !sf.elements.is_empty()) {
         // Patch was provided but no ops target this model, and the model already has
         // a non-empty view. Preserve the existing layout unchanged.
         return;
     } else {
-        simlin_engine::layout::generate_best_layout(&datamodel_locked, model_name_str, db_state)
+        simlin_layout::generate_best_layout(&datamodel_locked, model_name_str, db_state)
     };
 
     let mut layout = match new_view {

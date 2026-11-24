@@ -222,17 +222,6 @@ fn a_stock_list_that_repeats_a_flow_warns_once_naming_the_repeats() {
 }
 
 #[test]
-fn layout_metadata_reads_a_repeated_flow_once() {
-    let project = TestProject::new("repeat")
-        .flow("f", "1", None)
-        .stock("s", "0", &["f", "f"], &[], None)
-        .build_datamodel();
-    let name = project.models[0].name.clone();
-    let metadata = crate::layout::compute_metadata(&project, &name, None).expect("metadata");
-    assert_eq!(metadata.stock_to_inflows["s"], vec!["f".to_string()]);
-}
-
-#[test]
 fn mdl_export_writes_a_repeated_flow_once() {
     let project = TestProject::new("repeat")
         .flow("f", "1", None)

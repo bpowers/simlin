@@ -2116,16 +2116,14 @@ impl<'a> Builder<'a> {
             ops: self.ops.clone(),
         };
         let laid_out = match drawn {
-            Some(drawn) => simlin_engine::layout::incremental_layout(
+            Some(drawn) => simlin_layout::incremental_layout(
                 drawn,
                 &self.working,
                 &self.model_name,
                 &patch,
                 None,
             )?,
-            None => {
-                simlin_engine::layout::generate_best_layout(&self.working, &self.model_name, None)?
-            }
+            None => simlin_layout::generate_best_layout(&self.working, &self.model_name, None)?,
         };
         self.apply(vec![ModelOperation::UpsertView {
             index: 0,

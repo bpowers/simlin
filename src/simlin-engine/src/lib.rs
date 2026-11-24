@@ -41,7 +41,6 @@ mod diagnostic;
 pub mod errors;
 #[cfg(test)]
 mod keyword_ident_tests;
-pub mod layout;
 #[cfg(test)]
 mod lookup_only_tests;
 pub mod ltm;

@@ -2254,6 +2254,7 @@ dependencies = [
  "simlin-edit",
  "simlin-engine",
  "simlin-formats",
+ "simlin-layout",
  "simlin-save-check",
  "simlin-tools",
  "simlin-wasmgen",
@@ -2321,12 +2322,9 @@ dependencies = [
  "ed25519",
  "indexmap",
  "proptest",
- "rand 0.9.5",
- "rayon",
  "salsa",
  "serde",
  "simlin-base",
- "simlin-diagram",
  "simlin-edit",
  "simlin-formats",
  "smallvec",
@@ -2352,6 +2350,21 @@ dependencies = [
  "simlin-engine",
  "tempfile",
  "unicode-xid",
+]
+
+[[package]]
+name = "simlin-layout"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "rand 0.9.5",
+ "rayon",
+ "serde",
+ "simlin-base",
+ "simlin-diagram",
+ "simlin-edit",
+ "simlin-engine",
+ "simlin-formats",
 ]
 
 [[package]]
@@ -2383,6 +2396,7 @@ dependencies = [
  "simlin-edit",
  "simlin-engine",
  "simlin-formats",
+ "simlin-layout",
  "simlin-mcp-core",
  "tempfile",
  "tokio",
@@ -2421,6 +2435,7 @@ dependencies = [
  "simlin-edit",
  "simlin-engine",
  "simlin-formats",
+ "simlin-layout",
  "simlin-save-check",
  "simlin-wasmgen",
  "tempfile",
@@ -2442,6 +2457,7 @@ dependencies = [
  "simlin-edit",
  "simlin-engine",
  "simlin-formats",
+ "simlin-layout",
  "simlin-save-check",
 ]
 

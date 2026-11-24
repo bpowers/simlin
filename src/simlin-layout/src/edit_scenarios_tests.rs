@@ -15,8 +15,8 @@
 //! means deleting its rows, and a regression cannot hide behind a row.
 
 use super::*;
-use crate::layout::edit_audit::FindingKind;
-use crate::layout::taste::{Degradation, degrade};
+use crate::edit_audit::FindingKind;
+use crate::taste::{Degradation, degrade};
 
 struct Fixture {
     key: &'static str,
@@ -342,7 +342,7 @@ fn every_scenario_writes_equations_that_read_names_needing_quotes() {
     // deleting a parameter leaves its readers with an unknown dependency, which
     // is the edit, not a spelling. Every kind must apply, so every arm of
     // `build_scenario` is covered.
-    use crate::db::{
+    use simlin_engine::db::{
         DiagnosticSeverity, LtmOverlay, SimlinDb, collect_all_diagnostics, sync_from_datamodel,
     };
     let errors = |project: &datamodel::Project, only: Option<&BTreeSet<String>>| -> Vec<String> {

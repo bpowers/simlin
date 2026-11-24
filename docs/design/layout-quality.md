@@ -4,7 +4,7 @@ Simlin generates stock-and-flow diagrams for models that have none: an agent
 building a model over MCP, a notebook user patching a model from Python, an
 imported equation file.
 This document describes how diagram quality is
-measured -- the layout-quality metric (`src/simlin-engine/src/layout/metrics.rs`),
+measured -- the layout-quality metric (`src/simlin-layout/src/metrics.rs`),
 its taste checks (`layout/taste.rs`), and the on-demand eval harness
 (`src/simlin-tests/examples/layout_eval/`) -- and the loop for improving the
 layout algorithm against them.

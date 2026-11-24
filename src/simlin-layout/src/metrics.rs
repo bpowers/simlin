@@ -1390,7 +1390,7 @@ fn analyze(view: &datamodel::StockFlow, sink: &mut DefectSink) -> LayoutMetrics 
         for e in &view.elements {
             if let ViewElement::Flow(f) = e {
                 flow_count += 1;
-                total_bends += crate::layout::orthogonal::flow_bend_count(&f.points);
+                total_bends += crate::orthogonal::flow_bend_count(&f.points);
             }
         }
         if flow_count > 0 {

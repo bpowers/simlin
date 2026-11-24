@@ -153,8 +153,7 @@ impl Host {
 /// test can make an edit that changes only the diagram.
 pub(crate) fn with_diagram(mut project: Project) -> Project {
     let name = project.models[0].name.clone();
-    let view =
-        simlin_engine::layout::generate_layout(&project, &name, None).expect("the model lays out");
+    let view = simlin_layout::generate_layout(&project, &name, None).expect("the model lays out");
     project.models[0].views = vec![datamodel::View::StockFlow(view)];
     project
 }

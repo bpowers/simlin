@@ -677,7 +677,7 @@ fn a_flow_created_on_an_imported_view_lands_clear_of_its_neighbours() {
         }
     }
 
-    const SIR: &str = include_str!("../../../../test/test-models/samples/SIR/SIR.xmile");
+    const SIR: &str = include_str!("../../../test/test-models/samples/SIR/SIR.xmile");
     let project = simlin_formats::compat::open_xmile(&mut std::io::BufReader::new(SIR.as_bytes()))
         .expect("SIR imports");
     let (infectious_in, mut infectious_out) = stock_lists(&project, "infectious");
@@ -703,7 +703,7 @@ fn a_flow_created_on_an_imported_view_lands_clear_of_its_neighbours() {
     assert_eq!(relapse.points.len(), 2, "{row}: a straight pipe");
     assert_slot_keeps_spacing(&new, "relapse", row);
 
-    const MARK2: &str = include_str!("../../../../test/bobby/vdf/econ/mark2.mdl");
+    const MARK2: &str = include_str!("../../../test/bobby/vdf/econ/mark2.mdl");
     let project = simlin_formats::compat::open_vensim(MARK2).expect("mark2 imports");
     let (inflows, mut outflows) = stock_lists(&project, "risk_taking_behavior");
     outflows.push("probe_a".to_string());

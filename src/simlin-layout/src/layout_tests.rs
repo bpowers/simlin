@@ -1457,7 +1457,7 @@ fn test_detect_chains_claims_a_flow_only_for_its_metadata_stock() {
 #[test]
 fn test_layout_emits_a_flow_listed_by_two_stocks_once() {
     const NON_NEGATIVE: &str = include_str!(
-        "../../../../test/test-models/tests/non_negative_all/test_non_negative_all1.xmile"
+        "../../../test/test-models/tests/non_negative_all/test_non_negative_all1.xmile"
     );
     let project =
         simlin_formats::compat::open_xmile(&mut std::io::BufReader::new(NON_NEGATIVE.as_bytes()))
@@ -5584,7 +5584,7 @@ fn test_aux_lane_clearance_fans_multiple_direct_flow_inputs() {
 /// filter must map that back to the module name so the layout edge is preserved.
 #[test]
 fn test_module_output_dep_preserved_with_db_state() {
-    use crate::db::{SimlinDb, sync_from_datamodel};
+    use simlin_engine::db::{SimlinDb, sync_from_datamodel};
 
     // Submodel: has an output variable named "the_output"
     let submodel = datamodel::Model {

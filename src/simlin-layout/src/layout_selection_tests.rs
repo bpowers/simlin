@@ -11,9 +11,9 @@
 //! the `crossings_tests.rs` precedent.
 
 use super::*;
-use crate::layout::metrics::{MetricWeights, compute_layout_metrics};
-use crate::test_common::TestProject;
+use crate::metrics::{MetricWeights, compute_layout_metrics};
 use simlin_base::datamodel;
+use simlin_engine::test_common::TestProject;
 
 /// `TestProject::build_datamodel` synthesizes a single model named `"main"`, so
 /// every `generate_layout_with_config` call in this file targets that name.

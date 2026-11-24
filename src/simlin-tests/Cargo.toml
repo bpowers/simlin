@@ -17,7 +17,7 @@ publish = false
 # report for a person. Each lists this feature, so a plain `cargo test` links
 # none of them and `cargo clippy --all-targets --all-features` still checks them
 # all.
-instruments = ["simlin-engine/layout_eval"]
+instruments = ["simlin-layout/layout_eval"]
 # The Excel data provider, for the corpus models whose data is in a spreadsheet.
 ext_data = ["simlin-formats/ext_data"]
 # The loop-score tracing `ltm_full_bench` prints.
@@ -32,6 +32,7 @@ simlin-base = { path = "../simlin-base" }
 simlin-diagram = { path = "../simlin-diagram", features = ["png_render", "test-support"] }
 simlin-edit = { path = "../simlin-edit" }
 simlin-formats = { path = "../simlin-formats", features = ["file_io", "test-support"] }
+simlin-layout = { path = "../simlin-layout" }
 simlin-engine = { path = "../simlin-engine", features = ["test-support"] }
 simlin-save-check = { path = "../simlin-save-check" }
 simlin-wasmgen = { path = "../simlin-wasmgen" }

@@ -24,7 +24,7 @@ pub(super) struct AuxiliaryPlacementContext<'a> {
     dep_graph: &'a BTreeMap<String, BTreeSet<String>>,
     reverse_dep_graph: &'a BTreeMap<String, BTreeSet<String>>,
     flow_to_stocks: &'a HashMap<String, (Option<String>, Option<String>)>,
-    feedback_loops: &'a [crate::ltm_dominance::FeedbackLoop],
+    feedback_loops: &'a [simlin_engine::ltm_dominance::FeedbackLoop],
 }
 
 impl<'a> AuxiliaryPlacementContext<'a> {
@@ -32,7 +32,7 @@ impl<'a> AuxiliaryPlacementContext<'a> {
         dep_graph: &'a BTreeMap<String, BTreeSet<String>>,
         reverse_dep_graph: &'a BTreeMap<String, BTreeSet<String>>,
         flow_to_stocks: &'a HashMap<String, (Option<String>, Option<String>)>,
-        feedback_loops: &'a [crate::ltm_dominance::FeedbackLoop],
+        feedback_loops: &'a [simlin_engine::ltm_dominance::FeedbackLoop],
     ) -> Self {
         Self {
             dep_graph,
@@ -206,7 +206,7 @@ fn structural_flow_axis_for_anchor(
 fn loop_outward_unit(
     ident: &str,
     positioned: &HashMap<String, Position>,
-    feedback_loops: &[crate::ltm_dominance::FeedbackLoop],
+    feedback_loops: &[simlin_engine::ltm_dominance::FeedbackLoop],
 ) -> Option<Position> {
     for loop_info in feedback_loops {
         let chain = loop_info.causal_chain();
@@ -262,7 +262,7 @@ fn preferred_auxiliary_side(
     ident: &str,
     axis: Position,
     positioned: &HashMap<String, Position>,
-    feedback_loops: &[crate::ltm_dominance::FeedbackLoop],
+    feedback_loops: &[simlin_engine::ltm_dominance::FeedbackLoop],
 ) -> Position {
     if let Some(outward) = loop_outward_unit(ident, positioned, feedback_loops) {
         return outward;

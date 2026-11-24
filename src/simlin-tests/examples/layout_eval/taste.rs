@@ -8,9 +8,9 @@
 
 use serde::{Deserialize, Serialize};
 use simlin_base::datamodel::StockFlow;
-use simlin_engine::layout::config::LayoutConfig;
-use simlin_engine::layout::metrics::{LayoutMetrics, MetricWeights, compute_layout_metrics};
-use simlin_engine::layout::taste::{Degradation, degrade};
+use simlin_layout::config::LayoutConfig;
+use simlin_layout::metrics::{LayoutMetrics, MetricWeights, compute_layout_metrics};
+use simlin_layout::taste::{Degradation, degrade};
 
 /// The smallest relative cost increase that counts as the metric noticing a
 /// degradation. Anything below reads as indifference.

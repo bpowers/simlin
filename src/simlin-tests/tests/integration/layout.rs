@@ -7,15 +7,17 @@ use std::fs::File;
 use std::io::BufReader;
 
 use simlin_base::common::canonicalize;
-use simlin_base::datamodel::ViewElement;
-use simlin_engine::db::{SimlinDb, sync_from_datamodel_incremental};
-use simlin_engine::layout::LayoutState;
-use simlin_engine::layout::config::LayoutConfig;
-use simlin_engine::layout::{
+use simlin_base::datamodel::{self, ViewElement};
+use simlin_engine::analysis::analyze_model;
+use simlin_engine::db::{SimlinDb, sync_from_datamodel, sync_from_datamodel_incremental};
+use simlin_engine::test_common::TestProject;
+use simlin_formats::open_xmile;
+use simlin_layout::LayoutState;
+use simlin_layout::config::LayoutConfig;
+use simlin_layout::{
     compute_layout_metadata, count_view_crossings, generate_best_layout, generate_layout,
     generate_layout_with_config,
 };
-use simlin_formats::open_xmile;
 
 /// The main model name in single-model XMILE files is the empty string;
 /// `Project::get_model` maps "main" to the first model when the name is empty.
@@ -505,7 +507,7 @@ fn test_generate_layout_with_zero_reheat_does_not_panic() {
 
 #[test]
 fn test_ltm_populates_loop_importance() {
-    use simlin_engine::layout::compute_metadata;
+    use simlin_layout::compute_metadata;
 
     // The logistic growth model has known feedback loops; LTM should
     // populate importance_series for at least one.
@@ -529,8 +531,8 @@ fn test_ltm_populates_loop_importance() {
 
 #[test]
 fn test_ltm_detects_polarity() {
-    use simlin_engine::layout::compute_metadata;
     use simlin_engine::ltm_dominance::LoopPolarity;
+    use simlin_layout::compute_metadata;
 
     let project = load_project("test/logistic_growth_ltm/logistic_growth.stmx");
     let metadata = compute_metadata(&project, MAIN_MODEL, None).unwrap();
@@ -552,7 +554,7 @@ fn test_ltm_detects_polarity() {
 
 #[test]
 fn test_loops_sorted_by_average_importance() {
-    use simlin_engine::layout::compute_metadata;
+    use simlin_layout::compute_metadata;
 
     let project = load_project("test/logistic_growth_ltm/logistic_growth.stmx");
     let metadata = compute_metadata(&project, MAIN_MODEL, None).unwrap();
@@ -570,7 +572,7 @@ fn test_loops_sorted_by_average_importance() {
 
 #[test]
 fn test_compute_layout_metadata_has_dominant_periods() {
-    use simlin_engine::layout::compute_layout_metadata;
+    use simlin_layout::compute_layout_metadata;
 
     let project = load_project("test/logistic_growth_ltm/logistic_growth.stmx");
     let metadata = compute_layout_metadata(&project, MAIN_MODEL, None).unwrap();
@@ -605,7 +607,7 @@ fn test_compute_layout_metadata_has_dominant_periods() {
 
 #[test]
 fn test_compute_layout_metadata_chains_sorted() {
-    use simlin_engine::layout::compute_layout_metadata;
+    use simlin_layout::compute_layout_metadata;
 
     let project = load_project("test/test-models/samples/SIR/SIR.stmx");
     let metadata = compute_layout_metadata(&project, MAIN_MODEL, None).unwrap();
@@ -628,7 +630,7 @@ fn test_compute_layout_metadata_chains_sorted() {
 
 #[test]
 fn test_compute_layout_metadata_dep_graph() {
-    use simlin_engine::layout::compute_layout_metadata;
+    use simlin_layout::compute_layout_metadata;
 
     let project = load_project("test/test-models/samples/SIR/SIR.stmx");
     let metadata = compute_layout_metadata(&project, MAIN_MODEL, None).unwrap();
@@ -649,7 +651,7 @@ fn test_compute_layout_metadata_dep_graph() {
 /// code used the raw save_step as the series spacing.
 #[test]
 fn test_dominant_period_timestamps_respect_effective_save_cadence() {
-    use simlin_engine::layout::compute_metadata;
+    use simlin_layout::compute_metadata;
 
     // save_step (0.25) < dt (1), so effective cadence should be dt (1.0).
     let xmile = r#"<?xml version="1.0" encoding="utf-8"?>
@@ -696,7 +698,7 @@ fn test_dominant_period_timestamps_respect_effective_save_cadence() {
 /// would create a self-loop in the dep graph without the self-reference filter.
 #[test]
 fn test_dep_graph_excludes_self_references() {
-    use simlin_engine::layout::compute_layout_metadata;
+    use simlin_layout::compute_layout_metadata;
     use std::io::BufReader;
 
     let xmile = r#"<?xml version="1.0" encoding="utf-8"?>
@@ -750,7 +752,7 @@ fn test_dep_graph_excludes_self_references() {
 /// potentially adding spurious edges for constant variables.
 #[test]
 fn test_constant_variable_has_no_deps_with_salsa() {
-    use simlin_engine::layout::compute_layout_metadata;
+    use simlin_layout::compute_layout_metadata;
     use std::io::BufReader;
 
     // "capacity" is the constant name, and "cap" appears as a substring
@@ -845,8 +847,8 @@ fn test_constant_variable_has_no_deps_with_salsa() {
 fn test_compute_metadata_importance_series_length_matches_step_count() {
     use simlin_engine::Vm;
     use simlin_engine::db::compile_project_incremental;
-    use simlin_engine::layout::compute_metadata;
     use simlin_engine::test_common::TestProject;
+    use simlin_layout::compute_metadata;
 
     let project = TestProject::new("mixed_partition_proxy")
         .with_sim_time(0.0, 5.0, 1.0)
@@ -931,8 +933,8 @@ fn test_arrayed_loop_importance_matches_argmax_abs_aggregation() {
     use simlin_engine::db::{
         compile_project_incremental, model_ltm_variables, project_datamodel_dims,
     };
-    use simlin_engine::layout::compute_metadata;
     use simlin_engine::ltm_post;
+    use simlin_layout::compute_metadata;
     use std::collections::HashMap;
 
     let project = load_project("test/arrayed_population_ltm/arrayed_population.stmx");
@@ -1381,7 +1383,7 @@ fn collect_element_positions(
 fn test_incremental_add_aux() {
     use simlin_base::datamodel;
     use simlin_base::{ModelOperation, ModelPatch};
-    use simlin_engine::layout::incremental_layout;
+    use simlin_layout::incremental_layout;
 
     // Load SIR model and generate initial layout
     let project = load_project("test/test-models/samples/SIR/SIR.stmx");
@@ -1500,7 +1502,7 @@ fn test_incremental_combined_ops() {
     use simlin_base::datamodel;
     use simlin_base::{ModelOperation, ModelPatch, ProjectPatch};
     use simlin_edit::apply_patch;
-    use simlin_engine::layout::incremental_layout;
+    use simlin_layout::incremental_layout;
 
     // SIR model variables:
     //   stocks: susceptible, infectious, recovered
@@ -1697,7 +1699,7 @@ fn test_incremental_combined_ops() {
 fn test_incremental_fallback_to_full_layout() {
     use simlin_base::ModelPatch;
     use simlin_base::datamodel;
-    use simlin_engine::layout::incremental_layout;
+    use simlin_layout::incremental_layout;
 
     let project = load_project("test/test-models/samples/SIR/SIR.stmx");
     let model = project.get_model(MAIN_MODEL).expect("model should exist");
@@ -1871,7 +1873,7 @@ fn test_layout_hiring_no_flow_overlap() {
 fn test_incremental_add_waste_flow_goes_below() {
     use simlin_base::datamodel;
     use simlin_base::{ModelOperation, ModelPatch};
-    use simlin_engine::layout::incremental_layout;
+    use simlin_layout::incremental_layout;
 
     // Start with a simple chain: stock_a -> chain_flow -> stock_b
     let initial_model = datamodel::Model {
@@ -2047,7 +2049,7 @@ fn test_incremental_add_waste_flow_goes_below() {
 fn test_incremental_add_chain_keeps_existing_cloud_flow() {
     use simlin_base::datamodel;
     use simlin_base::{ModelOperation, ModelPatch};
-    use simlin_engine::layout::incremental_layout;
+    use simlin_layout::incremental_layout;
 
     // Start with stock_a -> waste_flow -> cloud (only outflow, goes right)
     let initial_model = datamodel::Model {
@@ -2304,7 +2306,7 @@ fn test_layout_deterministic_per_seed() {
 fn test_incremental_layout_deterministic() {
     use simlin_base::datamodel;
     use simlin_base::{ModelOperation, ModelPatch};
-    use simlin_engine::layout::incremental_layout;
+    use simlin_layout::incremental_layout;
 
     let project = load_project("test/test-models/samples/SIR/SIR.stmx");
     let old_view =
@@ -2475,9 +2477,9 @@ fn test_flow_endpoints_geometrically_attached_to_stocks() {
 fn test_incremental_two_word_label_round_trips_every_format() {
     use simlin_base::datamodel;
     use simlin_base::{ModelOperation, ModelPatch};
-    use simlin_engine::layout::incremental_layout;
     use simlin_formats::buffa::Message;
     use simlin_formats::{json, project_io, serde as project_serde};
+    use simlin_layout::incremental_layout;
 
     let project = load_project("test/test-models/samples/teacup/teacup_w_diagram.xmile");
     let old_view = match project.get_model(MAIN_MODEL).unwrap().views.first() {
@@ -2578,4 +2580,72 @@ fn test_incremental_two_word_label_round_trips_every_format() {
         laid_out,
         "XMILE round trip"
     );
+}
+
+/// Dominant periods begin and end at the rows' own times, in the analysis
+/// and in the layout's metadata alike. A population whose births loop
+/// leads until its crowding loop takes over, saved every 0.3 at a DT of
+/// 0.25: the rows are not evenly spaced, so a boundary counted in save
+/// steps from the start would be at no row's time.
+#[test]
+fn dominant_periods_begin_and_end_at_the_rows_times() {
+    let mut project = TestProject::new("crowding")
+        .with_sim_time(0.0, 30.0, 0.25)
+        .stock("population", "10", &["births"], &["deaths"], None)
+        .flow("births", "population * 0.3", None)
+        .flow("deaths", "population * population / 1000", None)
+        .build_datamodel();
+    project.sim_specs.save_step = Some(datamodel::Dt::Dt(0.3));
+    let specs = simlin_base::results::Specs::from(&project.sim_specs);
+    let rows: Vec<f64> = (0..specs.n_chunks as u64)
+        .map(|row| specs.time_at(specs.saved_row_step(row) as u64))
+        .collect();
+
+    let mut db = SimlinDb::default();
+    let sp = sync_from_datamodel(&db, &project).project;
+    let analysis = analyze_model(&project, &mut db, sp, "main", None).expect("analysis");
+    let layout = compute_layout_metadata(&project, "main", None).expect("layout metadata");
+    for (surface, periods) in [
+        ("the analysis", &analysis.dominant_loops_by_period),
+        ("the layout", &layout.dominant_periods),
+    ] {
+        assert!(
+            periods.len() >= 2,
+            "{surface}: dominance changes hands: {periods:?}"
+        );
+        for period in periods.iter() {
+            for time in [period.start, period.end] {
+                assert!(rows.contains(&time), "{surface}: {time} is no row's time");
+            }
+        }
+        // The handover is at a row a cadence of 0.3 would put elsewhere.
+        let handover = periods[1].start;
+        let row = rows.iter().position(|&t| t == handover).unwrap_or(0);
+        assert_ne!(handover, row as f64 * 0.3, "{surface}");
+    }
+
+    // Saved every 0.5, on the grid, the rows' times are the cadence's
+    // bit for bit, so the periods read from them are what a cadence
+    // gives.
+    project.sim_specs.save_step = Some(datamodel::Dt::Dt(0.5));
+    let mut db = SimlinDb::default();
+    let sp = sync_from_datamodel(&db, &project).project;
+    let analysis = analyze_model(&project, &mut db, sp, "main", None).expect("analysis");
+    let cadence: Vec<u64> = (0..analysis.time.len())
+        .map(|row| (row as f64 * 0.5).to_bits())
+        .collect();
+    let times: Vec<u64> = analysis.time.iter().map(|t| t.to_bits()).collect();
+    assert_eq!(times, cadence);
+    assert!(analysis.dominant_loops_by_period.len() >= 2);
+}
+
+#[test]
+fn layout_metadata_reads_a_repeated_flow_once() {
+    let project = TestProject::new("repeat")
+        .flow("f", "1", None)
+        .stock("s", "0", &["f", "f"], &[], None)
+        .build_datamodel();
+    let name = project.models[0].name.clone();
+    let metadata = simlin_layout::compute_metadata(&project, &name, None).expect("metadata");
+    assert_eq!(metadata.stock_to_inflows["s"], vec!["f".to_string()]);
 }

@@ -43,6 +43,7 @@ simlin-base = { path = "../simlin-base" }
 simlin-diagram = { path = "../simlin-diagram" }
 simlin-edit = { path = "../simlin-edit" }
 simlin-formats = { path = "../simlin-formats", default-features = false }
+simlin-layout = { path = "../simlin-layout" }
 simlin-engine = { version = "0.1", path = "../simlin-engine", default-features = false }
 simlin-save-check = { path = "../simlin-save-check" }
 simlin-tools = { path = "../simlin-tools", default-features = false, optional = true }

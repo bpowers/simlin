@@ -17,24 +17,16 @@ ai_info = ["dep:ed25519", "dep:base64"]
 # no /proc/self/status read, env lookup, or eprintln! dead code. Enable with
 # `--features ltm_bench` when running the `ltm_full_bench` example.
 ltm_bench = []
-# Compiles in `test_common` (the `TestProject` model builder) for OTHER crates'
-# test targets. Every neighbour module in `src/lib.rs` is `#[cfg(test)]`, but
-# `test_common` cannot be: libsimlin's and simlin-cli's tests build against this
-# crate as an external dependency, where `cfg(test)` items do not exist. Left
-# un-gated it shipped in every release build (GH #925). Consumers add it through
-# a `[dev-dependencies]` edge, so a normal `cargo build` never sees it.
+# Compiles in what OTHER crates' tests use: `test_common` (the `TestProject`
+# model builder), `testutils`, and the builders and limit overrides they drive
+# the compiler with. Those tests build against this crate as an external
+# dependency, where `cfg(test)` items do not exist. Un-gated, they would ship in
+# every release build (GH #925). Consumers add it through a `[dev-dependencies]`
+# edge, so a normal `cargo build` never sees it.
 test-support = []
-# The layout-quality eval statistics (`layout::eval_stats`). Its only consumer
-# is simlin-tests' `layout_eval` example, whose `instruments` feature turns this
-# on, so the 1,300-line module leaves every wasm/native production build. It is
-# `cfg(any(test, ...))`, so its own tests run under a plain `cargo test`.
-layout_eval = ["simlin-edit/invariants"]
 
 [dependencies]
 simlin-base = { path = "../simlin-base" }
-simlin-diagram = { path = "../simlin-diagram" }
-simlin-edit = { path = "../simlin-edit" }
-simlin-formats = { path = "../simlin-formats", default-features = false }
 smallvec = { version = "1", features = [ "union" ] }
 ed25519 = { version = "2", optional = true }
 base64 = { version = "0.22", optional = true }
@@ -49,17 +41,10 @@ salsa = "0.28.5"
 # in the dependency tree via salsa, which also provides its `salsa::Update` impl.
 indexmap = "2"
 
-rand = { version = "0.9", default-features = false, features = ["std_rng"] }
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-rayon = "1"
-
 [dev-dependencies]
 simlin-base = { path = "../simlin-base", features = ["test-support"] }
-simlin-diagram = { path = "../simlin-diagram", features = ["test-support"] }
 simlin-edit = { path = "../simlin-edit", features = ["test-support"] }
 simlin-formats = { path = "../simlin-formats", features = ["test-support", "file_io"] }
-rand = "0.9"
 proptest = "1.5"
 
 # The integration tests, examples and benches of this crate are in simlin-tests.

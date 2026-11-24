@@ -665,7 +665,7 @@ pub fn should_trigger_annealing(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::graph::{ConstrainedGraphBuilder, GraphBuilder};
+    use crate::graph::{ConstrainedGraphBuilder, GraphBuilder};
 
     fn triangle_graph() -> ConstrainedGraph<String> {
         let mut gb = GraphBuilder::new_undirected();

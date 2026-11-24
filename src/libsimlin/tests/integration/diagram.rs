@@ -56,8 +56,7 @@ fn test_diagram_sync_keeps_every_view_but_the_first() {
         .stock("population", "100", &["births"], &[], None)
         .flow("births", "population * 0.02", None)
         .build_datamodel();
-    let laid_out =
-        simlin_engine::layout::generate_best_layout(&datamodel, "main", None).expect("layout");
+    let laid_out = simlin_layout::generate_best_layout(&datamodel, "main", None).expect("layout");
     let overview = datamodel::View::StockFlow(datamodel::StockFlow {
         zoom: 0.5,
         ..laid_out

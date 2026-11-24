@@ -211,7 +211,7 @@ fn test_finish_flow_geometry_collapses_a_stub_under_the_minimum() {
 /// within the time budget.
 #[test]
 fn test_fresh_layout_holds_the_flow_invariants() {
-    const LEAKY: &str = include_str!("../../../../test/conveyors/leaky_conveyor.xmile");
+    const LEAKY: &str = include_str!("../../../test/conveyors/leaky_conveyor.xmile");
     let project =
         simlin_formats::compat::open_xmile(&mut std::io::BufReader::new(LEAKY.as_bytes()))
             .expect("leaky_conveyor imports");

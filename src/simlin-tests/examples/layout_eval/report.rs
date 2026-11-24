@@ -10,8 +10,8 @@
 use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
-use simlin_engine::layout::eval_stats::{Comparison, CorpusReport, ModelStats};
-use simlin_engine::layout::metrics::{LayoutMetrics, MetricWeights};
+use simlin_layout::eval_stats::{Comparison, CorpusReport, ModelStats};
+use simlin_layout::metrics::{LayoutMetrics, MetricWeights};
 
 use crate::corpus::{Reference, Tier};
 use crate::render::Render;

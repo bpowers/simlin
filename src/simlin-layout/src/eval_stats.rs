@@ -18,7 +18,7 @@
 // The corpus sweep (Phase 3) is the imperative shell that fills these structs
 // from real layouts.
 
-use crate::layout::metrics::{LayoutMetrics, MetricWeights};
+use crate::metrics::{LayoutMetrics, MetricWeights};
 
 /// Geometric mean of strictly-positive values: `exp(mean(ln(x)))`.
 ///
