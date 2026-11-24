@@ -13,9 +13,9 @@ use crate::common::{
     Canonical, ErrorCode, ErrorKind, Ident, IdentMap, MismatchedRead, Result, canonicalize,
 };
 use crate::dimensions::Dimension;
+use crate::results::{DT_OFF, FINAL_TIME_OFF, INITIAL_TIME_OFF, TIME_OFF};
 use crate::sim_err;
 use crate::snapshot_arg::{SnapshotAccess, SnapshotArg, SnapshotIndex};
-use crate::vm::{DT_OFF, FINAL_TIME_OFF, INITIAL_TIME_OFF, TIME_OFF};
 
 use super::dimensions::UnaryOp;
 use super::expr::{BuiltinFn, Expr, SubscriptIndex, Table, VarRef};

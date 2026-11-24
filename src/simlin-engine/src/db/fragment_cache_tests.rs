@@ -1631,7 +1631,7 @@ fn test_is_root_shift_machineries_in_lockstep() {
     // at the implicit-var boundary.
     assert_eq!(
         root_layout.get("aaa").expect("aaa").offset,
-        crate::vm::IMPLICIT_VAR_COUNT,
+        crate::results::IMPLICIT_VAR_COUNT,
         "the first body variable must start at IMPLICIT_VAR_COUNT in the root layout"
     );
 
@@ -1710,7 +1710,7 @@ fn test_is_root_shift_machineries_in_lockstep() {
     assert_eq!(sim.get_offset(&crate::common::Ident::new("time")), Some(0));
     assert_eq!(
         sim.get_offset(&crate::common::Ident::new("aaa")),
-        Some(crate::vm::IMPLICIT_VAR_COUNT)
+        Some(crate::results::IMPLICIT_VAR_COUNT)
     );
 }
 

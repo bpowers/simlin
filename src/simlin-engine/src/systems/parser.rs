@@ -902,7 +902,7 @@ mod tests {
     }
 
     /// A stock is not given one of the run's clock names
-    /// (`db::IMPLICIT_GLOBALS`): one row per name, in each spelling the format
+    /// (`results::IMPLICIT_GLOBALS`): one row per name, in each spelling the format
     /// allows, at every place a line names a stock, each refused with the
     /// stock as written and its line. A name that only contains a clock name
     /// is a name like any other. Which builtin names stay legal is
@@ -918,7 +918,7 @@ mod tests {
             "[A] > {}(0, 5) @ 2",
             "A > {}",
         ];
-        for clock in crate::db::IMPLICIT_GLOBALS {
+        for clock in crate::results::IMPLICIT_GLOBALS {
             let mut title = clock.to_string();
             title[..1].make_ascii_uppercase();
             for name in [clock.to_string(), clock.to_uppercase(), title] {

@@ -14,6 +14,7 @@ use crate::bytecode::{
 };
 use crate::common::{Canonical, Error, ErrorCode, ErrorKind, Ident, IdentMap, Result};
 use crate::dimensions::match_dimensions_two_pass;
+use crate::results::{DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, TIME_OFF};
 #[allow(unused_imports)]
 pub use crate::results::{Method, Results, Specs};
 use crate::sim_err;
@@ -47,12 +48,6 @@ struct IterState {
     /// Total number of elements to iterate
     size: usize,
 }
-
-pub(crate) const TIME_OFF: usize = 0;
-pub(crate) const DT_OFF: usize = 1;
-pub(crate) const INITIAL_TIME_OFF: usize = 2;
-pub(crate) const FINAL_TIME_OFF: usize = 3;
-pub(crate) const IMPLICIT_VAR_COUNT: usize = 4;
 
 pub(crate) fn is_truthy(n: f64) -> bool {
     let is_false = crate::float::approx_eq(n, 0.0);

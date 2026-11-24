@@ -1339,7 +1339,7 @@ impl<'a> ConveyorPass<'a> {
         };
         // unit = floor(start + round((time - start) / dt) * dt) as i64.
         f.instruction(&f64_const(self.start));
-        emit_load_curr(f, crate::vm::TIME_OFF);
+        emit_load_curr(f, crate::results::TIME_OFF);
         f.instruction(&f64_const(self.start));
         f.instruction(&Ins::F64Sub);
         f.instruction(&f64_const(self.dt));

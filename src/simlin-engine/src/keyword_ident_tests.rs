@@ -735,7 +735,7 @@ fn a_variable_named_like_a_builtin_is_scored_under_ltm() {
 }
 
 /// A variable named for one of the slots the VM keeps for the clock and the
-/// run's specs (`vm::TIME_OFF`, `DT_OFF`, `INITIAL_TIME_OFF`,
+/// run's specs (`results::TIME_OFF`, `DT_OFF`, `INITIAL_TIME_OFF`,
 /// `FINAL_TIME_OFF`) takes that slot's key in the results: the column of
 /// the name is the variable's series, and the clock is read from its slot.
 #[test]

@@ -372,7 +372,7 @@ Integration is Euler-only.
     Unifying that rule is the compiler's work; until it is one rule, a rename that would have to choose is refused, changing nothing (`patch::Reader`): when the old or the new name is a dimension's (XMILE 1.0 section 3.7.1 requires dimension names to differ from variable names), when the variable is written alone in a subscript (or at an end of a range there) and its old or new name is an element of a dimension, and when a reference's new spelling is a `dimension·element`.
     Never replace the refusal with a reading of the brackets: a second resolver of one spelling drifts exactly where the rule is non-trivial, and this one has three.
   - A rename refuses a new name that contains `"`, which has no spelling.
-    It does not give a variable the name of one of the run's clock slots (`db::IMPLICIT_GLOBALS`, asked through `db::is_implicit_global`: the time, the time step, the initial and the final time): a variable of that name takes the slot's results key, where hosts read the clock, so the rule is deliberately stricter than the compiler, which resolves the quoted name.
+    It does not give a variable the name of one of the run's clock slots (`results::IMPLICIT_GLOBALS`, asked through `results::is_implicit_global`: the time, the time step, the initial and the final time): a variable of that name takes the slot's results key, where hosts read the clock, so the rule is deliberately stricter than the compiler, which resolves the quoted name.
     A model that already declares one keeps it, its display spelling included, and renaming it away respells its quoted references and leaves the bare words, which are the builtin.
     Another builtin's name (`pi`) is not refused: the printer quotes it.
   - The standing test of a rename is the run: it is refused and changes nothing, or the model computes after it what it computed before (`patch_rename_tests.rs`, on fixtures that name every refusal in the default suite, and on a corpus sample in the gates, which holds no name the subscript rule refuses).
@@ -418,7 +418,7 @@ Integration is Euler-only.
   The `.pb` files are never rewritten -- bytes a current writer produces pin nothing about reading old ones -- and the test holds each to its SHA-256.
   `deserialize` returns a `ProtobufDecode` error, with what is missing and where, for a message that lacks what every writer writes and the reader has no reading for: the project's sim specs, a variable's kind or equation, an equation's kind, a view element's kind, a table's scales (an empty buffer decodes to such a message).
 - `systems/` is the line-oriented systems format.
-  Its reader refuses a stock named for one of the run's clock slots (`db::is_implicit_global`, the rule a rename keeps), naming the stock and its line: a variable of that name takes the slot's results key, where hosts read the clock.
+  Its reader refuses a stock named for one of the run's clock slots (`results::is_implicit_global`, the rule a rename keeps), naming the stock and its line: a variable of that name takes the slot's results key, where hosts read the clock.
   Another builtin's name (`pi`, `time_step`) is a stock like any other, which the translator quotes.
   `data_provider/` resolves `GET DIRECT` references (`FilesystemDataProvider` behind `file_io`).
   `json.rs` and `json_sdai.rs` are the JSON schemas.

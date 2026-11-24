@@ -710,7 +710,7 @@ mod tests {
 
     /// A stock named like a zero-argument builtin, every name and alias, is
     /// either refused or read as the stock, and which is decided by the one
-    /// definition of the run's clock names (`db::is_implicit_global`): a clock
+    /// definition of the run's clock names (`results::is_implicit_global`): a clock
     /// name is refused (every spelling and place a line names a stock is
     /// `parser::tests::a_stock_named_for_the_clock_is_refused`), and any other
     /// is read as the stock in every equation the translation writes: a rate
@@ -732,11 +732,13 @@ mod tests {
             .filter(|sig| sig.max_args == Some(0))
             .flat_map(|sig| std::iter::once(sig.name).chain(sig.aliases.iter().copied()))
             .filter(|name| *name != "inf")
-            .partition(|name| crate::db::is_implicit_global(name));
+            .partition(|name| crate::results::is_implicit_global(name));
         // Every clock name is a builtin's, so the partition saw each of them.
         assert_eq!(
             clock.iter().collect::<HashSet<_>>(),
-            crate::db::IMPLICIT_GLOBALS.iter().collect::<HashSet<_>>()
+            crate::results::IMPLICIT_GLOBALS
+                .iter()
+                .collect::<HashSet<_>>()
         );
         assert!(!names.is_empty());
         for model in models {

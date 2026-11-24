@@ -294,10 +294,11 @@ impl EmitCtx<'_> {
     }
 }
 
-// Reserved global slots (absolute, module-independent), mirroring `crate::vm`.
-// `Apply` reads `curr[TIME_OFF]` / `curr[DT_OFF]` for the time-driven builtins.
-const TIME_OFF: u16 = 0;
-const DT_OFF: u16 = 1;
+// The clock's slots (absolute, module-independent) as the immediates a global
+// load takes. `Apply` reads `curr[TIME_OFF]` / `curr[DT_OFF]` for the
+// time-driven builtins.
+const TIME_OFF: u16 = crate::results::TIME_OFF as u16;
+const DT_OFF: u16 = crate::results::DT_OFF as u16;
 
 pub(crate) fn memarg(addr: u64) -> MemArg {
     MemArg {

@@ -248,10 +248,10 @@ fn render_var_ref(v: &SymVarRef) -> String {
 /// golden reads as a program.
 fn global_var_name(off: u16) -> &'static str {
     match off as usize {
-        crate::vm::TIME_OFF => "time",
-        crate::vm::DT_OFF => "dt",
-        crate::vm::INITIAL_TIME_OFF => "initial_time",
-        crate::vm::FINAL_TIME_OFF => "final_time",
+        crate::results::TIME_OFF => "time",
+        crate::results::DT_OFF => "dt",
+        crate::results::INITIAL_TIME_OFF => "initial_time",
+        crate::results::FINAL_TIME_OFF => "final_time",
         _ => "<not-an-implicit-global>",
     }
 }

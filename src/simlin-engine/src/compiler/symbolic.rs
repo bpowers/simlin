@@ -679,7 +679,9 @@ impl VariableLayout {
     /// flattened), so the two cannot diverge on the reservation amount, the
     /// implicit-global slots, or the body offset.
     pub(crate) fn root_shifted(&self) -> VariableLayout {
-        use crate::vm::{DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, TIME_OFF};
+        use crate::results::{
+            DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, TIME_OFF,
+        };
 
         let mut entries = HashMap::with_capacity(self.entries.len() + IMPLICIT_VAR_COUNT);
         entries.insert(

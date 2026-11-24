@@ -93,7 +93,7 @@ pub enum ModelOperation {
     /// is a dimension's, and when the variable is written alone in a
     /// subscript (or at an end of a range there) and its old or new name is an
     /// element of a dimension. Refused too when the new name is one of the
-    /// run's clock slots (`db::is_implicit_global`: the time, the time step,
+    /// run's clock slots (`results::is_implicit_global`: the time, the time step,
     /// the initial and the final time): a variable of that name takes the
     /// slot's results key, so a rename does not give a variable one, though
     /// the compiler resolves the quoted name; a model that already declares
@@ -1108,12 +1108,12 @@ fn apply_rename_variable(
 
     // A rename does not give a variable the name of one of the run's clock
     // slots -- the time, the time step, the initial and the final time
-    // (`db::is_implicit_global`); a model that already declares one keeps it.
+    // (`results::is_implicit_global`); a model that already declares one keeps it.
     // The compiler resolves such a name written quoted, so the rule is
     // stricter than it: a variable of that name takes the slot's key in the
     // results, where every host reads the clock. Another builtin's name
     // (`pi`, `if`) is not refused; the printer quotes it.
-    if crate::db::is_implicit_global(new_ident.as_str()) {
+    if crate::results::is_implicit_global(new_ident.as_str()) {
         return Err(Error::new(
             ErrorKind::Model,
             ErrorCode::DuplicateVariable,

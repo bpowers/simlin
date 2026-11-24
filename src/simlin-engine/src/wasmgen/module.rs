@@ -58,7 +58,7 @@ use std::collections::HashMap;
 use crate::bytecode::{ByteCode, CompiledModule, Opcode};
 use crate::conveyor_compile::ConveyorPlan;
 use crate::queue_compile::{CouplingTable, QueuePlan};
-use crate::results::{Method, Specs};
+use crate::results::{DT_OFF, FINAL_TIME_OFF, INITIAL_TIME_OFF, Method, Specs, TIME_OFF};
 use crate::vm::{CompiledSimulation, ModuleKey, StepPart};
 
 use super::WasmGenError;
@@ -69,12 +69,6 @@ use super::lower::{
 };
 use super::passes::{self, QueuePass, QueuePassLayout, QueuePassLocals};
 use super::split::{self, ProgramHelper, ProgramSplitter};
-
-// Reserved global slots, mirroring `crate::vm`.
-const TIME_OFF: usize = 0;
-const DT_OFF: usize = 1;
-const INITIAL_TIME_OFF: usize = 2;
-const FINAL_TIME_OFF: usize = 3;
 
 const SLOT_SIZE: u32 = 8;
 const WASM_PAGE_SIZE: u32 = 65536;

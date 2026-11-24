@@ -815,7 +815,7 @@ enum SccVerdict {
 /// **Why symbolic (GH #575).** The prior builder keyed the element graph
 /// on raw `Expr::AssignCurr` operands, which are *per-variable mini-slots*
 /// (a private per-variable layout in which every member's own variable sat
-/// at `crate::vm::IMPLICIT_VAR_COUNT`, its own deps after it). Those slots are
+/// at `crate::results::IMPLICIT_VAR_COUNT`, its own deps after it). Those slots are
 /// NOT model-global, so for a multi-member
 /// SCC every member's write-slots collided and every cross-member read
 /// landed on the *reading* member's private dep mini-slots -- ZERO

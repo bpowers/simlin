@@ -7,8 +7,26 @@ use std::io::Write;
 use crate::common::{Canonical, Ident, IdentMap};
 use crate::datamodel::{Dt, SimMethod, SimSpecs};
 
-/// The slot of a results row that holds its time: the VM's own.
-pub(crate) const TIME_OFF: usize = crate::vm::TIME_OFF;
+/// The slots every row of a run begins with: the clock's, which a model's own
+/// variables come after. Both backends keep them in these places.
+pub(crate) const TIME_OFF: usize = 0;
+pub(crate) const DT_OFF: usize = 1;
+pub(crate) const INITIAL_TIME_OFF: usize = 2;
+pub(crate) const FINAL_TIME_OFF: usize = 3;
+pub(crate) const IMPLICIT_VAR_COUNT: usize = 4;
+
+/// The names of the run's clock slots, by canonical name: the time, the time
+/// step, and the initial and final time. A bare word of these is the builtin
+/// (`Expr0::new` makes a call of it), and a variable a model declares under
+/// one takes that slot's results key, so a rename does not give a variable
+/// one (`patch::apply_rename_variable`).
+pub(crate) const IMPLICIT_GLOBALS: [&str; IMPLICIT_VAR_COUNT] =
+    ["time", "dt", "initial_time", "final_time"];
+
+/// Whether `name`, a canonical name, is one of [`IMPLICIT_GLOBALS`].
+pub(crate) fn is_implicit_global(name: &str) -> bool {
+    IMPLICIT_GLOBALS.contains(&name)
+}
 
 #[derive(Debug, PartialEq, Eq, Hash, Copy, Clone)]
 pub enum Method {
