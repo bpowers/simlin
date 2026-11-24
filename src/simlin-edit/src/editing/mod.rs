@@ -15,6 +15,7 @@
 //! begins, paths live inline (`geometry::Path`), and routing queries obstacles
 //! by region.
 
+mod among_stocks;
 mod base;
 mod edit_view;
 mod geometry;
@@ -55,7 +56,6 @@ pub(crate) use edit_view::{derived_operations, edited_view};
 // The flow geometry incremental layout routes through when an edit re-attaches
 // a drawn flow, so a tool edit's pipes are drawn by the same core as a touch
 // edit's.
-pub use heal::heal;
+pub use among_stocks::{heal, route, route_end};
 pub use path::{arc_position, path_length, place_valve, point_at_arc};
-pub use route::{route, route_end};
 pub use terminal::{CloudRef, FlowGeometry, flow_terminals, free_terminal, target_stock_terminal};

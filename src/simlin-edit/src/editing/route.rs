@@ -1130,7 +1130,7 @@ pub(crate) fn route_between<O: Obstacles + ?Sized>(
 /// endpoints on the terminal stocks, in this frame's coordinates, for the slot
 /// preference; `obstacles` are the view's stocks in this frame's coordinates.
 /// A non-finite terminal returns the base flow unchanged.
-pub fn route<O: Obstacles + ?Sized>(
+pub(crate) fn route<O: Obstacles + ?Sized>(
     source: Terminal,
     sink: Terminal,
     base: &Flow,
@@ -1177,7 +1177,7 @@ pub fn route<O: Obstacles + ?Sized>(
 ///
 /// The valve keeps its arc-length distance from the fixed end. A non-finite
 /// terminal returns the base flow unchanged.
-pub fn route_end<O: Obstacles + ?Sized>(
+pub(crate) fn route_end<O: Obstacles + ?Sized>(
     flow: &Flow,
     end: FlowEnd,
     terminal: Terminal,
