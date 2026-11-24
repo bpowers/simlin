@@ -4,13 +4,11 @@
 
 use simlin_base::datamodel::{self, ModuleReference};
 
-#[cfg(test)]
 fn optional_vec(slice: &[&str]) -> Vec<String> {
     slice.iter().map(|id| id.to_string()).collect()
 }
 
-#[cfg(test)]
-pub(crate) fn x_aux(ident: &str, eqn: &str, units: Option<&str>) -> datamodel::Variable {
+pub fn x_aux(ident: &str, eqn: &str, units: Option<&str>) -> datamodel::Variable {
     use datamodel::{Aux, Equation, Variable};
     Variable::Aux(Aux {
         ident: ident.to_string(),
@@ -24,8 +22,7 @@ pub(crate) fn x_aux(ident: &str, eqn: &str, units: Option<&str>) -> datamodel::V
     })
 }
 
-#[cfg(test)]
-pub(crate) fn x_stock(
+pub fn x_stock(
     ident: &str,
     eqn: &str,
     inflows: &[&str],
@@ -46,8 +43,7 @@ pub(crate) fn x_stock(
     })
 }
 
-#[cfg(test)]
-pub(crate) fn x_model(ident: &str, variables: Vec<datamodel::Variable>) -> datamodel::Model {
+pub fn x_model(ident: &str, variables: Vec<datamodel::Variable>) -> datamodel::Model {
     datamodel::Model {
         name: ident.to_string(),
         sim_specs: None,
@@ -59,8 +55,7 @@ pub(crate) fn x_model(ident: &str, variables: Vec<datamodel::Variable>) -> datam
     }
 }
 
-#[cfg(test)]
-pub(crate) fn x_project(
+pub fn x_project(
     sim_specs: datamodel::SimSpecs,
     models: &[datamodel::Model],
 ) -> datamodel::Project {
@@ -75,12 +70,7 @@ pub(crate) fn x_project(
     }
 }
 
-#[cfg(test)]
-pub(crate) fn x_module(
-    ident: &str,
-    refs: &[(&str, &str)],
-    units: Option<&str>,
-) -> datamodel::Variable {
+pub fn x_module(ident: &str, refs: &[(&str, &str)], units: Option<&str>) -> datamodel::Variable {
     x_module_named(ident, ident, refs, units)
 }
 
@@ -93,8 +83,7 @@ pub(crate) fn x_module(
 /// Each `refs` entry is a datamodel `(src, dst)` pair, where `dst` is written
 /// from the PARENT's perspective and so carries the module variable's own ident
 /// as a prefix (`"to_b.input"`); lowering strips that prefix.
-#[cfg(test)]
-pub(crate) fn x_module_named(
+pub fn x_module_named(
     ident: &str,
     model_name: &str,
     refs: &[(&str, &str)],
@@ -123,8 +112,7 @@ pub(crate) fn x_module_named(
 
 /// A per-element arrayed aux over one dimension: `elements` pairs each
 /// element name with that element's equation.
-#[cfg(test)]
-pub(crate) fn x_arrayed(ident: &str, dim: &str, elements: &[(&str, &str)]) -> datamodel::Variable {
+pub fn x_arrayed(ident: &str, dim: &str, elements: &[(&str, &str)]) -> datamodel::Variable {
     datamodel::Variable::Aux(datamodel::Aux {
         ident: ident.to_string(),
         equation: datamodel::Equation::Arrayed(
@@ -145,8 +133,7 @@ pub(crate) fn x_arrayed(ident: &str, dim: &str, elements: &[(&str, &str)]) -> da
     })
 }
 
-#[cfg(test)]
-pub(crate) fn x_flow(ident: &str, eqn: &str, units: Option<&str>) -> datamodel::Variable {
+pub fn x_flow(ident: &str, eqn: &str, units: Option<&str>) -> datamodel::Variable {
     use datamodel::{Equation, Flow, Variable};
     Variable::Flow(Flow {
         ident: ident.to_string(),
@@ -160,8 +147,7 @@ pub(crate) fn x_flow(ident: &str, eqn: &str, units: Option<&str>) -> datamodel::
     })
 }
 
-#[cfg(test)]
-pub(crate) fn sim_specs_with_units(time_units: &str) -> simlin_base::datamodel::SimSpecs {
+pub fn sim_specs_with_units(time_units: &str) -> simlin_base::datamodel::SimSpecs {
     simlin_base::datamodel::SimSpecs {
         start: 0.0,
         stop: 0.0,
@@ -174,8 +160,7 @@ pub(crate) fn sim_specs_with_units(time_units: &str) -> simlin_base::datamodel::
 
 /// A minimal single-stock feedback loop project used across multiple test modules.
 /// Contains population (stock), births (flow), and birth_rate (aux) in a positive loop.
-#[cfg(test)]
-pub(crate) fn feedback_loop_project() -> simlin_base::datamodel::Project {
+pub fn feedback_loop_project() -> simlin_base::datamodel::Project {
     simlin_base::datamodel::Project {
         name: "feedback".to_string(),
         sim_specs: simlin_base::datamodel::SimSpecs {

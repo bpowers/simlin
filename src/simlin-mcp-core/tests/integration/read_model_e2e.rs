@@ -349,6 +349,10 @@ async fn read_model_uncompilable_loop_surfaces_analysis_error() {
         output.loop_dominance.is_empty(),
         "loop_dominance must be empty when the model can't be compiled for LTM"
     );
+    assert!(
+        !output.model.stocks.is_empty() && !output.model.flows.is_empty(),
+        "the model must still carry its stock and flow"
+    );
 
     // It reaches the wire (serialized) shape under camelCase.
     let value = serde_json::to_value(&output).unwrap();

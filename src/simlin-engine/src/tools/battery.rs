@@ -66,7 +66,7 @@
 //!   sees its structure.
 //!
 //! The targeted tests' default targets are the constants that reach a stock,
-//! by any read (`analysis::model_reads`): as the run goes, or as it starts,
+//! by any read (`model_reads::model_reads`): as the run goes, or as it starts,
 //! where a stock starts from one. They leave out the model's unit
 //! conversions: a constant whose value is one of its units (`1e6 tons/Mton`,
 //! `one_year = 1 year`) changes the units a quantity is counted in, not the
@@ -1479,7 +1479,7 @@ fn fitted(
 }
 
 /// What reads each of a model's variables, by canonical ident
-/// (`analysis::model_reads`, the one owner of it): the reads made as the run
+/// (`model_reads::model_reads`, the one owner of it): the reads made as the run
 /// goes and those made only as it starts.
 pub(crate) struct Graph {
     readers: HashMap<String, Vec<Read>>,
@@ -1496,8 +1496,11 @@ struct Read {
 impl Graph {
     fn of(db: &crate::db::SimlinDb, resolved: &ResolvedModel<'_>) -> Graph {
         let mut readers: HashMap<String, Vec<Read>> = HashMap::new();
-        for read in crate::analysis::model_reads(db, resolved.source_model, resolved.source_project)
-        {
+        for read in crate::tools::model_reads::model_reads(
+            db,
+            resolved.source_model,
+            resolved.source_project,
+        ) {
             readers.entry(read.from).or_default().push(Read {
                 reader: read.to,
                 start_only: read.start_only,

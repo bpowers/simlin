@@ -7,19 +7,13 @@
 //! This module provides `analyze_model()`, which takes a `datamodel::Project`
 //! along with a `SimlinDb` and `SourceProject` for incremental compilation,
 //! runs the full LTM discovery pipeline, and returns a `ModelAnalysis` with
-//! the model snapshot (views stripped), time array, per-loop importance series,
-//! and dominant-period intervals.  When the model cannot be compiled for LTM
-//! analysis the function still returns `Ok` (so callers can display the model
-//! snapshot), but with empty loop fields and the actionable compile error in
+//! the time array, per-loop importance series, and dominant-period intervals.
+//! When the model cannot be compiled for LTM analysis the function still
+//! returns `Ok`, but with empty loop fields and the actionable compile error in
 //! `ModelAnalysis::analysis_error` -- so "could not analyse" is distinguishable
 //! from "no loops" (GH #660).
 
-use std::collections::{HashMap, HashSet};
-
 use crate::db::{SimlinDb, SourceProject};
-use crate::json;
-use crate::json_sdai::{Polarity, Relationship};
-use crate::ltm::LinkPolarity;
 use crate::ltm_dominance::{self, DominantPeriod, FeedbackLoop};
 use simlin_base::datamodel;
 
@@ -52,7 +46,6 @@ pub struct LoopSummary {
 
 /// Complete analysis results for a model.
 pub struct ModelAnalysis {
-    pub model: json::Model,
     pub time: Vec<f64>,
     pub loop_dominance: Vec<LoopSummary>,
     /// The cycle partitions referenced by `loop_dominance` (indexed by each
@@ -110,26 +103,22 @@ pub struct ModelAnalysis {
     pub universe_loops: Option<usize>,
 }
 
-/// Build a `json::Model` from the named model in a `datamodel::Project`, with
-/// the `views` field cleared so the snapshot is diagram-free.
-///
-/// Returns `None` when the requested model name is not found and is not the
-/// "main" convenience alias.
-fn model_snapshot(project: &datamodel::Project, model_name: &str) -> Option<json::Model> {
+/// The model [`analyze_model`] analyzes for `model_name`; `Err` when no model
+/// has that name and it is not `"main"`, the convenience alias.
+pub fn analyzed_model<'a>(
+    project: &'a datamodel::Project,
+    model_name: &str,
+) -> Result<&'a datamodel::Model, String> {
     let model = if model_name == "main" {
         // "main" is a convenience alias: fall back to first model when no model
         // is explicitly named "main".
         project
             .get_model(model_name)
-            .cloned()
-            .or_else(|| project.models.first().cloned())
+            .or_else(|| project.models.first())
     } else {
-        project.get_model(model_name).cloned()
-    }?;
-
-    let mut json_model: json::Model = model.into();
-    json_model.views.clear();
-    Some(json_model)
+        project.get_model(model_name)
+    };
+    model.ok_or_else(|| format!("model '{model_name}' not found in project"))
 }
 
 /// Analyse a system-dynamics model: run LTM discovery and return the
@@ -137,15 +126,13 @@ fn model_snapshot(project: &datamodel::Project, model_name: &str) -> Option<json
 ///
 /// The caller provides a salsa `SimlinDb` and `SourceProject` (already
 /// synced from the datamodel project) for incremental compilation, plus
-/// the `datamodel::Project` for model snapshot construction and UID
-/// resolution.
+/// the `datamodel::Project` for UID resolution.
 ///
 /// A failure to *compile or simulate* the model for LTM analysis (a malformed
 /// equation, an unresolved reference, or a `Vm::new`/`run_to_end` failure) is
 /// NOT collapsed into a silent empty result:
-/// `Ok` is returned with the model snapshot, empty loop fields, AND
-/// `ModelAnalysis::analysis_error` set to the actionable error message, so a
-/// caller asking "what loops does this model have?" can tell "could not
+/// `Ok` is returned with empty loop fields AND `ModelAnalysis::analysis_error`
+/// set to the actionable error message, so a caller asking "what loops does this model have?" can tell "could not
 /// analyse" apart from "no loops" (GH #660).
 /// A non-compile structural edge case (e.g. the model is absent from the
 /// causal graph) still degrades gracefully to empty loop fields with
@@ -167,20 +154,18 @@ pub fn analyze_model(
     model_name: &str,
     budget: Option<std::time::Duration>,
 ) -> Result<ModelAnalysis, String> {
-    let json_model = model_snapshot(project, model_name)
-        .ok_or_else(|| format!("model '{model_name}' not found in project"))?;
+    analyzed_model(project, model_name)?;
 
     // A cyclic / self-referential module graph reachable from the analyzed model
     // would panic the recursive causal-graph / layout queries this analysis
-    // drives. Surface it as an actionable `analysis_error` (the model snapshot is
-    // intact, loops empty), matching the non-compilable-model degradation rather
-    // than aborting (GH #806). Scoped to reachability from `model_name` so an
+    // drives. Surface it as an actionable `analysis_error` (loops empty),
+    // matching the non-compilable-model degradation rather than aborting (GH
+    // #806). Scoped to reachability from `model_name` so an
     // unrelated draft cycle elsewhere does not block analyzing a valid model.
     if let Some((_code, msg)) =
         crate::db::project_module_graph(&*db, source_project).cycle_error_from(model_name)
     {
         return Ok(ModelAnalysis {
-            model: json_model,
             time: vec![],
             loop_dominance: vec![],
             partitions: vec![],
@@ -225,7 +210,6 @@ pub fn analyze_model(
 
     match result {
         Some(result) => Ok(ModelAnalysis {
-            model: json_model,
             time: result.time,
             loop_dominance: result.loop_dominance,
             partitions: result.partitions,
@@ -238,7 +222,6 @@ pub fn analyze_model(
             universe_loops: result.universe_loops,
         }),
         None => Ok(ModelAnalysis {
-            model: json_model,
             time: vec![],
             loop_dominance: vec![],
             partitions: vec![],
@@ -758,82 +741,6 @@ fn build_time_array(results: &simlin_base::results::Results) -> Vec<f64> {
         .collect()
 }
 
-/// Generate SD-AI relationships from pre-computed equation dependency
-/// polarities.
-///
-/// Takes the polarity map produced by `compute_link_polarities()` and the
-/// datamodel, filters out stock-flow structural edges (which the SD-AI
-/// conformance evaluator generates independently), and maps remaining
-/// equation-derived edges to `Relationship` values with computed polarity.
-pub fn generate_relationships(
-    polarities: &HashMap<(String, String), LinkPolarity>,
-    model: &datamodel::Model,
-) -> Vec<Relationship> {
-    // Map canonical identifiers back to authored variable names so the
-    // relationships array matches the names in the variables array.
-    let canonical_to_authored: HashMap<String, &str> = model
-        .variables
-        .iter()
-        .map(|v| {
-            let authored = v.get_ident();
-            (
-                simlin_base::common::canonicalize(authored).into_owned(),
-                authored,
-            )
-        })
-        .collect();
-
-    // Stock-flow structural edges are excluded because the conformance
-    // evaluator generates them itself via makeRelationshipsFromStocks().
-    // Identifiers are canonicalized so that mixed-case names in the datamodel
-    // (e.g. stock "Population" with inflow "Births") correctly match the
-    // lowercase canonical keys produced by compute_link_polarities().
-    let mut stock_flow_edges: HashSet<(String, String)> = HashSet::new();
-    for var in &model.variables {
-        if let datamodel::Variable::Stock(stock) = var {
-            let stock_ident = simlin_base::common::canonicalize(&stock.ident).into_owned();
-            for inflow in &stock.inflows {
-                stock_flow_edges.insert((
-                    simlin_base::common::canonicalize(inflow).into_owned(),
-                    stock_ident.clone(),
-                ));
-            }
-            for outflow in &stock.outflows {
-                stock_flow_edges.insert((
-                    simlin_base::common::canonicalize(outflow).into_owned(),
-                    stock_ident.clone(),
-                ));
-            }
-        }
-    }
-
-    let mut relationships: Vec<Relationship> = polarities
-        .iter()
-        .filter(|((from, to), _)| !stock_flow_edges.contains(&(from.clone(), to.clone())))
-        // Only include edges where both endpoints are declared model
-        // variables.  This excludes simulator builtins (TIME, DT) and
-        // implicit compiler nodes ($-prefixed SMOOTH/DELAY expansions).
-        .filter_map(|((from, to), polarity)| {
-            let authored_from = canonical_to_authored.get(from)?;
-            let authored_to = canonical_to_authored.get(to)?;
-            Some(Relationship {
-                reasoning: None,
-                from: authored_from.to_string(),
-                to: authored_to.to_string(),
-                polarity: match polarity {
-                    LinkPolarity::Positive => Polarity::Positive,
-                    LinkPolarity::Negative => Polarity::Negative,
-                    LinkPolarity::Unknown => Polarity::Unknown,
-                },
-                polarity_reasoning: None,
-            })
-        })
-        .collect();
-
-    relationships.sort_by(|a, b| (&a.from, &a.to).cmp(&(&b.from, &b.to)));
-    relationships
-}
-
 /// One causal link of a model, as [`model_links`] reports it: its endpoints,
 /// its statically analyzed polarity, and, for a run under the LTM overlay, its
 /// link-score series.
@@ -1015,389 +922,6 @@ fn attach_relative_scores(links: Vec<ModelLink>) -> Vec<ModelLink> {
         })
         .collect()
 }
-
-/// One read of a model, as [`model_reads`] reports it: `to` reads `from`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ModelRead {
-    pub from: String,
-    pub to: String,
-    /// The static polarity of the causal link from `from` to `to`
-    /// ([`model_links`]), and unknown for a read that is no causal link: a
-    /// read made only when the model starts, or a table a `LOOKUP` names.
-    pub polarity: crate::ltm::LinkPolarity,
-    /// Whether `to` reads `from` only when the model starts: in a stock's
-    /// initial value, in an initial-only equation, or as an `INIT` argument.
-    /// Such a read sets where `to` starts and never moves it afterwards, so
-    /// it is no causal link and no part of a feedback loop.
-    pub start_only: bool,
-    /// Whether `from` is a table `to` looks up (`LOOKUP(from, x)`) and never
-    /// reads as a value: the table shapes `to` and is no causal link.
-    pub table: bool,
-    /// The stock's or flow's option `to` reads `from` in, when every read of
-    /// the pair is in one (a conveyor's transit time, a leak's fraction):
-    /// the engine reads it in the special-stock build, outside `to`'s
-    /// equation.
-    pub option: Option<simlin_base::datamodel::StockOption>,
-    /// Whether every read of the pair is in the text of an equation the
-    /// compiler cannot read (an unknown builtin, a wrong argument count): the
-    /// name is written there, and the equation reads it once it compiles.
-    pub unchecked: bool,
-}
-
-/// How one read of a pair was made, which the pair's [`ModelRead`] sums.
-#[derive(Clone, Copy)]
-struct ReadMade {
-    at_start: bool,
-    table: bool,
-    option: Option<simlin_base::datamodel::StockOption>,
-    unchecked: bool,
-}
-
-impl ReadMade {
-    const EQUATION: ReadMade = ReadMade {
-        at_start: false,
-        table: false,
-        option: None,
-        unchecked: false,
-    };
-}
-
-/// Whether a read in `phase` under `lag` is made only when the model starts:
-/// every read of an initial-value equation, and a per-step equation's read of
-/// the frozen initial snapshot.
-pub(crate) fn read_at_start(phase: crate::db::DepPhase, lag: crate::variable::DepLag) -> bool {
-    use crate::db::DepPhase;
-    use crate::variable::DepLag;
-    match (phase, lag) {
-        (DepPhase::Init, DepLag::Current | DepLag::Previous | DepLag::Initial) => true,
-        (DepPhase::Dt, DepLag::Initial) => true,
-        (DepPhase::Dt, DepLag::Current | DepLag::Previous) => false,
-    }
-}
-
-/// What each variable of a model reads: the one owner of "what does this
-/// variable read, and what reads it", for the agent tools' variable records,
-/// the `readers` and `reads` citations and the validation battery's reach.
-///
-/// [`model_links`] is the loops' graph and answers a different question: it
-/// holds only what moves a variable from step to step, so a constant a stock
-/// starts from, or one read inside `INIT`, has no link out of it. A model
-/// still depends on both, and "nothing reads this constant" is false of them.
-///
-/// The reads come from `variable_direct_dependencies`, in both phases and
-/// under every lag:
-///
-/// - A helper a variable's parse synthesized (a hoisted argument, a
-///   `PREVIOUS`/`INIT` capture, a `SMTH1`/`DELAY` instance) is no variable of
-///   the model, so what it reads is read by the variable it was made for.
-/// - A read through a module instance (`m·x`) is a read of the instance, as
-///   a causal link through one is.
-/// - A stock reads its flows, and the names in its initial value at the
-///   start only.
-/// - A table a `LOOKUP` names is read by the caller: the dependency set
-///   leaves it out, since a table orders nothing, but the caller does not
-///   compile without it.
-///
-/// A pair is `start_only` when every read of it is made at the start
-/// ([`read_at_start`], through an `INIT`-only capture, or as a module
-/// instance's input source that only the sub-model's start reads, which the
-/// causal edges leave out for that reason). Sorted by reader,
-/// then by what is read.
-pub fn model_reads(
-    db: &dyn crate::db::Db,
-    model: crate::db::SourceModel,
-    project: SourceProject,
-) -> Vec<ModelRead> {
-    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-
-    use crate::db::{DepRefs, ImplicitVarDeps, SourceVariable};
-    use crate::variable::SourceVariableKind;
-    use simlin_base::common::{Canonical, Ident};
-
-    /// The reads found so far, for one reader at a time.
-    struct Reads<'a> {
-        /// (reader, read) -> how every read of the pair was made, summed:
-        /// whether all are at the start, all table lookups, all in one
-        /// option, all in an unread equation's text.
-        pairs: BTreeMap<(String, String), ReadMade>,
-        declared: &'a HashMap<String, SourceVariable>,
-    }
-
-    impl Reads<'_> {
-        /// A read of `from` by `reader`. A name the model does not declare
-        /// (an equation's misspelling, a flow a stock lists that is gone) is
-        /// the reader's error, which its diagnostics report, not a read of
-        /// anything.
-        fn note(&mut self, from: &str, reader: &str, at_start: bool, table: bool) {
-            self.made(
-                from,
-                reader,
-                ReadMade {
-                    at_start,
-                    table,
-                    ..ReadMade::EQUATION
-                },
-            );
-        }
-
-        fn made(&mut self, from: &str, reader: &str, made: ReadMade) {
-            if !self.declared.contains_key(from) {
-                return;
-            }
-            self.pairs
-                .entry((reader.to_string(), from.to_string()))
-                .and_modify(|sum| {
-                    sum.at_start &= made.at_start;
-                    sum.table &= made.table;
-                    if sum.option != made.option {
-                        sum.option = None;
-                    }
-                    sum.unchecked &= made.unchecked;
-                })
-                .or_insert(made);
-        }
-
-        /// The reads `text` writes, by its references
-        /// ([`crate::patch::text_references`], the walk a rename makes), each
-        /// made as `made` says. A name alone in a subscript's brackets is a
-        /// read only when no dimension has an element of that name, as the
-        /// dependency walk reads it; a read through a module instance is a
-        /// read of the instance. `false` for a text that does not parse.
-        fn text(
-            &mut self,
-            dimensions: &simlin_base::dimensions::DimensionsContext,
-            reader: &str,
-            text: &str,
-            made: ReadMade,
-        ) -> bool {
-            let Some(references) = crate::patch::text_references(text) else {
-                return false;
-            };
-            for (site, reference) in references {
-                let name = reference.as_str();
-                let name = name.strip_prefix("self\u{00B7}").unwrap_or(name);
-                let head = name.split('\u{00B7}').next().unwrap_or(name);
-                let element = simlin_base::common::CanonicalElementName::from_raw(head);
-                if site == crate::patch::Site::Index
-                    && dimensions.is_element_of_any_dimension(&element)
-                {
-                    continue;
-                }
-                if head != reader {
-                    self.made(head, reader, made);
-                }
-            }
-            true
-        }
-
-        /// The tables `reader` looks up (a call of a name the model does not
-        /// declare is parsed as one too, and [`Reads::note`] drops it).
-        fn tables(&mut self, reader: &str, tables: &BTreeSet<Ident<Canonical>>, at_start: bool) {
-            for table in tables {
-                self.note(table.as_str(), reader, at_start, true);
-            }
-        }
-
-        /// Every read of `deps`, the reads of the node `node` (`reader`
-        /// itself or one of its helpers), as a read by `reader`, descending
-        /// into the reader's own helpers, each once (`visited`). `at_start`
-        /// says the reads are reached only through one made at the start; a
-        /// helper an `INIT` captures is read through `INIT`, whose lag
-        /// already says so, and a module instance's input source that only
-        /// its sub-model's start reads is in `start_only` (the causal edges'
-        /// `start_only_inputs`).
-        #[allow(clippy::too_many_arguments)]
-        fn record<'h>(
-            &mut self,
-            helpers: &HashMap<&'h str, &'h ImplicitVarDeps>,
-            visited: &mut HashSet<&'h str>,
-            start_only: &BTreeSet<(String, String)>,
-            reader: &str,
-            node: &str,
-            deps: &DepRefs,
-            at_start: bool,
-        ) {
-            for dep in deps.iter() {
-                let head = dep.target.head().as_str();
-                let at_start = at_start
-                    || read_at_start(dep.phase, dep.lag)
-                    || start_only.contains(&(head.to_string(), node.to_string()));
-                // A module instance's read of its own output binds nothing (a
-                // Stella import wires those as inputs), as in the causal
-                // graph.
-                if !dep.target.is_local() && head == reader {
-                    continue;
-                }
-                let Some((&name, &helper)) = helpers.get_key_value(head) else {
-                    self.note(head, reader, at_start, false);
-                    continue;
-                };
-                if visited.insert(name) {
-                    self.tables(reader, &helper.referenced_tables, at_start);
-                    self.record(
-                        helpers,
-                        visited,
-                        start_only,
-                        reader,
-                        name,
-                        &helper.deps,
-                        at_start,
-                    );
-                }
-            }
-        }
-    }
-
-    let empty_inputs = crate::db::ModuleInputSet::empty(db);
-    let dimensions = crate::db::project_dimensions_context(db, project);
-    let start_only = &crate::db::model_causal_edges(db, model, project).start_only_inputs;
-    let mut reads = Reads {
-        pairs: BTreeMap::new(),
-        declared: model.variables(db),
-    };
-    for (name, source_var) in model.variables(db).iter() {
-        // A stock's or a flow's options are expressions the special-stock
-        // build reads, outside the dependency set.
-        for (role, text) in source_var.compat(db).expression_texts() {
-            if let simlin_base::datamodel::ExpressionRole::Option(option) = role {
-                reads.text(
-                    dimensions,
-                    name,
-                    text,
-                    ReadMade {
-                        option: Some(option),
-                        ..ReadMade::EQUATION
-                    },
-                );
-            }
-        }
-        // An equation the compiler cannot read has no dependency set; the
-        // names its text writes are what it reads once it compiles.
-        if !equation_is_read(db, *source_var, project, dimensions) {
-            for (_, text) in source_var.equation(db).expression_texts() {
-                reads.text(
-                    dimensions,
-                    name,
-                    text,
-                    ReadMade {
-                        unchecked: true,
-                        ..ReadMade::EQUATION
-                    },
-                );
-            }
-        }
-        let deps = crate::db::variable_direct_dependencies(db, *source_var, project, empty_inputs);
-        let helpers: HashMap<&str, &ImplicitVarDeps> = deps
-            .implicit_vars
-            .iter()
-            .map(|helper| (helper.name.as_str(), helper))
-            .collect();
-        // A stock's equation is its initial value; what moves it is its flows.
-        let is_stock = source_var.kind(db) == SourceVariableKind::Stock;
-        if is_stock {
-            for flow in source_var
-                .inflows(db)
-                .iter()
-                .chain(source_var.outflows(db).iter())
-            {
-                reads.note(&simlin_base::canonicalize(flow), name, false, false);
-            }
-        }
-        let mut visited = HashSet::new();
-        reads.tables(name, &deps.referenced_tables, is_stock);
-        reads.record(
-            &helpers,
-            &mut visited,
-            start_only,
-            name,
-            name,
-            &deps.deps,
-            is_stock,
-        );
-    }
-
-    let polarities: HashMap<(String, String), crate::ltm::LinkPolarity> =
-        model_links(db, model, project, None, false)
-            .into_iter()
-            .map(|link| ((link.to, link.from), link.polarity))
-            .collect();
-    reads
-        .pairs
-        .into_iter()
-        .map(|((to, from), made)| {
-            let polarity = polarities
-                .get(&(to.clone(), from.clone()))
-                .copied()
-                .unwrap_or(crate::ltm::LinkPolarity::Unknown);
-            ModelRead {
-                from,
-                to,
-                polarity,
-                start_only: made.at_start,
-                table: made.table,
-                option: made.option,
-                unchecked: made.unchecked,
-            }
-        })
-        .collect()
-}
-
-/// Whether the compiler reads `var`'s equation: it parses, and its typed tree
-/// is built (`ast::typed_ast`, what the dependency walk classifies). One that
-/// is not read has no dependency set ([`model_reads`] reads its text instead).
-fn equation_is_read(
-    db: &dyn crate::db::Db,
-    var: crate::db::SourceVariable,
-    project: SourceProject,
-    dimensions: &simlin_base::dimensions::DimensionsContext,
-) -> bool {
-    if var.kind(db) == crate::variable::SourceVariableKind::Module {
-        return true;
-    }
-    let parsed = &crate::db::parse_source_variable(db, var, project).variable;
-    let typed = |ast: Option<&simlin_base::ast::Ast<simlin_base::ast::Expr0>>| {
-        ast.is_none_or(|ast| simlin_base::ast::typed_ast(ast, dimensions).is_ok())
-    };
-    let written = var
-        .equation(db)
-        .expression_texts()
-        .iter()
-        .any(|(_, text)| !text.trim().is_empty());
-    let parsed_any = parsed.ast().is_some() || parsed.init_ast().is_some();
-    (parsed_any || !written) && typed(parsed.ast()) && typed(parsed.init_ast())
-}
-
-/// The variables of a model whose reads no reader can know: an expression
-/// text of theirs that does not even parse. Sorted. A claim that a variable
-/// has no reader, or no other, cannot hold over such a model.
-pub fn model_unread_equations(
-    db: &dyn crate::db::Db,
-    model: crate::db::SourceModel,
-) -> Vec<String> {
-    let mut unread: Vec<String> = model
-        .variables(db)
-        .iter()
-        .filter(|(_, var)| {
-            let equation = var.equation(db).expression_texts();
-            let compat = var.compat(db).expression_texts();
-            equation
-                .iter()
-                .chain(compat.iter())
-                .any(|(_, text)| crate::patch::text_references(text).is_none())
-        })
-        .map(|(name, _)| name.clone())
-        .collect();
-    unread.sort();
-    unread
-}
-
-#[cfg(test)]
-#[path = "analysis_reads_tests.rs"]
-mod reads_tests;
-
-#[cfg(test)]
-#[path = "analysis_relationships_tests.rs"]
-mod relationships_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1878,26 +1402,6 @@ mod tests {
         }
     }
 
-    // ---- AC2.5: model snapshot has empty views ----
-
-    #[test]
-    fn ac2_5_views_are_empty() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../test/logistic_growth_ltm/logistic_growth.stmx"
-        );
-        let project = load_project(path);
-        let (mut db, sp) = synced_db(&project);
-        let analysis =
-            analyze_model(&project, &mut db, sp, "main", None).expect("analyze_model failed");
-
-        assert!(
-            analysis.model.views.is_empty(),
-            "model snapshot must have empty views, got {}",
-            analysis.model.views.len()
-        );
-    }
-
     // ---- AC2.6: graceful degradation on equation errors ----
 
     #[test]
@@ -1906,12 +1410,6 @@ mod tests {
         let (mut db, sp) = synced_db(&project);
         let analysis = analyze_model(&project, &mut db, sp, "main", None)
             .expect("analyze_model should not return Err");
-
-        // Model snapshot must still be present with the stock and flow.
-        assert!(
-            !analysis.model.stocks.is_empty() || !analysis.model.flows.is_empty(),
-            "model snapshot must contain variables even on simulation failure"
-        );
 
         // Loop-related fields must be empty.
         assert!(
@@ -2055,11 +1553,7 @@ mod tests {
             "the analysis_error must name the failing variable (births), got: {msg}"
         );
 
-        // The model snapshot is still intact and the loop fields stay empty.
-        assert!(
-            !analysis.model.stocks.is_empty(),
-            "model snapshot must still carry the stock"
-        );
+        // The loop fields stay empty.
         assert!(
             analysis.loop_dominance.is_empty(),
             "loop_dominance must be empty when the model can't be compiled"

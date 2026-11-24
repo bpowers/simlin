@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 
 use super::*;
-use crate::db::DepPhase;
+use crate::db::{DepPhase, SimlinDb};
 use crate::ltm::LinkPolarity;
 use crate::test_common::TestProject;
 use crate::variable::DepLag;

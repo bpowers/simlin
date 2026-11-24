@@ -447,18 +447,20 @@ fn check(
                         .map(|v| simlin_base::canonicalize(v.get_ident()).into_owned())
                 })
                 .collect::<Result<_, String>>()?;
-            let actual: std::collections::BTreeSet<String> = crate::analysis::model_reads(
-                &*ws.db,
-                resolved.source_model,
-                resolved.source_project,
-            )
-            .into_iter()
-            .filter(|l| l.from == ident)
-            .map(|l| l.to)
-            .collect();
+            let actual: std::collections::BTreeSet<String> =
+                crate::tools::model_reads::model_reads(
+                    &*ws.db,
+                    resolved.source_model,
+                    resolved.source_project,
+                )
+                .into_iter()
+                .filter(|l| l.from == ident)
+                .map(|l| l.to)
+                .collect();
             // An equation that does not parse may read the variable, so no
             // set of readers is the whole set while the model has one.
-            let unread = crate::analysis::model_unread_equations(&*ws.db, resolved.source_model);
+            let unread =
+                crate::tools::model_reads::model_unread_equations(&*ws.db, resolved.source_model);
             if !unread.is_empty() {
                 let found = if actual.is_empty() {
                     format!("no reader of {} found", var.get_ident())
@@ -517,7 +519,7 @@ fn check(
                 simlin_base::canonicalize(to.get_ident()).into_owned(),
                 simlin_base::canonicalize(from.get_ident()).into_owned(),
             );
-            let links = crate::analysis::model_reads(
+            let links = crate::tools::model_reads::model_reads(
                 &*ws.db,
                 resolved.source_model,
                 resolved.source_project,

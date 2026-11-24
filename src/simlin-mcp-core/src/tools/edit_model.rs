@@ -24,7 +24,8 @@ use crate::access::ProjectAccess;
 use crate::errors::AccessError;
 use crate::open::resolve_model_name;
 use crate::types::{
-    DominantPeriodOutput, ErrorOutput, LoopDominanceSummary, PartitionOutput, preflight_export,
+    DominantPeriodOutput, ErrorOutput, LoopDominanceSummary, PartitionOutput, model_snapshot,
+    preflight_export,
 };
 
 // ── Curated input types ───────────────────────────────────────────────
@@ -417,6 +418,7 @@ pub async fn edit_model<A: ProjectAccess>(
         None,
     )
     .map_err(|e| AccessError::ParseError(anyhow::anyhow!("analysis failed: {e}")))?;
+    let model = model_snapshot(&project, &model_name)?;
 
     // Pre-flight the on-disk writer before touching the backing store: a
     // project the format structurally cannot hold is rejected here as a
@@ -458,7 +460,7 @@ pub async fn edit_model<A: ProjectAccess>(
 
     Ok(EditModelOutput {
         project_path: path.display().to_string(),
-        model: analysis.model,
+        model,
         time: analysis.time,
         loop_dominance,
         partitions,

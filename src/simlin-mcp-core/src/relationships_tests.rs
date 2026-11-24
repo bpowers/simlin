@@ -8,12 +8,12 @@
 use std::collections::HashMap;
 
 use super::generate_relationships;
-use crate::json_sdai::Polarity;
-use crate::ltm::LinkPolarity;
+use simlin_engine::json_sdai::Polarity;
+use simlin_engine::ltm::LinkPolarity;
 
 #[test]
 fn test_generate_relationships_basic_equation_deps() {
-    use crate::testutils::{x_aux, x_model};
+    use simlin_engine::testutils::{x_aux, x_model};
 
     // Polarity map uses canonical (lowercase) keys, as returned by
     // compute_link_polarities(). Model variables use authored names.
@@ -42,7 +42,7 @@ fn test_generate_relationships_basic_equation_deps() {
 
 #[test]
 fn test_generate_relationships_flow_referencing_stock() {
-    use crate::testutils::{x_aux, x_flow, x_model, x_stock};
+    use simlin_engine::testutils::{x_aux, x_flow, x_model, x_stock};
 
     let polarities: HashMap<(String, String), LinkPolarity> = HashMap::from([
         (
@@ -77,7 +77,7 @@ fn test_generate_relationships_flow_referencing_stock() {
 
 #[test]
 fn test_generate_relationships_no_equation_no_relationships() {
-    use crate::testutils::{x_aux, x_model};
+    use simlin_engine::testutils::{x_aux, x_model};
 
     let polarities: HashMap<(String, String), LinkPolarity> =
         HashMap::from([(("A".into(), "C".into()), LinkPolarity::Positive)]);
@@ -96,7 +96,7 @@ fn test_generate_relationships_no_equation_no_relationships() {
 
 #[test]
 fn test_generate_relationships_positive_polarity() {
-    use crate::testutils::{x_aux, x_model};
+    use simlin_engine::testutils::{x_aux, x_model};
 
     let polarities: HashMap<(String, String), LinkPolarity> = HashMap::from([
         (("a".into(), "c".into()), LinkPolarity::Positive),
@@ -119,7 +119,7 @@ fn test_generate_relationships_positive_polarity() {
 
 #[test]
 fn test_generate_relationships_mixed_polarity() {
-    use crate::testutils::{x_aux, x_model};
+    use simlin_engine::testutils::{x_aux, x_model};
 
     let polarities: HashMap<(String, String), LinkPolarity> = HashMap::from([
         (("a".into(), "c".into()), LinkPolarity::Positive),
@@ -143,7 +143,7 @@ fn test_generate_relationships_mixed_polarity() {
 
 #[test]
 fn test_generate_relationships_unknown_polarity() {
-    use crate::testutils::{x_aux, x_model};
+    use simlin_engine::testutils::{x_aux, x_model};
 
     let polarities: HashMap<(String, String), LinkPolarity> =
         HashMap::from([(("x".into(), "y".into()), LinkPolarity::Unknown)]);
@@ -160,7 +160,7 @@ fn test_generate_relationships_unknown_polarity() {
 
 #[test]
 fn test_generate_relationships_filters_stock_flow_structural_edges() {
-    use crate::testutils::{x_aux, x_flow, x_model, x_stock};
+    use simlin_engine::testutils::{x_aux, x_flow, x_model, x_stock};
 
     let polarities: HashMap<(String, String), LinkPolarity> = HashMap::from([
         // structural: inflow -> stock
@@ -226,7 +226,7 @@ fn test_generate_relationships_filters_stock_flow_structural_edges() {
 
 #[test]
 fn test_generate_relationships_deterministic_ordering() {
-    use crate::testutils::{x_aux, x_model};
+    use simlin_engine::testutils::{x_aux, x_model};
 
     let polarities: HashMap<(String, String), LinkPolarity> = HashMap::from([
         (("z".into(), "out".into()), LinkPolarity::Positive),
@@ -260,7 +260,7 @@ fn test_generate_relationships_deterministic_ordering() {
 
 #[test]
 fn test_generate_relationships_empty_model() {
-    use crate::testutils::x_model;
+    use simlin_engine::testutils::x_model;
 
     let polarities: HashMap<(String, String), LinkPolarity> = HashMap::new();
     let model = x_model("main", vec![]);
@@ -276,7 +276,7 @@ fn test_generate_relationships_filters_undeclared_variables() {
     // compiler nodes from SMOOTH/DELAY expansion ($⁚-prefixed names).
     // Only relationships where both endpoints are declared model
     // variables should appear in the output.
-    use crate::testutils::{x_aux, x_model};
+    use simlin_engine::testutils::{x_aux, x_model};
 
     let polarities: HashMap<(String, String), LinkPolarity> = HashMap::from([
         // real equation-derived edge (both endpoints in model)
@@ -309,7 +309,7 @@ fn test_generate_relationships_filters_implicit_compiler_nodes() {
     // SMOOTH/DELAY builtins synthesize implicit variables with $⁚-prefixed
     // names. These are not declared model variables so they must be filtered
     // by the same model-membership guard that handles TIME/DT.
-    use crate::testutils::{x_aux, x_model};
+    use simlin_engine::testutils::{x_aux, x_model};
 
     let polarities: HashMap<(String, String), LinkPolarity> = HashMap::from([
         // real equation-derived edge
@@ -356,7 +356,7 @@ fn test_generate_relationships_uses_authored_variable_names() {
     // compute_link_polarities() returns canonical (lowercase) keys, but the
     // output relationships should use the authored variable names from the
     // model so they match the names in the variables array.
-    use crate::testutils::{x_aux, x_model};
+    use simlin_engine::testutils::{x_aux, x_model};
 
     let polarities: HashMap<(String, String), LinkPolarity> = HashMap::from([
         (
@@ -403,7 +403,7 @@ fn test_generate_relationships_filters_mixed_case_stock_flow_edges() {
     // datamodel may preserve original casing (e.g. "Population", "Births").
     // Verify that structural edges are filtered regardless of casing in the
     // datamodel, so mixed-case names do not leak into the output.
-    use crate::testutils::{x_flow, x_model, x_stock};
+    use simlin_engine::testutils::{x_flow, x_model, x_stock};
 
     let polarities: HashMap<(String, String), LinkPolarity> = HashMap::from([
         // structural inflow edge (canonical keys from compute_link_polarities)

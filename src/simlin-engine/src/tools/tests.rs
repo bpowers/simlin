@@ -770,7 +770,7 @@ fn a_call_stopped_at_any_checkpoint_leaves_the_session_as_it_was() {
 }
 
 /// The record, both citations and the battery's default targets answer what a
-/// model reads from one owner (`analysis::model_reads`), so a constant read
+/// model reads from one owner (`model_reads::model_reads`), so a constant read
 /// only as the model starts is read for all of them: `s0` sets where a stock
 /// starts, and `base_rate` a rate frozen at the start (`INIT`). A step after
 /// the start moves neither, so the battery disturbs neither by default.

@@ -39,6 +39,7 @@ use simlin_engine::json as ejson;
 use crate::access::{OpenedProject, ProjectAccess, SaveOutcome};
 use crate::errors::AccessError;
 use crate::open::open_project;
+use crate::relationships::generate_relationships;
 use crate::types::{ErrorOutput, SourceFormat, mdl_export_warnings_to_outputs};
 
 /// Stateless filesystem-backed `ProjectAccess`.
@@ -192,9 +193,7 @@ fn serialize_project(
                 {
                     let polarities =
                         simlin_engine::db::compute_link_polarities(&db, source_model, sync.project);
-                    sdai_model.relationships = Some(
-                        simlin_engine::analysis::generate_relationships(&polarities, dm_model),
-                    );
+                    sdai_model.relationships = Some(generate_relationships(&polarities, dm_model));
                 }
             }
             let bytes = serde_json::to_vec_pretty(&sdai_model).map_err(|e| {

@@ -40,7 +40,7 @@
 //!   (a tool name the catalog does not list) is an `Err`.
 //! - **One owner per decision.** Names resolve through `names`, diagnostics
 //!   are reported through `evidence`, what a variable reads and what reads
-//!   it come from [`crate::analysis::model_reads`], and a model's causal
+//!   it come from [`crate::tools::model_reads::model_reads`], and a model's causal
 //!   links, which loops are made of, from [`crate::analysis::model_links`].
 //! - **A person's work comes first.** A call that other work on the project
 //!   waits for -- an edit, a run of the model, a read of its diagnostics --
@@ -59,6 +59,7 @@ mod evidence;
 mod experiment;
 mod input;
 mod loops;
+mod model_reads;
 mod names;
 mod outline;
 mod runs;

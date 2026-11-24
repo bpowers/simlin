@@ -13,6 +13,8 @@ use serde::Serialize;
 use simlin_base::datamodel;
 use simlin_engine::json as ejson;
 
+use crate::errors::AccessError;
+
 /// Identifies how a model file was parsed so write-back can use the same
 /// format.  `Xmile` covers `.stmx`, `.xmile`, and `.xml`; `Mdl` is a Vensim
 /// `.mdl` file, read by the engine's MDL parser and written back in place by
@@ -25,6 +27,19 @@ pub enum SourceFormat {
     Mdl,
     NativeJson,
     SdaiJson,
+}
+
+/// The JSON of the model an analysis of `model_name` is of, without its
+/// diagrams.
+pub(crate) fn model_snapshot(
+    project: &datamodel::Project,
+    model_name: &str,
+) -> Result<ejson::Model, AccessError> {
+    let model = simlin_engine::analysis::analyzed_model(project, model_name)
+        .map_err(|e| AccessError::ParseError(anyhow::anyhow!("analysis failed: {e}")))?;
+    let mut snapshot: ejson::Model = model.clone().into();
+    snapshot.views.clear();
+    Ok(snapshot)
 }
 
 /// Convert the MDL writer's lossiness warnings into the wire `ErrorOutput`
@@ -330,6 +345,24 @@ impl From<&simlin_engine::errors::FormattedError> for ErrorOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_snapshot_views_are_empty() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../test/logistic_growth_ltm/logistic_growth.stmx"
+        );
+        let file = std::fs::File::open(path).expect("failed to open test fixture");
+        let project = simlin_engine::open_xmile(&mut std::io::BufReader::new(file))
+            .expect("failed to parse XMILE");
+        let snapshot = model_snapshot(&project, "main").expect("the model is there");
+
+        assert!(
+            snapshot.views.is_empty(),
+            "model snapshot must have empty views, got {}",
+            snapshot.views.len()
+        );
+    }
 
     #[test]
     fn build_empty_project_has_one_model_named_main_with_no_variables() {

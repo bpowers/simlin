@@ -623,9 +623,8 @@ pub unsafe extern "C" fn simlin_analyze_discover_loops(
         Some(std::time::Duration::from_millis(budget_ms))
     };
 
-    // `analyze_model` needs the contents (for the model snapshot and UID
-    // resolution) plus a `&mut SimlinDb` synced to them and the current
-    // `SourceProject`. It sets `ltm_discovery_mode` on the shared
+    // `analyze_model` needs the contents (for UID resolution) plus a `&mut
+    // SimlinDb` synced to them and the current `SourceProject`. It sets `ltm_discovery_mode` on the shared
     // `SourceProject` and restores it before returning, under the db lock it
     // is given, so no other entry point sees the mode set.
     let (contents, mut db_locked) = (*model_ref.project).lock_contents_and_db();

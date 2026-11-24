@@ -87,7 +87,7 @@ pub struct CausalEdgesResult {
     pub module_outputs_read: Arc<ModuleOutputsRead>,
     /// `(source, instance)` for each module instance's input source that is
     /// no edge into it because it binds only ports the sub-model reads at its
-    /// start ([`init_only_sources`]): a read `analysis::model_reads` counts
+    /// start ([`init_only_sources`]): a read `model_reads::model_reads` counts
     /// as made at the start, so the two agree on what moves the instance.
     pub start_only_inputs: BTreeSet<(String, String)>,
 }

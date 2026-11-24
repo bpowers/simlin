@@ -8,7 +8,7 @@
 //! A record carries everything a variable's definition holds -- its equation
 //! or initial value, per-element equations, lookup points, flows, module
 //! wiring -- and where it sits in the model's structure: the variables it reads
-//! and the variables that read it ([`crate::analysis::model_reads`], macro and
+//! and the variables that read it ([`crate::tools::model_reads::model_reads`], macro and
 //! module internals collapsed into the reads between the variables a modeler
 //! wrote), each with the polarity of its causal link, and marked when it is
 //! made only as the model starts.
@@ -442,14 +442,17 @@ pub(crate) fn read_variables(
         Err(refusal) if refusal.is_interrupted() => return Err(refusal),
         Err(refusal) => (None, Some(refusal.error)),
     };
-    let reads =
-        crate::analysis::model_reads(&*ws.db, resolved.source_model, resolved.source_project);
+    let reads = crate::tools::model_reads::model_reads(
+        &*ws.db,
+        resolved.source_model,
+        resolved.source_project,
+    );
 
     let variables: Vec<VariableRecord> = records
         .into_iter()
         .map(|(var, element)| {
             let canonical = simlin_base::canonicalize(var.get_ident()).into_owned();
-            let neighbor = |name: &str, read: &crate::analysis::ModelRead| LinkRef {
+            let neighbor = |name: &str, read: &crate::tools::model_reads::ModelRead| LinkRef {
                 name: display_name(model, name),
                 polarity: read.polarity.into(),
                 start_only: read.start_only,

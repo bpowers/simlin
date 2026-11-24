@@ -15,6 +15,7 @@ pub mod access;
 pub mod errors;
 pub mod fs_access;
 pub mod open;
+mod relationships;
 pub mod server;
 /// Fixtures for integration tests. Gated behind the `test-support` feature so
 /// it is not compiled into shipped binaries; the crate's own integration

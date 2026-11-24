@@ -119,8 +119,8 @@ mod systems_stdlib_tests;
 pub mod test_common;
 #[cfg(test)]
 mod test_sir_xmile;
-#[cfg(test)]
-mod testutils;
+#[cfg(any(test, feature = "test-support"))]
+pub mod testutils;
 #[cfg(feature = "agent_tools")]
 pub mod tools;
 #[cfg(test)]

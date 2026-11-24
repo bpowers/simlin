@@ -26,6 +26,7 @@
       "uses": [],
       "modules": [
         "ai_info",
+        "analysis",
         "builtins_visitor",
         "bytecode",
         "capture",
@@ -93,7 +94,6 @@
         "layout"
       ],
       "modules": [
-        "analysis",
         "save_check",
         "tools"
       ]

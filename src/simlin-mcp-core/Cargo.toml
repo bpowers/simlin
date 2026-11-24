@@ -26,6 +26,7 @@ anyhow = "1"
 # Self dev-dependency so `tests/` can reach the feature-gated `test_support`
 # module without the feature leaking into a normal build of the library.
 simlin-mcp-core = { path = ".", features = ["test-support"] }
+simlin-engine = { path = "../simlin-engine", features = ["test-support"] }
 tempfile = "3"
 rmcp = { version = "1", features = ["server", "macros", "client", "transport-async-rw"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "fs"] }

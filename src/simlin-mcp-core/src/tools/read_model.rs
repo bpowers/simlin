@@ -19,7 +19,9 @@ use simlin_engine::json;
 use crate::access::ProjectAccess;
 use crate::errors::AccessError;
 use crate::open::resolve_model_name;
-use crate::types::{DominantPeriodOutput, ErrorOutput, LoopDominanceSummary, PartitionOutput};
+use crate::types::{
+    DominantPeriodOutput, ErrorOutput, LoopDominanceSummary, PartitionOutput, model_snapshot,
+};
 
 /// Input for the `ReadModel` tool.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -168,6 +170,7 @@ pub async fn read_model<A: ProjectAccess>(
         simlin_engine::analysis::analyze_model(&project, &mut db, source_project, model_name, None)
             .map_err(|e| AccessError::ParseError(anyhow::anyhow!("analysis failed: {e}")))?;
 
+    let model = model_snapshot(&project, model_name)?;
     let agg_recovery_truncated = analysis.agg_recovery_truncated;
     let truncated = analysis.truncated;
     let enumeration_complete = analysis.enumeration_complete;
@@ -187,7 +190,7 @@ pub async fn read_model<A: ProjectAccess>(
         .collect();
 
     Ok(ReadModelOutput {
-        model: analysis.model,
+        model,
         time: analysis.time,
         loop_dominance,
         partitions,
