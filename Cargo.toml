@@ -11,6 +11,7 @@ members = [
     "src/simlin-formats",
     "src/simlin-mcp",
     "src/simlin-mcp-core",
+    "src/simlin-save-check",
     "src/simlin-tests",
     "src/simlin-tools",
     "src/simlin-wasmgen",

@@ -71,7 +71,6 @@ mod results_tsv_tests;
 mod rk_integration_tests;
 #[cfg(test)]
 mod round_builtin_tests;
-pub mod save_check;
 mod snapshot_arg;
 #[cfg(test)]
 mod subscript_out_of_range_tests;
@@ -95,8 +94,9 @@ pub mod vm_vector_elm_map;
 pub mod vm_vector_sort_order;
 
 pub use self::queue_compile::build_sim;
-#[cfg(feature = "test-support")]
-pub use self::variable::parse_table;
-pub use self::variable::{DepClassification, DepLag, DepOccurrence, SourceVariableKind, Variable};
+pub use self::variable::{
+    DepClassification, DepLag, DepOccurrence, SourceVariableKind, Variable, is_lookup_only,
+    parse_table,
+};
 pub use self::vm::{CompiledSimulation, Vm};
 pub use self::vm_profile::BytecodeProfile;

@@ -37,6 +37,9 @@ Compiles, type-checks, unit-checks, and simulates SD models; [src/simlin-engine/
 An alternative WebAssembly code-generation backend: it lowers a compiled model to one self-contained wasm module (no host imports) for fast repeated re-simulation; the VM stays the correctness oracle (every emitted module is checked against it).
 Surfaced through libsimlin `simlin_model_compile_to_wasm`.
 
+### `src/simlin-save-check` (Rust)
+Whether saving a project in a format keeps what its model means: the project is saved, the save read back, and the two compared, as definitions and as runs.
+
 ### `src/simlin-tools` (Rust)
 The agent tool surface: a session per model that answers an agent's tool calls with JSON.
 libsimlin depends on it under its `agent_tools` feature, which the browser bundle leaves out.
@@ -108,14 +111,15 @@ The allowed dependency graph is enforced by `scripts/check-deps.py` reading from
 - `simlin-edit` -> `simlin-base`, `simlin-diagram`, `simlin-formats`
 - `simlin-engine` -> `simlin-base`, `simlin-diagram`, `simlin-formats`, `simlin-edit`
 - `simlin-wasmgen` -> `simlin-base`, `simlin-engine`
-- `simlin-tools` -> `simlin-engine`, `simlin-edit`, `simlin-formats`, `simlin-base`
-- `simlin` (libsimlin) -> `simlin-tools` (optional), `simlin-wasmgen`, `simlin-engine`, `simlin-edit`, `simlin-formats`, `simlin-diagram`, `simlin-base`
+- `simlin-save-check` -> `simlin-engine`, `simlin-formats`, `simlin-base`
+- `simlin-tools` -> `simlin-save-check`, `simlin-engine`, `simlin-edit`, `simlin-formats`, `simlin-base`
+- `simlin` (libsimlin) -> `simlin-tools` (optional), `simlin-save-check`, `simlin-wasmgen`, `simlin-engine`, `simlin-edit`, `simlin-formats`, `simlin-diagram`, `simlin-base`
 - `simlin-mcp-core` -> `simlin-engine`, `simlin-edit`, `simlin-formats`, `simlin-base`
 - `simlin-mcp` -> `simlin-mcp-core`
 - `simlin-cli` -> `simlin-engine`, `simlin-formats`, `simlin-diagram`, `simlin-base`
 - `simlin-tests` -> (none; its dependencies are dev-dependencies, which the policy leaves out)
 
-Inside `simlin-engine`, the crate-root modules form layers, bottom up: `compiler`, `layout`, `tools`.
+Inside `simlin-engine`, the crate-root modules form layers, bottom up: `compiler`, `layout`.
 `scripts/engine-layers.json` lists each layer's modules and the other layers it may use, and `scripts/check-engine-layers.py` enforces it over production code.
 A test may reach above its module's layer.
 

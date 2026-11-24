@@ -15,8 +15,8 @@
 use std::io::BufReader;
 
 use super::{ChangeKind, MeaningChange, SaveFormat, check_save, compare};
-use crate::test_common::TestProject;
 use simlin_base::datamodel::{Equation, Project, Variable};
+use simlin_engine::test_common::TestProject;
 
 #[path = "save_check_field_tests.rs"]
 mod fields;

@@ -44,6 +44,7 @@ simlin-diagram = { path = "../simlin-diagram" }
 simlin-edit = { path = "../simlin-edit" }
 simlin-formats = { path = "../simlin-formats", default-features = false }
 simlin-engine = { version = "0.1", path = "../simlin-engine", default-features = false }
+simlin-save-check = { path = "../simlin-save-check" }
 simlin-tools = { path = "../simlin-tools", default-features = false, optional = true }
 simlin-wasmgen = { path = "../simlin-wasmgen" }
 serde_json = "1.0"
@@ -58,20 +59,20 @@ mimalloc = { version = "0.1", optional = true }
 wasmalloc = "0.1.1"
 
 [dev-dependencies]
-# Self dev-dependency, as the engine has one: turns on `file_io` for this
+# Self dev-dependency: turns on `file_io` for this
 # crate's own test targets, so the tests of what reads external data files
 # (a `data_dir`) run under a plain `cargo test`, without turning it on for
 # any production build. `default-features = false` keeps the edge to exactly
 # that feature, since features unify over every edge.
 simlin = { path = ".", default-features = false, features = ["file_io"] }
 # Second edge onto the engine, adding EXACTLY `test-support` (the `TestProject`
-# model builder its integration tests use as `engine::test_common`). Keeping it
+# model builder its integration tests use). Keeping it
 # in dev-dependencies is what stops that builder from being compiled into the
 # shipped cdylib/staticlib; `default-features = false` mirrors the normal edge
 # above, since feature selection is a union over every edge and a defaults edge
 # here would silently re-enable them for test builds.
 simlin-engine = { version = "0.1", path = "../simlin-engine", default-features = false, features = ["test-support"] }
-# Pure-Rust no_std wasm interpreter (the same DLR-FT rev simlin-engine pins),
+# Pure-Rust no_std wasm interpreter (the same DLR-FT rev simlin-wasmgen pins),
 # used by the `tests/integration/wasm.rs` integration test to validate and execute the blob
 # `simlin_model_compile_to_wasm` returns and check it against the returned
 # layout. Dev-only: dev-dependencies are never built into the cdylib/staticlib

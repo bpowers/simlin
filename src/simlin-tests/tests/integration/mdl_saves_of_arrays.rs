@@ -7,12 +7,12 @@
 //! changes, so the variable is the shape the reader produces.
 
 use simlin_base::datamodel::{self, Equation};
-use simlin_engine::save_check::{ChangeKind, MeaningChange, SaveFormat, check_save};
 use simlin_engine::test_common::TestProject;
 use simlin_formats::mdl::{
     parse_mdl, project_to_mdl, project_to_mdl_with_warnings, save_compare, subscript_rule,
 };
 use simlin_formats::open_vensim;
+use simlin_save_check::{ChangeKind, MeaningChange, SaveFormat, check_save};
 
 const CONTROL: &str =
     "INITIAL TIME = 0 ~~|\nFINAL TIME = 2 ~~|\nTIME STEP = 1 ~~|\nSAVEPER = TIME STEP ~~|\n";

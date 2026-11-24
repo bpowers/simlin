@@ -1020,7 +1020,7 @@ fn the_loop_analysis_reads_stocks_at_rest_as_every_tool_does() {
     }
 }
 
-/// A variable's columns are the ones `save_check::column_variable` gives it,
+/// A variable's columns are the ones `simlin_save_check::column_variable` gives it,
 /// so another variable whose name begins with it and a `[` is no element of
 /// it: `cost_` has its one column, `cost [usd]` (canonically `cost_[usd]`)
 /// has its own, and an arrayed variable has one per element.

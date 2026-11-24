@@ -127,9 +127,9 @@ impl TryFrom<u32> for SimlinSaveFormat {
     }
 }
 
-impl From<SimlinSaveFormat> for simlin_engine::save_check::SaveFormat {
+impl From<SimlinSaveFormat> for simlin_save_check::SaveFormat {
     fn from(format: SimlinSaveFormat) -> Self {
-        use simlin_engine::save_check::SaveFormat;
+        use simlin_save_check::SaveFormat;
         match format {
             SimlinSaveFormat::Mdl => SaveFormat::Mdl,
             SimlinSaveFormat::Xmile => SaveFormat::Xmile,

@@ -8,8 +8,8 @@ use simlin_base::common::ErrorCode;
 use simlin_base::datamodel::{self, Equation};
 use simlin_base::project_patch::{ModelOperation, ModelPatch, ProjectPatch};
 use simlin_edit::apply_patch;
-use simlin_engine::save_check::{SaveFormat, check_save};
 use simlin_engine::test_common::TestProject;
+use simlin_save_check::{SaveFormat, check_save};
 
 fn ages() -> TestProject {
     TestProject::new("fields")

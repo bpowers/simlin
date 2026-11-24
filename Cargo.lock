@@ -2254,6 +2254,7 @@ dependencies = [
  "simlin-edit",
  "simlin-engine",
  "simlin-formats",
+ "simlin-save-check",
  "simlin-tools",
  "simlin-wasmgen",
  "wasm-interpreter",
@@ -2324,7 +2325,6 @@ dependencies = [
  "rayon",
  "salsa",
  "serde",
- "serde_json",
  "simlin-base",
  "simlin-diagram",
  "simlin-edit",
@@ -2389,6 +2389,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "simlin-save-check"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "simlin-base",
+ "simlin-engine",
+ "simlin-formats",
+]
+
+[[package]]
 name = "simlin-tests"
 version = "0.1.0"
 dependencies = [
@@ -2410,6 +2421,7 @@ dependencies = [
  "simlin-edit",
  "simlin-engine",
  "simlin-formats",
+ "simlin-save-check",
  "simlin-wasmgen",
  "tempfile",
  "wasm-interpreter",
@@ -2430,6 +2442,7 @@ dependencies = [
  "simlin-edit",
  "simlin-engine",
  "simlin-formats",
+ "simlin-save-check",
 ]
 
 [[package]]

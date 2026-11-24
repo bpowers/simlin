@@ -3198,7 +3198,7 @@ struct NonFinite {
 /// a number throughout, or that `base` lacks (every one, with no `base`):
 /// each with when it first is not.
 /// `run_model` is the model the run is of (of `project`), whose variables own
-/// its columns (`save_check::column_variable`). A variable of `model`, the one
+/// its columns (`simlin_save_check::column_variable`). A variable of `model`, the one
 /// the edit is of, is named as that model names it, also where the run reads
 /// it through module instances; any other is named in the run's model, which
 /// the finding names.
@@ -3235,7 +3235,7 @@ fn newly_non_finite(
         let key = key.as_str();
         // The clock and the compiler's helpers are no variable's series; a
         // variable's name may hold `$`, `[` or the word `time`.
-        let Some(owner) = simlin_engine::save_check::column_variable(key, &declared) else {
+        let Some(owner) = simlin_save_check::column_variable(key, &declared) else {
             continue;
         };
         let Some(row) = rows.iter().find(|r| !r[offset].is_finite()) else {

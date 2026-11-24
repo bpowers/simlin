@@ -39,7 +39,6 @@ smallvec = { version = "1", features = [ "union" ] }
 ed25519 = { version = "2", optional = true }
 base64 = { version = "0.22", optional = true }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 
 # 0.28.5 is the floor: earlier 0.28 releases can free an interned value's
 # storage while it is in use (RUSTSEC-2026-0308).
@@ -61,10 +60,6 @@ simlin-diagram = { path = "../simlin-diagram", features = ["test-support"] }
 simlin-edit = { path = "../simlin-edit", features = ["test-support"] }
 simlin-formats = { path = "../simlin-formats", features = ["test-support", "file_io"] }
 rand = "0.9"
-# The tests read JSON floats exactly: without float_roundtrip, serde_json's fast
-# parser can be off by one ULP. Dev-only: production builds of the crate keep
-# the default fast parser.
-serde_json = { version = "1", features = ["float_roundtrip"] }
 proptest = "1.5"
 
 # The integration tests, examples and benches of this crate are in simlin-tests.

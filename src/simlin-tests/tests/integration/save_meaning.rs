@@ -5,7 +5,7 @@
 //! A save keeps what the model means, in every pair of formats: every corpus
 //! model, read from its own format (MDL, or XMILE for XMILE and Stella
 //! files), is saved as MDL, as XMILE, as native JSON and as protobuf, and
-//! `save_check::check_save` says what each save changes.
+//! `simlin_save_check::check_save` says what each save changes.
 //!
 //! [`EXPECTED`] lists every save that does not keep its model, with what the
 //! check says of it and why it happens: the format cannot hold the model, or
@@ -36,8 +36,8 @@ use std::path::PathBuf;
 use simlin_base::Results;
 use simlin_base::datamodel::Project;
 use simlin_engine::queue_compile;
-use simlin_engine::save_check::{ChangeKind, SaveFormat, check_save, column_variable};
 use simlin_formats::buffa::Message;
+use simlin_save_check::{ChangeKind, SaveFormat, check_save, column_variable};
 
 use Cause::{Defect, Format};
 use SaveFormat::{Json, Mdl, Protobuf, Xmile};
@@ -278,7 +278,7 @@ const CONTROL_COLUMNS: &[&str] = &["initial_time", "final_time", "time_step", "s
 
 /// Each column `project`'s run (`results`) has, by name: the clock and the
 /// columns of the simulated model's variables, which column of which variable
-/// asked of `save_check::column_variable` (the rule the check reads a run
+/// asked of `simlin_save_check::column_variable` (the rule the check reads a run
 /// by), so the compiler's own helper columns are left out, and the control
 /// columns. Every NaN is the same value, and -0 is 0.
 fn columns(project: &Project, results: &Results) -> BTreeMap<String, Vec<u64>> {
@@ -502,7 +502,7 @@ fn a_few_models_keep_their_meaning_in_every_format_pair() {
 /// Without it, the save does not read back, which is a change to the results.
 #[test]
 fn a_save_that_reads_data_is_read_back_with_its_provider() {
-    use simlin_engine::save_check::check_save_with_data;
+    use simlin_save_check::check_save_with_data;
     let path = "../../test/test-models/tests/get_data/test_get_data.mdl";
     let dir = std::path::Path::new(path)
         .parent()

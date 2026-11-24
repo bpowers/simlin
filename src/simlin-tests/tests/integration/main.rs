@@ -46,6 +46,7 @@ mod ltm_relative_scores;
 mod ltm_snapshot_inputs;
 mod mdl_roundtrip;
 mod mdl_saves_of_arrays;
+mod mdl_saves_of_names;
 mod mdl_saves_of_xmile;
 mod mdl_saves_with_a_view;
 mod mdl_vensim_truth;

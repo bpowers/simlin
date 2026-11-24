@@ -60,11 +60,12 @@
 //! that keeps them as the simulation specs mean the same when the values
 //! agree.
 
+#![forbid(unsafe_code)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::BufReader;
 
-use crate::errors::code_and_reason;
 use simlin_base::ast::{Aliases, CanonicalEqn, Expr0, UnaryOp};
 use simlin_base::builtins::UntypedBuiltinFn;
 use simlin_base::common::{CanonicalElementName, Result, canonicalize, join_quoted_names};
@@ -74,6 +75,7 @@ use simlin_base::datamodel::{
     MacroSpec, Model, Module, ModuleReference, Project, Queue, SimMethod, SimSpecs, SpreadFlow,
     Stock, Variable,
 };
+use simlin_engine::errors::code_and_reason;
 use simlin_formats::buffa::Message;
 use simlin_formats::data_provider::DataProvider;
 
@@ -528,7 +530,7 @@ impl Table {
         };
         // A table the compiler refuses (`parse_table`'s `BadTable`) is
         // compared as it is stored; the refusal shows in the errors.
-        let x = match crate::variable::parse_table(Some(gf)) {
+        let x = match simlin_engine::parse_table(Some(gf)) {
             Ok(Some(table)) => table.x,
             _ => x_points.clone().unwrap_or_default(),
         };
@@ -879,7 +881,7 @@ impl VariableMeaning {
         // A table alone has no equation, whatever stands where one would be
         // (nothing, or the MDL sentinel): the compiler's verdict, asked of
         // the compiler's own rule.
-        let table_only = equation.is_some_and(|eq| crate::variable::is_lookup_only(eq, gf));
+        let table_only = equation.is_some_and(|eq| simlin_engine::is_lookup_only(eq, gf));
         let mut meaning = VariableMeaning {
             name: name.clone(),
             kind,
@@ -1743,7 +1745,8 @@ fn main_model(project: &Project) -> Option<&str> {
 
 fn simulate(project: &Project) -> std::result::Result<simlin_base::Results, String> {
     let main = main_model(project).ok_or_else(|| "it has no model to simulate".to_string())?;
-    let mut vm = crate::queue_compile::build_vm(project, main).map_err(|e| e.to_string())?;
+    let mut vm =
+        simlin_engine::queue_compile::build_vm(project, main).map_err(|e| e.to_string())?;
     vm.run_to_end().map_err(|e| e.to_string())?;
     Ok(vm.into_results())
 }
@@ -1767,7 +1770,7 @@ fn main_variables(project: &Project) -> BTreeSet<String> {
 ///
 /// The whole column is asked first because a name may hold either mark
 /// itself (`"x [usd]"` is `x_[usd]`). A column the compiler adds for itself,
-/// whose name carries the synthetic prefix ([`crate::ltm::is_synthetic_node_name`],
+/// whose name carries the synthetic prefix (`simlin_engine::ltm::is_synthetic_node_name`,
 /// the mark `capture::synthetic_ident` gives a builtin's helper), belongs to
 /// none: what it holds shows in the variables it feeds, and a save may compute
 /// them without it. Nor does the clock (`time`, unless the model declares a
@@ -1776,7 +1779,7 @@ pub fn column_variable<'a>(column: &'a str, variables: &BTreeSet<String>) -> Opt
     if variables.contains(column) {
         return Some(column);
     }
-    if crate::ltm::is_synthetic_node_name(column) {
+    if simlin_engine::ltm::is_synthetic_node_name(column) {
         return None;
     }
     column
@@ -1960,24 +1963,28 @@ fn settle(
 /// A project's errors, each as (model, variable, code and reason), in a
 /// stable order.
 fn errors(project: &Project) -> BTreeSet<(Option<String>, Option<String>, String)> {
-    let mut db = crate::db::SimlinDb::default();
-    let sync = crate::db::sync_from_datamodel_incremental(&mut db, project, None);
-    crate::db::collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off)
-        .iter()
-        .filter(|d| d.severity == crate::db::DiagnosticSeverity::Error)
-        .map(|d| {
-            let formatted = crate::errors::format_diagnostic(d);
-            let reason = code_and_reason(formatted.code, formatted.details.as_deref());
-            (
-                formatted.model_name.clone(),
-                formatted
-                    .variable_name
-                    .as_deref()
-                    .map(|v| canonicalize(v).into_owned()),
-                reason,
-            )
-        })
-        .collect()
+    let mut db = simlin_engine::db::SimlinDb::default();
+    let sync = simlin_engine::db::sync_from_datamodel_incremental(&mut db, project, None);
+    simlin_engine::db::collect_all_diagnostics(
+        &db,
+        sync.project,
+        simlin_engine::db::LtmOverlay::Off,
+    )
+    .iter()
+    .filter(|d| d.severity == simlin_engine::db::DiagnosticSeverity::Error)
+    .map(|d| {
+        let formatted = simlin_engine::errors::format_diagnostic(d);
+        let reason = code_and_reason(formatted.code, formatted.details.as_deref());
+        (
+            formatted.model_name.clone(),
+            formatted
+                .variable_name
+                .as_deref()
+                .map(|v| canonicalize(v).into_owned()),
+            reason,
+        )
+    })
+    .collect()
 }
 
 /// A model that does not simulate keeps its meaning when its save reports

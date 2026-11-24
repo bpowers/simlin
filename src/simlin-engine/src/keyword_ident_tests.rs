@@ -597,41 +597,6 @@ fn an_mdl_flow_list_name_and_a_net_flow_expression_read_the_same_variable() {
     assert_eq!(final_value(&project, "t"), 0.25 * 2.0, "over 2 months");
 }
 
-/// An MDL save of `dt = TIME STEP` writes it as it was, and a reference to
-/// `dt` as the variable: the corpus model that declares it saves its
-/// definition so and keeps its run.
-#[test]
-fn an_mdl_save_writes_a_variable_defined_as_the_time_step_as_it_was() {
-    let project = mdl_with_control(
-        "dt = TIME STEP\n\t~\t\n\t~\t|\n\n\
-         x = dt * 2\n\t~\t\n\t~\t|\n\n",
-    );
-    let written = simlin_formats::compat::to_mdl(&project).expect("MDL must write");
-    let lines: Vec<&str> = written.lines().map(str::trim).collect();
-    assert!(lines.contains(&"dt = TIME STEP"), "{written}");
-    assert!(lines.contains(&"x = dt * 2"), "{written}");
-    let read_back = simlin_formats::compat::open_vensim(&written).expect("the save reads");
-    assert_eq!(final_value(&read_back, "dt"), 0.125);
-    assert_eq!(final_value(&read_back, "x"), 0.25);
-
-    let theil = std::fs::read_to_string("../../test/metasd/theil-statistics/Theil_2011.mdl")
-        .expect("the corpus file reads");
-    let theil = simlin_formats::compat::open_vensim(&theil).expect("the corpus file imports");
-    let written = simlin_formats::compat::to_mdl(&theil).expect("MDL must write");
-    assert!(
-        written.lines().any(|line| line.trim() == "dt = TIME STEP"),
-        "{written}"
-    );
-    let results: Vec<String> =
-        crate::save_check::check_save(&theil, crate::save_check::SaveFormat::Mdl)
-            .expect("the check runs")
-            .into_iter()
-            .filter(|c| c.kind == crate::save_check::ChangeKind::Results)
-            .map(|c| c.reason)
-            .collect();
-    assert_eq!(results, Vec::<String>::new());
-}
-
 /// A quoted builtin name the model declares no variable of is a name the
 /// model does not declare, refused as any other is: the implicit globals'
 /// names (`time`, `dt`, ...), whose values live in slots of their own, are no

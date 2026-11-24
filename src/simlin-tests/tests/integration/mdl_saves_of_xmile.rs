@@ -9,8 +9,8 @@
 //! what the save changes.
 
 use simlin_base::datamodel;
-use simlin_engine::save_check::{ChangeKind, SaveFormat, check_save};
 use simlin_formats::mdl::{BUILTINS, parse_mdl, project_to_mdl, project_to_mdl_with_warnings};
+use simlin_save_check::{ChangeKind, SaveFormat, check_save};
 
 /// The project the XMILE reader makes of these dimensions and variables.
 fn xmile(dimensions: &str, variables: &str) -> datamodel::Project {

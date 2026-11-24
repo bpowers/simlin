@@ -33,6 +33,7 @@ simlin-diagram = { path = "../simlin-diagram", features = ["png_render", "test-s
 simlin-edit = { path = "../simlin-edit" }
 simlin-formats = { path = "../simlin-formats", features = ["file_io", "test-support"] }
 simlin-engine = { path = "../simlin-engine", features = ["test-support"] }
+simlin-save-check = { path = "../simlin-save-check" }
 simlin-wasmgen = { path = "../simlin-wasmgen" }
 buffa = "0.9"
 salsa = "0.28.5"

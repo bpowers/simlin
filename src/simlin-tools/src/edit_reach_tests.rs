@@ -18,7 +18,7 @@ use crate::test_support::Host;
 use simlin_base::datamodel;
 
 /// Every series of the run of the project's model `model` that belongs to a
-/// variable of the model (`save_check::column_variable`: the compiler's own
+/// variable of the model (`simlin_save_check::column_variable`: the compiler's own
 /// helpers aside), by variable and the rest of its key, as a session of its
 /// own reads them.
 fn series(host: &mut Host, model: &str) -> BTreeMap<(String, String), Vec<f64>> {
@@ -38,7 +38,7 @@ fn series(host: &mut Host, model: &str) -> BTreeMap<(String, String), Vec<f64>> 
         .iter()
         .filter_map(|(key, &offset)| {
             let key = key.as_str();
-            let owner = simlin_engine::save_check::column_variable(key, &declared)?;
+            let owner = simlin_save_check::column_variable(key, &declared)?;
             let values = run.results.iter().map(|row| row[offset]).collect();
             Some(((owner.to_string(), key[owner.len()..].to_string()), values))
         })

@@ -496,7 +496,7 @@ pub unsafe extern "C" fn simlin_project_check_save(
     };
     let proj = ffi_try!(out_error, require_project(project));
     let datamodel = proj.datamodel.lock().unwrap().shared();
-    let format: simlin_engine::save_check::SaveFormat = format.into();
+    let format: simlin_save_check::SaveFormat = format.into();
     #[cfg(feature = "file_io")]
     let provider = data_dir.map(simlin_formats::FilesystemDataProvider::new);
     #[cfg(feature = "file_io")]
@@ -508,7 +508,7 @@ pub unsafe extern "C" fn simlin_project_check_save(
         let _ = data_dir;
         None
     };
-    let changes = match simlin_engine::save_check::check_save_with_data(&datamodel, format, data) {
+    let changes = match simlin_save_check::check_save_with_data(&datamodel, format, data) {
         Ok(changes) => changes,
         Err(err) => {
             store_error(
@@ -534,8 +534,8 @@ pub unsafe extern "C" fn simlin_project_check_save(
                 SimlinErrorKind::Model
             },
             severity: match change.kind {
-                simlin_engine::save_check::ChangeKind::Results => SimlinErrorSeverity::Error,
-                simlin_engine::save_check::ChangeKind::Structure => SimlinErrorSeverity::Warning,
+                simlin_save_check::ChangeKind::Results => SimlinErrorSeverity::Error,
+                simlin_save_check::ChangeKind::Structure => SimlinErrorSeverity::Warning,
             },
             details: Some(change.reason.clone()),
             ..ErrorDetail::new(SimlinErrorCode::Generic)

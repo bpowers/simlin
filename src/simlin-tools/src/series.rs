@@ -235,7 +235,7 @@ pub(crate) fn scale_in_run(
 }
 
 /// The canonical idents of `model`'s variables: what a results column is
-/// read as belonging to (`simlin_engine::save_check::column_variable`).
+/// read as belonging to (`simlin_save_check::column_variable`).
 pub(crate) fn declared(model: &datamodel::Model) -> std::collections::BTreeSet<String> {
     model
         .variables
@@ -250,7 +250,7 @@ pub(crate) fn column_of<'k>(
     model: &datamodel::Model,
     key: &'k str,
 ) -> Option<(&'k str, Option<&'k str>)> {
-    let base = simlin_engine::save_check::column_variable(key, &declared(model))?;
+    let base = simlin_save_check::column_variable(key, &declared(model))?;
     let element = key[base.len()..]
         .strip_prefix('[')
         .and_then(|rest| rest.strip_suffix(']'));
@@ -526,7 +526,7 @@ pub(crate) struct VariableColumn<'a> {
 }
 
 /// The results columns of the variable `canonical` of `model`, in slot
-/// order: those `save_check::column_variable` gives the variable, the one
+/// order: those `simlin_save_check::column_variable` gives the variable, the one
 /// owner of which variable a column belongs to, so a name that holds `[` or
 /// `$` itself is no prefix of another's. A module instance's columns are its
 /// model's variables', reached through it, and are not the instance's own.
@@ -544,7 +544,7 @@ pub(crate) fn variable_columns<'a>(
         .offsets
         .iter()
         .filter_map(|(key, &offset)| {
-            let owner = simlin_engine::save_check::column_variable(key.as_str(), &declared)?;
+            let owner = simlin_save_check::column_variable(key.as_str(), &declared)?;
             let subscript = &key.as_str()[owner.len()..];
             (owner == canonical && (subscript.is_empty() || subscript.starts_with('[')))
                 .then_some(VariableColumn { subscript, offset })

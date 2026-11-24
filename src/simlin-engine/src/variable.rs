@@ -545,7 +545,7 @@ fn build_tables(
 /// Returns `false` for WITH LOOKUP (`var = WITH LOOKUP(input, table)`: tables
 /// present but a *real* input equation), for an ordinary aux (a real equation,
 /// no tables), and for an empty-RHS aux with no `gf` at all.
-pub(crate) fn is_lookup_only(
+pub fn is_lookup_only(
     eqn: &datamodel::Equation,
     gf: Option<&datamodel::GraphicalFunction>,
 ) -> bool {

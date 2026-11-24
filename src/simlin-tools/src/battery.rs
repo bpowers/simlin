@@ -3010,7 +3010,7 @@ fn element_start_values(
         .iter()
         .filter_map(|(key, &offset)| {
             let key = key.as_str();
-            let owner = simlin_engine::save_check::column_variable(key, &declared)?;
+            let owner = simlin_save_check::column_variable(key, &declared)?;
             (owner == canonical).then(|| {
                 let element = key[owner.len()..]
                     .strip_prefix('[')
@@ -3217,7 +3217,7 @@ impl Watched {
             key: &'k Ident<Canonical>,
             declared: &std::collections::BTreeSet<String>,
         ) -> Option<&'k str> {
-            simlin_engine::save_check::column_variable(key.as_str(), declared)
+            simlin_save_check::column_variable(key.as_str(), declared)
         }
         let owner = |key| column_owner(key, &declared);
         // A stock below zero at any element in the model's own run is a
