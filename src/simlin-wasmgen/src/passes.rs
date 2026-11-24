@@ -24,7 +24,7 @@
 //! phase A, then each belt's coupled queue serves, then that belt's phase B.
 //! `module::Passes::emit_step_body` unrolls that same order, calling
 //! [`QueuePass::emit_coupled_serve`] between the belt emitters. It reads the VM's
-//! own [`CouplingTable`](crate::queue_compile::CouplingTable) rather than deriving
+//! own [`CouplingTable`](simlin_engine::queue_compile::CouplingTable) rather than deriving
 //! a second one, so the admission priorities cannot drift apart.
 //!
 //! ## What is specialized, and what is not
@@ -87,8 +87,8 @@
 
 use wasm_encoder::{BlockType, Function, Instruction as Ins, ValType};
 
-use crate::conveyor_compile::ContainerKind;
-use crate::queue_compile::{CoupledServe, QueueOutflowKind, QueuePlan};
+use simlin_engine::conveyor_compile::ContainerKind;
+use simlin_engine::queue_compile::{CoupledServe, QueueOutflowKind, QueuePlan};
 
 use super::lower::{HelperFn, f64_const, i32_memarg, memarg};
 

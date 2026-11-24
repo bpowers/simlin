@@ -91,7 +91,7 @@ impl ArrayView {
     /// Check if this view represents contiguous data in row-major order.
     ///
     /// Test-only: production asks the same question of `RuntimeView` /
-    /// `wasmgen::ViewDesc` / `dimensions::SubdimensionRelation`, never of an
+    /// `simlin_wasmgen::ViewDesc` / `dimensions::SubdimensionRelation`, never of an
     /// `ast::ArrayView`.
     #[cfg(test)]
     pub fn is_contiguous(&self) -> bool {
@@ -154,7 +154,7 @@ impl ArrayView {
     /// axis was the sparse one, and `SUM` over the result read all-NaN with
     /// exit 0 (GH #1027). The runtime transforms that drop an axis
     /// (`bytecode::RuntimeView::apply_single_subscript`,
-    /// `wasmgen::ViewDesc::apply_single_subscript_dynamic`) renumber for the
+    /// `simlin_wasmgen::ViewDesc::apply_single_subscript_dynamic`) renumber for the
     /// same reason.
     ///
     /// # Panics

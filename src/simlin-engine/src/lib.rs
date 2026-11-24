@@ -27,7 +27,7 @@ mod array_tests;
 #[cfg(test)]
 mod builtin_signature_tests;
 mod builtins_visitor;
-mod bytecode;
+pub mod bytecode;
 #[cfg(test)]
 mod canonical_value_tests;
 mod capture;
@@ -89,18 +89,12 @@ mod units;
 mod units_check;
 mod units_infer;
 mod variable;
-mod vm;
+pub mod vm;
 // Bytecode-composition profiling for CompiledSimulation; a diagnostics-only
 // sibling of `vm` kept separate purely for the per-file line cap.
 mod vm_profile;
-mod vm_vector_elm_map;
-mod vm_vector_sort_order;
-// WebAssembly code-generation backend: lowers the salsa-compiled
-// `CompiledSimulation` bytecode (the same value `Vm::new` consumes) to a
-// self-contained wasm module, as an alternative execution path to the bytecode
-// VM. Validated in tests by executing the emitted module under a pure-Rust wasm
-// interpreter and comparing against the VM.
-pub mod wasmgen;
+pub mod vm_vector_elm_map;
+pub mod vm_vector_sort_order;
 
 pub use self::queue_compile::build_sim;
 #[cfg(feature = "test-support")]

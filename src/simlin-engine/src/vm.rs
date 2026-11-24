@@ -16,7 +16,7 @@ use simlin_base::common::{Canonical, Error, ErrorCode, ErrorKind, Ident, IdentMa
 use simlin_base::dimensions::match_dimensions_two_pass;
 use simlin_base::results::{DT_OFF, FINAL_TIME_OFF, INITIAL_TIME_OFF, TIME_OFF};
 #[allow(unused_imports)]
-pub use simlin_base::results::{Method, Results, Specs};
+pub(crate) use simlin_base::results::{Method, Results, Specs};
 use simlin_base::sim_err;
 
 /// Key for looking up compiled modules.
@@ -49,7 +49,7 @@ struct IterState {
     size: usize,
 }
 
-pub(crate) fn is_truthy(n: f64) -> bool {
+pub fn is_truthy(n: f64) -> bool {
     let is_false = simlin_base::float::approx_eq(n, 0.0);
     !is_false
 }
@@ -98,10 +98,10 @@ enum BytecodeLocation {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompiledSimulation {
-    pub(crate) modules: IdentMap<ModuleKey, CompiledModule>,
-    pub(crate) specs: Specs,
-    pub(crate) root: ModuleKey,
-    pub(crate) offsets: IdentMap<Ident<Canonical>, usize>,
+    pub modules: IdentMap<ModuleKey, CompiledModule>,
+    pub specs: Specs,
+    pub root: ModuleKey,
+    pub offsets: IdentMap<Ident<Canonical>, usize>,
     cached_constant_info: HashMap<usize, Vec<BytecodeLocation>>,
 }
 
@@ -227,7 +227,7 @@ impl CompiledSimulation {
     ///
     /// [`is_constant_offset`]: Self::is_constant_offset
     /// [`is_overridable_offset`]: Self::is_overridable_offset
-    pub(crate) fn constant_offsets(&self) -> impl Iterator<Item = usize> + '_ {
+    pub fn constant_offsets(&self) -> impl Iterator<Item = usize> + '_ {
         self.cached_constant_info.keys().copied()
     }
 }
@@ -265,7 +265,7 @@ struct CompiledSlicedSimulation {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum StepPart {
+pub enum StepPart {
     Initials,
     Flows,
     Stocks,
@@ -443,7 +443,7 @@ impl Stack {
 /// bundled here. Every field is `Copy`, so a caller mints one for the length of
 /// a read loop and drops it before touching `curr`/`temp_storage` mutably.
 #[derive(Clone, Copy)]
-pub(crate) struct ChunkRegions<'a> {
+pub struct ChunkRegions<'a> {
     curr: &'a [f64],
     /// The snapshot taken after the previous step's stocks (`PREVIOUS`).
     prev: &'a [f64],
@@ -464,8 +464,8 @@ impl<'a> ChunkRegions<'a> {
     /// snapshot slices are deliberately EMPTY rather than aliases of `curr`, so
     /// a view that mis-routes to one panics instead of quietly returning
     /// plausible values.
-    #[cfg(test)]
-    pub(crate) fn curr_only(curr: &'a [f64]) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn curr_only(curr: &'a [f64]) -> Self {
         ChunkRegions {
             curr,
             prev: &[],
@@ -746,7 +746,7 @@ fn collect_stock_offsets(
 /// Advance a multi-dimensional index in row-major order. Shared by all
 /// vector operation opcodes to iterate over array elements.
 #[inline]
-pub(crate) fn increment_indices(indices: &mut [u16], dims: &[u16]) {
+pub fn increment_indices(indices: &mut [u16], dims: &[u16]) {
     for d in (0..indices.len()).rev() {
         indices[d] += 1;
         if indices[d] < dims[d] {
@@ -761,7 +761,7 @@ pub(crate) fn increment_indices(indices: &mut [u16], dims: &[u16]) {
 /// distinguishable from a model's own NaN.
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
-pub const POISON_SENTINEL: f64 = -1.234567e123;
+pub(crate) const POISON_SENTINEL: f64 = -1.234567e123;
 
 impl Vm {
     /// A VM that runs `sim` under the specs it was compiled with.
@@ -956,7 +956,7 @@ impl Vm {
     /// last saved row. From there on it rests at that row, evaluated, because
     /// it takes no step past it; making it rest where the VM does is a
     /// question of the blob's ABI that this does not settle
-    /// (`wasmgen::module_tests::where_a_run_rests_on_each_backend`).
+    /// (`simlin_wasmgen::module_tests::where_a_run_rests_on_each_backend`).
     pub fn run_to(&mut self, end: f64) -> Result<()> {
         // One past the last step to evaluate. NaN compares false with every
         // step, which runs to the end.
@@ -3534,7 +3534,7 @@ pub(crate) fn step(time: f64, dt: f64, height: f64, step_time: f64) -> f64 {
 /// and a width and is another function; the MDL reader lowers it to its own
 /// expression.)
 #[inline(never)]
-pub(crate) fn pulse(time: f64, dt: f64, volume: f64, first_pulse: f64, interval: f64) -> f64 {
+pub fn pulse(time: f64, dt: f64, volume: f64, first_pulse: f64, interval: f64) -> f64 {
     let time = time + dt * simlin_base::results::STEP_TOLERANCE;
     if time < first_pulse {
         return 0.0;
@@ -3556,9 +3556,9 @@ pub(crate) fn pulse(time: f64, dt: f64, volume: f64, first_pulse: f64, interval:
 
 /// The lookup a lookup opcode's `mode` names, over `table` at `index`: the one
 /// dispatch every lookup opcode arm goes through. The wasm backend's twin is
-/// `wasmgen::lower::HelperFns::lookup`.
+/// `simlin_wasmgen::lower::HelperFns::lookup`.
 #[inline]
-pub(crate) fn lookup_in_mode(mode: LookupMode, table: &[(f64, f64)], index: f64) -> f64 {
+pub fn lookup_in_mode(mode: LookupMode, table: &[(f64, f64)], index: f64) -> f64 {
     match mode {
         LookupMode::Interpolate => lookup(table, index),
         LookupMode::Forward => lookup_forward(table, index),
@@ -3605,7 +3605,7 @@ fn extend_end_segment(end: (f64, f64), inner: (f64, f64), index: f64) -> f64 {
 
 // `pub(crate)` so the wasm backend's lookup-helper tests can compare the
 // emitted helpers directly against the VM functions they reproduce
-// (`wasmgen::lookup`).
+// (`simlin_wasmgen::lookup`).
 #[inline(never)]
 pub(crate) fn lookup(table: &[(f64, f64)], index: f64) -> f64 {
     if table.is_empty() {
@@ -4927,7 +4927,7 @@ mod vm_step_grid_tests;
 /// deleting the branch changes no simulation result. (The wasm backend is not so
 /// lucky: its `reset` does not clear the snapshot regions, which is why the
 /// `select` there IS observable and is pinned by
-/// `wasmgen::module_tests::compile_simulation_repeated_run_resets_previous_fallback_for_an_array_view`.)
+/// `simlin_wasmgen::module_tests::compile_simulation_repeated_run_resets_previous_fallback_for_an_array_view`.)
 /// Keeping the branch anyway is what makes the two backends state the same rule
 /// rather than one relying on an initialization the other does not perform.
 ///

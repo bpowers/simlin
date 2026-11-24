@@ -21,14 +21,14 @@
 
 use super::*;
 
-use crate::conveyor::SlatBoundGuard;
-use crate::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
-use crate::queue_compile::{build_vm, compile_sim};
-use crate::vm::{CompiledSimulation, Vm};
-use crate::wasmgen::WasmArtifact;
-use crate::wasmgen::module::{compile_simulation, compile_simulation_with_fault};
+use crate::WasmArtifact;
+use crate::module::{compile_simulation, compile_simulation_with_fault};
 use checked::{Store, Stored, StoredValue};
 use simlin_base::common::ErrorCode;
+use simlin_engine::conveyor::SlatBoundGuard;
+use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
+use simlin_engine::queue_compile::{build_vm, compile_sim};
+use simlin_engine::vm::{CompiledSimulation, Vm};
 use std::io::BufReader;
 use wasm::addrs::ModuleAddr;
 use wasm::validate;
@@ -41,8 +41,13 @@ type Inst = Stored<ModuleAddr>;
 fn compile(datamodel: &simlin_base::datamodel::Project) -> std::sync::Arc<CompiledSimulation> {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, datamodel, None);
-    compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
-        .expect("incremental compile")
+    compile_project_incremental(
+        &db,
+        sync.project,
+        "main",
+        simlin_engine::db::LtmOverlay::Off,
+    )
+    .expect("incremental compile")
 }
 
 fn with_instance<R>(
@@ -167,7 +172,7 @@ fn layout_offset(artifact: &WasmArtifact, name: &str) -> usize {
 /// from t=0 to t=5 at dt=1, so `run` saves six rows (t = 0..=5) whose `level`
 /// values are `0, 2, 4, 6, 8, 10`.
 fn ramp_fixture() -> simlin_base::datamodel::Project {
-    crate::test_common::TestProject::new("errchan")
+    simlin_engine::test_common::TestProject::new("errchan")
         .with_sim_time(0.0, 5.0, 1.0)
         .aux("inflow_rate", "2", None)
         .stock("level", "0", &["inflow"], &[], None)
@@ -200,7 +205,7 @@ fn over_bound_conveyor_xmile(len_eqn: &str) -> String {
 /// driven by the belt names and slot offsets the VM used.
 fn conveyor_plans(
     project: &simlin_base::datamodel::Project,
-) -> Vec<crate::conveyor_compile::ConveyorPlan> {
+) -> Vec<simlin_engine::conveyor_compile::ConveyorPlan> {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
     compile_sim(
@@ -208,7 +213,7 @@ fn conveyor_plans(
         sync.project,
         project,
         "main",
-        crate::db::LtmOverlay::Off,
+        simlin_engine::db::LtmOverlay::Off,
     )
     .expect("conveyor model must build")
     .conveyor_plans

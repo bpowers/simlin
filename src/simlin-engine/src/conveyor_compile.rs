@@ -2870,7 +2870,7 @@ fn conv_inflow_placement(inf: &InflowPlan, pa: &[PhaseAResult], d: usize) -> Pla
 /// probe ([`normalized_init_total`]) and the runtime belt init ([`init_belts`]).
 /// It is a named constructor rather than an inline `format!` because the wasm
 /// backend's host-side message reconstruction
-/// ([`crate::wasmgen::reconstruct_error`]) must reproduce the VM's text
+/// ([`simlin_wasmgen::reconstruct_error`]) must reproduce the VM's text
 /// byte-for-byte, and the blob itself carries no strings.
 pub fn transit_not_positive_error(name: &str, transit: f64) -> (ErrorCode, String) {
     (
@@ -2885,7 +2885,7 @@ pub fn transit_not_positive_error(name: &str, transit: f64) -> (ErrorCode, Strin
 /// The slat count and the bound are recomputed here from `(transit, dt)` rather
 /// than passed in, which is what lets a host holding only the belt's NAME and its
 /// transit-time slot rebuild the VM's message verbatim -- see
-/// [`crate::wasmgen::reconstruct_error`]. Reads the thread-local bound, so a test
+/// [`simlin_wasmgen::reconstruct_error`]. Reads the thread-local bound, so a test
 /// `SlatBoundGuard` applies to the reconstruction as well as to the check.
 pub fn transit_too_long_error(name: &str, transit: f64, dt: f64) -> (ErrorCode, String) {
     let n = crate::conveyor::slat_count(transit, dt);

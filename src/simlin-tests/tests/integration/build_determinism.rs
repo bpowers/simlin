@@ -145,7 +145,7 @@ fn artifacts(path: &str, bytes: &[u8]) -> Option<BTreeMap<&'static str, Vec<u8>>
     }
 
     if let Ok(compiled) = compile_project_incremental(&db, sync.project, &main, LtmOverlay::Off) {
-        if let Ok(artifact) = simlin_engine::wasmgen::compile_simulation(&compiled) {
+        if let Ok(artifact) = simlin_wasmgen::compile_simulation(&compiled) {
             out.insert("wasm blob", artifact.wasm);
             out.insert("wasm layout", artifact.layout.serialize());
         }

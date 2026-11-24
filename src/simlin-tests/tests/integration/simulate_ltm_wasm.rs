@@ -19,8 +19,8 @@ use std::io::BufReader;
 use simlin_base::datamodel;
 use simlin_engine::db::{SimlinDb, model_ltm_variables, sync_from_datamodel_incremental};
 use simlin_engine::ltm_finding::{self, FoundLoop};
-use simlin_engine::wasmgen::{WasmGenError, WasmLayout, compile_datamodel_to_artifact};
 use simlin_formats::xmile;
+use simlin_wasmgen::{WasmGenError, WasmLayout, compile_datamodel_to_artifact};
 
 use crate::test_helpers::{
     LTM_SERIES_TOLERANCE, assert_ltm_slabs_match, ltm_discovery_inputs, vm_results_for_ltm,

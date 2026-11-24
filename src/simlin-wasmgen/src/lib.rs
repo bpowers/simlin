@@ -4,7 +4,7 @@
 
 //! WebAssembly code-generation backend.
 //!
-//! This backend is an alternative to the bytecode VM (`crate::vm`). Instead of
+//! This backend is an alternative to the bytecode VM (`simlin_engine::vm`). Instead of
 //! interpreting opcodes, it lowers a salsa-compiled `CompiledSimulation` (the
 //! VM's own input) into a self-contained WebAssembly module that runs the whole
 //! simulation in one exported call, writing results into its own linear memory.
@@ -49,6 +49,8 @@
 //! belt model now reaches the blob through a public entry. A host that RUNS a blob
 //! must therefore poll the getter -- a queue-only or ordinary model still never
 //! raises, and its blob elides the guards entirely.
+
+#![forbid(unsafe_code)]
 
 mod alloc;
 mod belt;

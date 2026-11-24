@@ -10,10 +10,10 @@ use super::tests::{
     run_artifact_results_repeated, run_artifact_segmented, submodel_project,
 };
 use super::*;
-use crate::bytecode::Opcode;
-use crate::test_common::TestProject;
 use simlin_base::common::{Canonical, Ident};
 use simlin_base::datamodel::{self, SimMethod};
+use simlin_engine::bytecode::Opcode;
+use simlin_engine::test_common::TestProject;
 
 /// Read section/vector lengths only; instruction validation stays with the wasm
 /// interpreter. Inspecting the code section proves a test actually split its
@@ -315,19 +315,19 @@ fn split_preserves_special_stock_reconciliation_initials() {
         simlin_formats::xmile::project_from_reader(&mut std::io::BufReader::new(xml.as_bytes()))
             .expect("queue model");
     let conveyor = simlin_formats::xmile::project_from_reader(&mut std::io::BufReader::new(
-        include_str!("../../../../test/conveyors/conveyor_containers.xmile").as_bytes(),
+        include_str!("../../../test/conveyors/conveyor_containers.xmile").as_bytes(),
     ))
     .expect("conveyor model");
     for project in [queue, conveyor] {
         let main = project.models[0].name.as_str();
-        let mut db = crate::db::SimlinDb::default();
-        let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project, None);
-        let built = crate::queue_compile::compile_sim(
+        let mut db = simlin_engine::db::SimlinDb::default();
+        let sync = simlin_engine::db::sync_from_datamodel_incremental(&mut db, &project, None);
+        let built = simlin_engine::queue_compile::compile_sim(
             &mut db,
             sync.project,
             &project,
             main,
-            crate::db::LtmOverlay::Off,
+            simlin_engine::db::LtmOverlay::Off,
         )
         .expect("special-stock production dispatch");
         let unsplit = compile_with_passes(
@@ -359,7 +359,8 @@ fn split_preserves_special_stock_reconciliation_initials() {
         for rerun in run_artifact_results_repeated(&split, 2) {
             assert_same_slab(&expected, &rerun);
         }
-        let mut vm = crate::queue_compile::build_vm(&project, main).expect("special-stock VM");
+        let mut vm =
+            simlin_engine::queue_compile::build_vm(&project, main).expect("special-stock VM");
         vm.run_to_end().expect("VM run");
         let vm = vm.into_results();
         assert_eq!(vm.step_count, split.layout.n_chunks);

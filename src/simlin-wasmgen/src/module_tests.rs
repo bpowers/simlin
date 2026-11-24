@@ -8,10 +8,10 @@
 //! `use super::*` still resolves the module's private items.
 
 use super::*;
-use crate::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
-use crate::vm::Vm;
 use checked::Store;
 use simlin_base::common::{Canonical, Ident};
+use simlin_engine::Vm;
+use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
 use simlin_formats::compat::open_xmile;
 use std::io::BufReader;
 use wasm::validate;
@@ -295,7 +295,7 @@ fn assembled_module_initializes_gf_regions_in_memory() {
 #[test]
 fn compile_simulation_gf_lookup_modes_match_vm() {
     let knots = [(0.0, 10.0), (1.0, 20.0), (2.5, 5.0), (4.0, 40.0)];
-    let datamodel = crate::test_common::TestProject::new("gf_modes")
+    let datamodel = simlin_engine::test_common::TestProject::new("gf_modes")
         // TIME 0..6, dt 0.25 -> index = TIME-1 sweeps -1..5 over [0,4] table.
         .with_sim_time(0.0, 6.0, 0.25)
         .aux("input", "TIME - 1", None)
@@ -349,7 +349,7 @@ fn compile_simulation_reads_each_table_by_its_kind() {
         GraphicalFunctionKind::Extrapolate,
         GraphicalFunctionKind::Discrete,
     ];
-    let mut project = crate::test_common::TestProject::new("gf_kinds")
+    let mut project = simlin_engine::test_common::TestProject::new("gf_kinds")
         .with_sim_time(0.0, 6.0, 0.25)
         .aux("input", "TIME - 1", None);
     for kind in kinds {
@@ -406,7 +406,7 @@ fn compile_simulation_one_point_gf_matches_vm() {
             max: 10.0,
         },
     };
-    let datamodel = crate::test_common::TestProject::new("one_point_gf")
+    let datamodel = simlin_engine::test_common::TestProject::new("one_point_gf")
         .with_sim_time(0.0, 2.0, 1.0)
         .aux("input", "TIME - 1", None)
         .aux_with_gf("curve", "0", gf)
@@ -446,7 +446,7 @@ fn compile_simulation_one_point_gf_matches_vm() {
 /// and the end-to-end corpus gate in `simlin-tests/tests/integration/simulate.rs`.
 #[test]
 fn conveyor_models_lower_through_the_datamodel_entry_point() {
-    let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
+    let xml = include_str!("../../../test/conveyors/minimal_conveyor.xmile");
     let datamodel =
         open_xmile(&mut BufReader::new(xml.as_bytes())).expect("parse conveyor fixture");
     let main = datamodel.models[0].name.clone();
@@ -467,7 +467,7 @@ fn conveyor_models_lower_through_the_datamodel_entry_point() {
         );
     }
 
-    let mut vm = crate::queue_compile::build_vm(&datamodel, &main).expect("VM must build");
+    let mut vm = simlin_engine::queue_compile::build_vm(&datamodel, &main).expect("VM must build");
     vm.run_to_end().expect("VM must run the conveyor fixture");
 }
 
@@ -476,7 +476,7 @@ fn conveyor_models_lower_through_the_datamodel_entry_point() {
 /// kinds' entry-point contract stays visible side by side.
 #[test]
 fn queue_models_lower_through_the_datamodel_entry_point() {
-    let xml = include_str!("../../../../test/queues/queue_drain.xmile");
+    let xml = include_str!("../../../test/queues/queue_drain.xmile");
     let datamodel = open_xmile(&mut BufReader::new(xml.as_bytes())).expect("parse queue fixture");
     let main = datamodel.models[0].name.clone();
 
@@ -516,8 +516,13 @@ pub(super) fn compile_sim(
 ) -> std::sync::Arc<CompiledSimulation> {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, datamodel, None);
-    compile_project_incremental(&db, sync.project, model_name, crate::db::LtmOverlay::Off)
-        .expect("incremental compile")
+    compile_project_incremental(
+        &db,
+        sync.project,
+        model_name,
+        simlin_engine::db::LtmOverlay::Off,
+    )
+    .expect("incremental compile")
 }
 
 /// Run a `WasmArtifact` under the DLR-FT interpreter and return the
@@ -686,7 +691,7 @@ fn a_layouts_name_map_is_in_slot_order_whatever_database_compiled_it() {
 #[test]
 fn compile_simulation_simple_stock_flow_matches_vm() {
     // A minimal scalar Euler model: a stock filled by a constant inflow.
-    let datamodel = crate::test_common::TestProject::new("simple")
+    let datamodel = simlin_engine::test_common::TestProject::new("simple")
         .with_sim_time(0.0, 10.0, 1.0)
         .aux("inflow_rate", "2", None)
         .stock("level", "0", &["inflow"], &[], None)
@@ -723,7 +728,7 @@ fn compile_simulation_save_step_cadence_matches_vm() {
     // (plus the forced t=start sample) writes a results row. Every other
     // wasmgen test uses save_step = None (every step saved), so this is the
     // only coverage of the multi-step cadence.
-    let mut datamodel = crate::test_common::TestProject::new("cadence")
+    let mut datamodel = simlin_engine::test_common::TestProject::new("cadence")
         .with_sim_time(0.0, 10.0, 1.0)
         .aux("inflow_rate", "2", None)
         .stock("level", "0", &["inflow"], &[], None)
@@ -751,7 +756,7 @@ fn compile_simulation_save_step_cadence_matches_vm() {
 #[test]
 fn compile_simulation_conditional_model_matches_vm() {
     // Exercises the SetCond/If lowering through the whole-model path.
-    let datamodel = crate::test_common::TestProject::new("cond")
+    let datamodel = simlin_engine::test_common::TestProject::new("cond")
         .with_sim_time(0.0, 5.0, 1.0)
         .aux("threshold", "3", None)
         .aux("gated", "IF TIME > threshold THEN 10 ELSE 1", None)
@@ -774,7 +779,7 @@ fn compile_simulation_conditional_model_matches_vm() {
 /// `use_prev_fallback`.
 #[test]
 fn compile_simulation_previous_matches_vm() {
-    let datamodel = crate::test_common::TestProject::new("prev")
+    let datamodel = simlin_engine::test_common::TestProject::new("prev")
         .with_sim_time(0.0, 5.0, 1.0)
         // x ramps each step so PREVIOUS(x) is a visibly-lagged series.
         .stock("x", "10", &["grow"], &[], None)
@@ -845,7 +850,7 @@ pub(super) fn run_artifact_results_repeated(artifact: &WasmArtifact, runs: usize
 /// prior-run value.
 #[test]
 fn compile_simulation_repeated_run_resets_previous_fallback() {
-    let datamodel = crate::test_common::TestProject::new("prev_repeat")
+    let datamodel = simlin_engine::test_common::TestProject::new("prev_repeat")
         .with_sim_time(0.0, 5.0, 1.0)
         .stock("x", "10", &["grow"], &[], None)
         .flow("grow", "1", None)
@@ -898,7 +903,7 @@ fn compile_simulation_repeated_run_resets_previous_fallback() {
 /// against.
 #[test]
 fn compile_simulation_repeated_run_resets_previous_fallback_for_an_array_view() {
-    let datamodel = crate::test_common::TestProject::new("prev_array_repeat")
+    let datamodel = simlin_engine::test_common::TestProject::new("prev_array_repeat")
         .with_sim_time(0.0, 5.0, 1.0)
         .indexed_dimension("d", 3)
         .array_stock("x[d]", "10", &["grow"], &[], None)
@@ -1036,7 +1041,7 @@ fn rk_stage_delta_addresses_stock_above_65535() {
 /// initial value each step; the wasm series must match the VM.
 #[test]
 fn compile_simulation_init_from_flow_matches_vm() {
-    let datamodel = crate::test_common::TestProject::new("init_flow")
+    let datamodel = simlin_engine::test_common::TestProject::new("init_flow")
         .with_sim_time(0.0, 5.0, 1.0)
         .stock("level", "7", &["inflow"], &[], None)
         // INIT(level) is captured once at t0 (= 7) and stays 7 every step.
@@ -1072,7 +1077,7 @@ fn compile_simulation_init_from_flow_matches_vm() {
 /// just-computed `curr[seed]`, not an as-yet-unwritten `initial_values`.
 #[test]
 fn compile_simulation_init_from_initial_matches_vm() {
-    let datamodel = crate::test_common::TestProject::new("init_initial")
+    let datamodel = simlin_engine::test_common::TestProject::new("init_initial")
         .with_sim_time(0.0, 3.0, 1.0)
         .aux("seed", "5", None)
         // A stock whose INITIAL equation reads INIT(seed): during initials
@@ -1110,7 +1115,7 @@ fn compile_simulation_init_from_initial_matches_vm() {
 /// the map exposes only slots the two agree on.
 #[test]
 fn compile_simulation_init_capture_without_flow_refresh_matches_vm_and_reruns() {
-    let datamodel = crate::test_common::TestProject::new("init_capture_wasm")
+    let datamodel = simlin_engine::test_common::TestProject::new("init_capture_wasm")
         .with_sim_time(0.0, 3.0, 1.0)
         .aux("driver", "1 + TIME", None)
         .aux("frozen", "INIT(driver * 2)", None)
@@ -1162,7 +1167,7 @@ fn logistic_growth(
     name: &str,
     method: simlin_base::datamodel::SimMethod,
 ) -> simlin_base::datamodel::Project {
-    crate::test_common::TestProject::new(name)
+    simlin_engine::test_common::TestProject::new(name)
         .with_sim_time(0.0, 20.0, 0.5)
         .with_sim_method(method)
         .aux("rate", "0.3", None)
@@ -1249,7 +1254,7 @@ fn lotka_volterra(
     name: &str,
     method: simlin_base::datamodel::SimMethod,
 ) -> simlin_base::datamodel::Project {
-    crate::test_common::TestProject::new(name)
+    simlin_engine::test_common::TestProject::new(name)
         .with_sim_time(0.0, 5.0, 0.05)
         .with_sim_method(method)
         .aux("alpha", "1.1", None)
@@ -1353,7 +1358,7 @@ fn compile_simulation_two_stock_coupled_rk2_matches_vm() {
 /// from a trial point. `x_prev` lags `pop`; `pop_init` reads INIT(pop).
 #[test]
 fn compile_simulation_rk4_with_previous_and_init_matches_vm() {
-    let datamodel = crate::test_common::TestProject::new("rk4_prev_init")
+    let datamodel = simlin_engine::test_common::TestProject::new("rk4_prev_init")
         .with_sim_time(0.0, 10.0, 0.5)
         .with_sim_method(simlin_base::datamodel::SimMethod::RungeKutta4)
         .aux("rate", "0.3", None)
@@ -1970,7 +1975,7 @@ fn compile_simulation_submodel_nested_stock_rk4_matches_vm() {
 /// `smoothed`) is finite and compared exactly.
 #[test]
 fn compile_simulation_smooth_macro_matches_vm() {
-    let datamodel = crate::test_common::TestProject::new("smooth")
+    let datamodel = simlin_engine::test_common::TestProject::new("smooth")
         .with_sim_time(0.0, 8.0, 0.25)
         .aux("input", "TIME", None)
         .aux("smoothed", "SMTH1(input, 2)", None)
@@ -2009,7 +2014,7 @@ fn compile_simulation_smooth_macro_matches_vm() {
 /// NaN-aware for the same internal-`initial_value` reason as the SMTH1 test.
 #[test]
 fn compile_simulation_delay3_macro_rk4_matches_vm() {
-    let datamodel = crate::test_common::TestProject::new("delay3")
+    let datamodel = simlin_engine::test_common::TestProject::new("delay3")
         .with_sim_time(0.0, 8.0, 0.25)
         .with_sim_method(simlin_base::datamodel::SimMethod::RungeKutta4)
         .aux("input", "TIME", None)
@@ -2168,7 +2173,7 @@ fn assert_scalar_matches_vm(
 /// model (including the arrayed `source`) must match the VM.
 #[test]
 fn compile_simulation_sum_range_matches_vm() {
-    let datamodel = crate::test_common::TestProject::new("sum_range")
+    let datamodel = simlin_engine::test_common::TestProject::new("sum_range")
         .with_sim_time(0.0, 3.0, 1.0)
         .indexed_dimension("A", 5)
         .array_aux("source[A]", "3 * A + 1")
@@ -2188,7 +2193,7 @@ fn compile_simulation_sum_range_matches_vm() {
 /// itself is pinned by `lower.rs`'s `view_transpose_then_reduce_matches_vm`.)
 #[test]
 fn compile_simulation_sum_star_range_matches_vm() {
-    let datamodel = crate::test_common::TestProject::new("sum_star_range")
+    let datamodel = simlin_engine::test_common::TestProject::new("sum_star_range")
         .with_sim_time(0.0, 2.0, 1.0)
         .named_dimension("DimA", &["A1", "A2", "A3", "A4"])
         .named_dimension("SubA", &["A2", "A3"])
@@ -2214,7 +2219,7 @@ fn compile_simulation_sum_star_range_matches_vm() {
 /// per-row static view (the A2A target unrolls to per-element bytecode).
 #[test]
 fn compile_simulation_sliced_row_sum_matches_vm() {
-    let datamodel = crate::test_common::TestProject::new("row_sum")
+    let datamodel = simlin_engine::test_common::TestProject::new("row_sum")
         .with_sim_time(0.0, 2.0, 1.0)
         .indexed_dimension("D", 2)
         .indexed_dimension("E", 3)
@@ -2235,7 +2240,7 @@ fn compile_simulation_sliced_row_sum_matches_vm() {
 /// production lowering.
 #[test]
 fn compile_simulation_all_reducers_match_vm() {
-    let datamodel = crate::test_common::TestProject::new("all_reducers")
+    let datamodel = simlin_engine::test_common::TestProject::new("all_reducers")
         .with_sim_time(0.0, 2.0, 1.0)
         .indexed_dimension("A", 5)
         .array_aux("source[A]", "2 * A")
@@ -2282,7 +2287,7 @@ fn compile_simulation_all_reducers_match_vm() {
 /// the temp. The whole-model wasm must match the VM element-for-element.
 #[test]
 fn compile_simulation_hoisted_reducer_loop_matches_vm() {
-    let datamodel = crate::test_common::TestProject::new("hoist")
+    let datamodel = simlin_engine::test_common::TestProject::new("hoist")
         .with_sim_time(0.0, 2.0, 1.0)
         .indexed_dimension("A", 5)
         .array_aux("source[A]", "A")
@@ -2300,7 +2305,7 @@ fn compile_simulation_hoisted_reducer_loop_matches_vm() {
 /// deferred to the iteration task; the wasm must match the VM.
 #[test]
 fn compile_simulation_transpose_reducer_matches_vm() {
-    let datamodel = crate::test_common::TestProject::new("transpose")
+    let datamodel = simlin_engine::test_common::TestProject::new("transpose")
         .with_sim_time(0.0, 2.0, 1.0)
         .indexed_dimension("A", 2)
         .indexed_dimension("B", 3)
@@ -2358,7 +2363,7 @@ pub(super) fn assert_matches_vm_nan_aware(
 /// `LoadSubscript`), in range: the wasm must match the VM.
 #[test]
 fn compile_simulation_scalar_dynamic_subscript_in_range_matches_vm() {
-    let datamodel = crate::test_common::TestProject::new("dyn")
+    let datamodel = simlin_engine::test_common::TestProject::new("dyn")
         .with_sim_time(0.0, 2.0, 1.0)
         .indexed_dimension("A", 4)
         .array_aux("arr[A]", "A * 10")
@@ -2376,7 +2381,7 @@ fn compile_simulation_scalar_dynamic_subscript_in_range_matches_vm() {
 #[test]
 fn compile_simulation_scalar_dynamic_subscript_oob_is_nan() {
     // idx = 99 is well past the 4-element dimension -> NaN on both backends.
-    let datamodel = crate::test_common::TestProject::new("dyn_oob")
+    let datamodel = simlin_engine::test_common::TestProject::new("dyn_oob")
         .with_sim_time(0.0, 2.0, 1.0)
         .indexed_dimension("A", 4)
         .array_aux("arr[A]", "A * 10")
@@ -2410,7 +2415,7 @@ fn compile_simulation_scalar_dynamic_subscript_oob_is_nan() {
 /// view reduced to a scalar. In range, wasm matches the VM.
 #[test]
 fn compile_simulation_view_dynamic_subscript_in_range_matches_vm() {
-    let datamodel = crate::test_common::TestProject::new("vdyn")
+    let datamodel = simlin_engine::test_common::TestProject::new("vdyn")
         .with_sim_time(0.0, 2.0, 1.0)
         .indexed_dimension("A", 3)
         .indexed_dimension("B", 4)
@@ -2428,7 +2433,7 @@ fn compile_simulation_view_dynamic_subscript_in_range_matches_vm() {
 /// yields NaN for *all* reducers, matching `reduce_view`'s `if !is_valid`.
 #[test]
 fn compile_simulation_view_dynamic_subscript_oob_is_nan() {
-    let datamodel = crate::test_common::TestProject::new("vdyn_oob")
+    let datamodel = simlin_engine::test_common::TestProject::new("vdyn_oob")
         .with_sim_time(0.0, 2.0, 1.0)
         .indexed_dimension("A", 3)
         .indexed_dimension("B", 4)
@@ -2602,7 +2607,7 @@ fn vm_results_with_override(
 /// did not take) would diverge from the VM immediately.
 #[test]
 fn compile_simulation_set_value_override_matches_vm() {
-    let datamodel = crate::test_common::TestProject::new("override")
+    let datamodel = simlin_engine::test_common::TestProject::new("override")
         .with_sim_time(0.0, 5.0, 1.0)
         .aux("inflow_rate", "2", None)
         .stock("level", "0", &["inflow"], &[], None)
@@ -2671,7 +2676,7 @@ fn compile_simulation_set_value_override_matches_vm() {
 /// initialized to the compiled defaults and `reset` leaves them intact.
 #[test]
 fn compile_simulation_reset_no_override_restores_defaults() {
-    let datamodel = crate::test_common::TestProject::new("defaults")
+    let datamodel = simlin_engine::test_common::TestProject::new("defaults")
         .with_sim_time(0.0, 5.0, 1.0)
         .aux("inflow_rate", "2", None)
         .stock("level", "0", &["inflow"], &[], None)
@@ -2719,7 +2724,7 @@ fn compile_simulation_reset_no_override_restores_defaults() {
 /// rejected call the default run must be unchanged.
 #[test]
 fn compile_simulation_set_value_rejects_non_constant_offset() {
-    let datamodel = crate::test_common::TestProject::new("reject")
+    let datamodel = simlin_engine::test_common::TestProject::new("reject")
         .with_sim_time(0.0, 5.0, 1.0)
         .aux("inflow_rate", "2", None)
         .stock("level", "0", &["inflow"], &[], None)
@@ -2769,7 +2774,7 @@ fn compile_simulation_set_value_rejects_non_constant_offset() {
 /// run again -- the second run must reproduce the defaults.
 #[test]
 fn compile_simulation_clear_values_restores_defaults() {
-    let datamodel = crate::test_common::TestProject::new("clear")
+    let datamodel = simlin_engine::test_common::TestProject::new("clear")
         .with_sim_time(0.0, 5.0, 1.0)
         .aux("inflow_rate", "2", None)
         .stock("level", "0", &["inflow"], &[], None)
@@ -2842,7 +2847,7 @@ fn compile_simulation_clear_values_restores_defaults() {
 /// constant and a nested-module (SMOOTH) constant.
 #[test]
 fn wasm_overridable_set_matches_vm_constant_offsets() {
-    let datamodel = crate::test_common::TestProject::new("const_set")
+    let datamodel = simlin_engine::test_common::TestProject::new("const_set")
         .with_sim_time(0.0, 4.0, 0.5)
         .aux("k", "3", None)
         .aux("input", "TIME + k", None)
@@ -2890,7 +2895,7 @@ fn wasm_overridable_set_matches_vm_constant_offsets() {
 /// value -- exercising the initials-phase redirect, not just flows.
 #[test]
 fn compile_simulation_set_value_override_in_initials_matches_vm() {
-    let datamodel = crate::test_common::TestProject::new("override_init")
+    let datamodel = simlin_engine::test_common::TestProject::new("override_init")
         .with_sim_time(0.0, 3.0, 1.0)
         .aux("seed", "5", None)
         .stock("level", "seed", &["hold"], &[], None)
@@ -2950,7 +2955,7 @@ fn compile_simulation_set_value_override_in_initials_matches_vm() {
 /// `[0, stop]` at `dt`/`save_step` = 1. `level` integrates `inflow_rate` per
 /// step, so a wrong cursor or guard diverges immediately and visibly.
 fn resumable_fixture(stop: f64) -> simlin_base::datamodel::Project {
-    crate::test_common::TestProject::new("resumable")
+    simlin_engine::test_common::TestProject::new("resumable")
         .with_sim_time(0.0, stop, 1.0)
         .aux("inflow_rate", "2", None)
         .stock("level", "0", &["inflow"], &[], None)
@@ -3308,7 +3313,7 @@ fn both_backends_save_the_same_rows_for_any_specs() {
             (0.0, 10.0, 0.3, None, 34),
             (0.0, 20.0, 0.1, Some(1.0), 21),
         ] {
-            let mut project = crate::test_common::TestProject::new("specs")
+            let mut project = simlin_engine::test_common::TestProject::new("specs")
                 .with_sim_time(start, stop, dt)
                 .with_sim_method(method)
                 .stock("s", "0", &["f"], &[], None)
@@ -3361,7 +3366,7 @@ fn both_backends_save_the_same_rows_for_any_specs() {
 #[test]
 fn a_run_of_more_steps_than_the_counter_holds_is_refused() {
     let project = |stop: f64| {
-        let mut project = crate::test_common::TestProject::new("long")
+        let mut project = simlin_engine::test_common::TestProject::new("long")
             .with_sim_time(0.0, stop, 1.0)
             .stock("s", "0", &["f"], &[], None)
             .flow("f", "1", None)
@@ -3389,7 +3394,7 @@ fn a_run_of_more_steps_than_the_counter_holds_is_refused() {
 #[test]
 fn the_blob_refuses_the_specs_the_vm_refuses() {
     let base = compile_sim(
-        &crate::test_common::TestProject::new("specs")
+        &simlin_engine::test_common::TestProject::new("specs")
             .with_sim_time(0.0, 10.0, 1.0)
             .stock("s", "0", &["f"], &[], None)
             .flow("f", "1", None)
@@ -3421,7 +3426,7 @@ fn the_blob_refuses_the_specs_the_vm_refuses() {
     // Specs compiled from the project, whose rows are then counted from
     // them: the refusal is asked before anything is sized.
     let dt_zero = compile_sim(
-        &crate::test_common::TestProject::new("specs")
+        &simlin_engine::test_common::TestProject::new("specs")
             .with_sim_time(0.0, 10.0, 0.0)
             .stock("s", "0", &["f"], &[], None)
             .flow("f", "1", None)
@@ -3485,7 +3490,7 @@ fn where_a_run_rests_on_each_backend() {
         SimMethod::RungeKutta4,
     ] {
         for (save_step, rows) in table {
-            let mut project = crate::test_common::TestProject::new("rest")
+            let mut project = simlin_engine::test_common::TestProject::new("rest")
                 .with_sim_time(0.0, 10.0, 1.0)
                 .with_sim_method(method)
                 .stock("s", "1", &["f"], &[], None)
@@ -3608,7 +3613,7 @@ fn mid_run_curr_is_self_consistent_and_matches_vm() {
     // a PREVIOUS aux mid-run: at the advanced resting point its re-eval reads
     // the last completed step's snapshot, which IS the previous timestep -- so
     // both backends must agree on it too (the `level` of the step before).
-    let datamodel = crate::test_common::TestProject::new("midrun")
+    let datamodel = simlin_engine::test_common::TestProject::new("midrun")
         .with_sim_time(0.0, 10.0, 1.0)
         .aux("inflow_rate", "2", None)
         .stock("level", "0", &["inflow"], &[], None)
@@ -3692,7 +3697,7 @@ fn mid_run_curr_is_self_consistent_and_matches_vm() {
 fn full_run_previous_aux_curr_matches_series_and_vm() {
     // level grows 2/step from 0; prev_level(t) = level(t-dt). At t=stop=5 the
     // correct prev_level is level(4) = 8 -- NOT level(5) = 10.
-    let datamodel = crate::test_common::TestProject::new("prev_full")
+    let datamodel = simlin_engine::test_common::TestProject::new("prev_full")
         .with_sim_time(0.0, 5.0, 1.0)
         .aux("rate", "2", None)
         .stock("level", "0", &["inflow"], &[], None)
@@ -4268,7 +4273,7 @@ fn compile_simulation_mixed_shape_array_operand_matches_vm() {
             "VECTOR SORT ORDER(matrix[e,d] + vals[d], 1)",
         ),
     ] {
-        let datamodel = crate::test_common::TestProject::new(name)
+        let datamodel = simlin_engine::test_common::TestProject::new(name)
             .with_sim_time(0.0, 2.0, 1.0)
             .indexed_dimension("d", 3)
             .indexed_dimension("e", 2)
@@ -4305,13 +4310,13 @@ fn compile_simulation_mixed_shape_array_operand_matches_vm() {
 /// keeps the two addressing implementations from drifting once both are right.
 #[test]
 fn compile_simulation_arrayed_submodel_views_address_their_instance() {
-    let datamodel = crate::test_common::two_instance_arrayed_submodel_project();
+    let datamodel = simlin_engine::test_common::two_instance_arrayed_submodel_project();
     let sim = compile_sim(&datamodel, "main");
     let artifact = compile_simulation(&sim).expect("wasm codegen");
     let data = run_artifact_results(&artifact);
     let n_slots = artifact.layout.n_slots;
 
-    for (name, expected) in crate::test_common::two_instance_arrayed_submodel_expected() {
+    for (name, expected) in simlin_engine::test_common::two_instance_arrayed_submodel_expected() {
         let off = artifact
             .layout
             .var_offsets
@@ -4340,13 +4345,14 @@ fn compile_simulation_arrayed_submodel_views_address_their_instance() {
 /// reason the one-hop wasm pin is.
 #[test]
 fn compile_simulation_nested_arrayed_submodel_views_address_their_instance() {
-    let datamodel = crate::test_common::nested_instance_arrayed_submodel_project();
+    let datamodel = simlin_engine::test_common::nested_instance_arrayed_submodel_project();
     let sim = compile_sim(&datamodel, "main");
     let artifact = compile_simulation(&sim).expect("wasm codegen");
     let data = run_artifact_results(&artifact);
     let n_slots = artifact.layout.n_slots;
 
-    for (name, expected) in crate::test_common::nested_instance_arrayed_submodel_expected() {
+    for (name, expected) in simlin_engine::test_common::nested_instance_arrayed_submodel_expected()
+    {
         let off = artifact
             .layout
             .var_offsets

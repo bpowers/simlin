@@ -39,7 +39,7 @@ use std::collections::VecDeque;
 /// [`ErrorCode::ConveyorTransitTooLong`]: simlin_base::common::ErrorCode::ConveyorTransitTooLong
 pub(crate) const MAX_SLATS_PER_BELT: usize = 1_000_000;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// Test-only override of [`MAX_SLATS_PER_BELT`], scoped by an active
     /// [`SlatBoundGuard`]. Lets a test trip the slat-count gate with a tiny
@@ -50,10 +50,10 @@ thread_local! {
 }
 
 /// The per-belt slat-count bound for the current thread. Production returns
-/// [`MAX_SLATS_PER_BELT`]; in a `#[cfg(test)]` build an active
+/// [`MAX_SLATS_PER_BELT`]; in a `#[cfg(any(test, feature = "test-support"))]` build an active
 /// [`SlatBoundGuard`] override takes precedence.
-pub(crate) fn slat_bound() -> usize {
-    #[cfg(test)]
+pub fn slat_bound() -> usize {
+    #[cfg(any(test, feature = "test-support"))]
     {
         if let Some(b) = SLAT_BOUND_OVERRIDE.with(|c| c.get()) {
             return b;
@@ -65,20 +65,20 @@ pub(crate) fn slat_bound() -> usize {
 /// RAII guard (test-only) that overrides [`slat_bound`] for the current thread
 /// for the guard's lifetime, restoring the previous value on drop -- so a
 /// panicking test never leaks the override to the next test reusing the thread.
-#[cfg(test)]
-pub(crate) struct SlatBoundGuard {
+#[cfg(any(test, feature = "test-support"))]
+pub struct SlatBoundGuard {
     prev: Option<usize>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl SlatBoundGuard {
-    pub(crate) fn new(bound: usize) -> Self {
+    pub fn new(bound: usize) -> Self {
         let prev = SLAT_BOUND_OVERRIDE.with(|c| c.replace(Some(bound)));
         Self { prev }
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for SlatBoundGuard {
     fn drop(&mut self) {
         SLAT_BOUND_OVERRIDE.with(|c| c.set(self.prev));

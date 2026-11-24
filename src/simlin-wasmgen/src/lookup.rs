@@ -498,10 +498,10 @@ fn push_y_const0(f: &mut Function) {
 #[cfg(test)]
 mod tests {
     use super::super::lower::build_helpers;
-    use crate::bytecode::LookupMode;
-    use crate::vm::lookup_in_mode;
     use checked::Store;
     use proptest::prelude::*;
+    use simlin_engine::bytecode::LookupMode;
+    use simlin_engine::vm::lookup_in_mode;
     use wasm::validate;
     use wasm_encoder::{
         CodeSection, ConstExpr, DataSection, ExportKind, ExportSection, FunctionSection,

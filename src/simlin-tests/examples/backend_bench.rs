@@ -51,9 +51,9 @@ use checked::Store;
 use simlin_base::common::{Canonical, Ident};
 use simlin_base::datamodel;
 use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
-use simlin_engine::wasmgen::{WasmArtifact, compile_simulation};
 use simlin_engine::{CompiledSimulation, Vm};
 use simlin_formats::{open_vensim, open_xmile};
+use simlin_wasmgen::{WasmArtifact, compile_simulation};
 use wasm::validate;
 
 // ── Counting allocator ──────────────────────────────────────────────────────

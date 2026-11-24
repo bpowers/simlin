@@ -17,7 +17,7 @@
 //! an out-of-range subscript yields NaN. So the blob had nothing to report and
 //! `run`/`run_to`/`run_initials` had no early-return path. The conveyor belt
 //! pass (GH #922) breaks that: `conveyor_compile::check_slat_bound` rejects a
-//! latched transit time whose slat count exceeds [`crate::conveyor::slat_bound`],
+//! latched transit time whose slat count exceeds `simlin_engine::conveyor::slat_bound`,
 //! both at belt init (`init_belts`) and at a mid-run `<sample>` re-latch
 //! (`run_phase_a`), and the bytecode VM turns that into a hard `Err` out of
 //! `run_initials` / `run_to`.
@@ -61,8 +61,8 @@
 
 use wasm_encoder::{BlockType, Function, Instruction as I};
 
-use crate::conveyor_compile::ConveyorPlan;
 use simlin_base::common::ErrorCode;
+use simlin_engine::conveyor_compile::ConveyorPlan;
 
 /// Index of the error-code global. It follows the seven globals `module.rs`
 /// reserves (three immutable geometry globals, `use_prev_fallback`, and the
@@ -351,10 +351,10 @@ pub fn decode_error_word(word: i64) -> Option<BlobError> {
 /// # Byte-identity
 ///
 /// The message strings are not duplicated here: this delegates to
-/// [`crate::conveyor_compile::transit_too_long_error`] and
-/// [`crate::conveyor_compile::transit_not_positive_error`], the same constructors
+/// `simlin_engine::conveyor_compile::transit_too_long_error` and
+/// `simlin_engine::conveyor_compile::transit_not_positive_error`, the same constructors
 /// the VM's `init_belts` / `run_phase_a` call. Those read
-/// [`crate::conveyor::slat_bound`], so a test holding a `SlatBoundGuard` sees the
+/// `simlin_engine::conveyor::slat_bound`, so a test holding a `SlatBoundGuard` sees the
 /// same bound the emitter baked in.
 ///
 /// An unrecognized code, or a belt index outside `plans`, yields a loud
@@ -382,11 +382,11 @@ pub fn reconstruct_error(
     let transit = read_curr_slot(plan.len_off);
 
     if code == ErrorCode::ConveyorTransitTooLong as i32 {
-        Some(crate::conveyor_compile::transit_too_long_error(
+        Some(simlin_engine::conveyor_compile::transit_too_long_error(
             &plan.name, transit, dt,
         ))
     } else if code == ErrorCode::ConveyorTransitNotPositive as i32 {
-        Some(crate::conveyor_compile::transit_not_positive_error(
+        Some(simlin_engine::conveyor_compile::transit_not_positive_error(
             &plan.name, transit,
         ))
     } else {

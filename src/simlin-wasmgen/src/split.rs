@@ -35,7 +35,7 @@ pub(super) struct ProgramSplitter {
 }
 
 impl ProgramSplitter {
-    pub fn new(first_index: u32, target_bytes: usize) -> Self {
+    pub(crate) fn new(first_index: u32, target_bytes: usize) -> Self {
         Self {
             first_index,
             target_bytes: target_bytes.min(MAX_BODY_BYTES),
@@ -48,7 +48,7 @@ impl ProgramSplitter {
     /// whose bodies retain the original local numbering and instruction bytes.
     /// `frame` contains only local declarations; `body` includes its final End;
     /// `safe_offsets` are absolute encoded-body offsets supplied by lowering.
-    pub fn finish(
+    pub(crate) fn finish(
         &mut self,
         frame: Function,
         body: Function,

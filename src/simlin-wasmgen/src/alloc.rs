@@ -984,7 +984,7 @@ fn emit_f64_max(f: &mut Function) {
 /// both NaN, NaN). Parks `a`/`b` in scratch locals reused from the bisection
 /// (`ALLOC_LO`/`ALLOC_HI`/`ALLOC_MID` are not yet live when the search range is
 /// computed, so they are free here). Three nested `select`s in the wasm
-/// "deeper operand wins when cond != 0" form, matching `crate::vm`'s `f64::min`/
+/// "deeper operand wins when cond != 0" form, matching `simlin_engine::vm`'s `f64::min`/
 /// `max` reductions.
 fn emit_f64_minmax(f: &mut Function, want_min: bool) {
     let a = ALLOC_LO;

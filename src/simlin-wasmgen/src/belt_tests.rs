@@ -17,15 +17,13 @@
 //! pins the expected series independently -- a VM-vs-wasm diff alone would pass
 //! vacuously if both backends were wrong the same way.
 
-use crate::conveyor::SlatBoundGuard;
-use crate::conveyor_compile::ConveyorPlan;
-use crate::db::{SimlinDb, sync_from_datamodel_incremental};
-use crate::queue_compile::{build_vm, compile_sim};
-use crate::wasmgen::{
-    WasmArtifact, WasmGenError, compile_datamodel_to_artifact, reconstruct_error,
-};
+use crate::{WasmArtifact, WasmGenError, compile_datamodel_to_artifact, reconstruct_error};
 use checked::{Store, Stored, StoredValue};
 use simlin_base::common::{Canonical, ErrorCode, Ident};
+use simlin_engine::conveyor::SlatBoundGuard;
+use simlin_engine::conveyor_compile::ConveyorPlan;
+use simlin_engine::db::{SimlinDb, sync_from_datamodel_incremental};
+use simlin_engine::queue_compile::{build_vm, compile_sim};
 use std::io::BufReader;
 use wasm::addrs::ModuleAddr;
 use wasm::validate;
@@ -84,7 +82,7 @@ fn conveyor_plans(project: &simlin_base::datamodel::Project) -> Vec<ConveyorPlan
         sync.project,
         project,
         &main,
-        crate::db::LtmOverlay::Off,
+        simlin_engine::db::LtmOverlay::Off,
     )
     .expect("conveyor model must build")
     .conveyor_plans
@@ -454,7 +452,7 @@ fn set_ignore_earlier_zone_losses(project: &mut simlin_base::datamodel::Project)
 #[test]
 fn minimal_conveyor_fixture_matches_vm() {
     let project = parse(include_str!(
-        "../../../../test/conveyors/minimal_conveyor.xmile"
+        "../../../test/conveyors/minimal_conveyor.xmile"
     ));
     let artifact = artifact_for(&project);
     let checked = assert_slab_matches_vm(&project, &artifact);
@@ -481,7 +479,7 @@ fn minimal_conveyor_fixture_matches_vm() {
 #[test]
 fn arrayed_conveyor_fixture_matches_vm() {
     let project = parse(include_str!(
-        "../../../../test/conveyors/arrayed_conveyor.xmile"
+        "../../../test/conveyors/arrayed_conveyor.xmile"
     ));
     let artifact = artifact_for(&project);
     let checked = assert_slab_matches_vm(&project, &artifact);
@@ -4603,7 +4601,7 @@ fn spreadflow_placements_are_rejected() {
 #[test]
 fn covid_leak_fixture_is_blocked_by_the_driven_flow_read_rule() {
     let project = parse(include_str!(
-        "../../../../test/conveyors/covid19_severity.stmx"
+        "../../../test/conveyors/covid19_severity.stmx"
     ));
     assert_shared_dispatch_refusal(&project, ErrorCode::ConveyorDrivenFlowRead);
 }
@@ -4650,7 +4648,7 @@ fn assert_shared_dispatch_refusal(project: &simlin_base::datamodel::Project, cod
 #[test]
 fn sir_fixture_is_blocked_by_the_submodel_rule() {
     let project = parse(include_str!(
-        "../../../../test/conveyors/sir_social_distancing_mixnot.stmx"
+        "../../../test/conveyors/sir_social_distancing_mixnot.stmx"
     ));
     assert_shared_dispatch_refusal(&project, ErrorCode::ConveyorInSubmodelUnsupported);
 }

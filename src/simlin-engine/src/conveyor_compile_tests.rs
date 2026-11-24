@@ -418,7 +418,7 @@ fn directly_assembled_vm_rejects_pass_driven_overrides() {
     // arm alone. The no-Vm twin (libsimlin validating after `run_to_end`
     // consumed its Vm) is pinned by
     // `test_set_value_on_conveyor_driven_flow_rejected`, the wasm twin by
-    // `wasmgen::belt_tests::set_value_rejects_the_driven_outflow`, and
+    // `simlin_wasmgen::belt_tests::set_value_rejects_the_driven_outflow`, and
     // re-attachment with a different plan set by
     // `reattached_conveyor_plans_redefine_the_overridable_set` below.
     let project = parse(&override_leak_model());

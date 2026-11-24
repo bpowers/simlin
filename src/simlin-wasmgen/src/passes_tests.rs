@@ -13,10 +13,10 @@
 //! `queue_compile::compile_sim` dispatch), runs the blob under the DLR-FT
 //! interpreter, and diffs the two slabs variable-by-variable.
 
-use crate::queue_compile::build_vm;
-use crate::wasmgen::{WasmArtifact, compile_datamodel_to_artifact};
+use crate::{WasmArtifact, compile_datamodel_to_artifact};
 use checked::{Store, Stored};
 use simlin_base::common::{Canonical, Ident};
+use simlin_engine::queue_compile::build_vm;
 use std::io::BufReader;
 use wasm::addrs::ModuleAddr;
 use wasm::validate;
@@ -196,7 +196,7 @@ fn wasm_series(artifact: &WasmArtifact, slab: &[f64], name: &str) -> Vec<f64> {
 /// (`compile_datamodel_to_artifact` rejected every queue model up front).
 #[test]
 fn queue_drain_fixture_matches_vm() {
-    let project = parse(include_str!("../../../../test/queues/queue_drain.xmile"));
+    let project = parse(include_str!("../../../test/queues/queue_drain.xmile"));
     let artifact = artifact_for(&project);
     let checked = assert_slab_matches_vm(&project, &artifact);
     assert!(checked >= 4, "expected the whole model, checked {checked}");
@@ -219,7 +219,7 @@ fn queue_drain_fixture_matches_vm() {
 /// `queues.md` §4.5 no-upstream-conveyor behavior.
 #[test]
 fn minimal_queue_overflow_fixture_matches_vm() {
-    let project = parse(include_str!("../../../../test/queues/minimal_queue.xmile"));
+    let project = parse(include_str!("../../../test/queues/minimal_queue.xmile"));
     let artifact = artifact_for(&project);
     assert_slab_matches_vm(&project, &artifact);
 
@@ -710,7 +710,7 @@ fn resumed_run_to_does_not_reinitialize_the_side_table() {
 /// above) -- here we check the resting values themselves.
 #[test]
 fn midrun_resting_curr_holds_the_pass_driven_rate() {
-    let project = parse(include_str!("../../../../test/queues/queue_drain.xmile"));
+    let project = parse(include_str!("../../../test/queues/queue_drain.xmile"));
     let artifact = artifact_for(&project);
     let single = run_artifact(&artifact);
 
@@ -884,7 +884,7 @@ fn set_value_override_on_a_queue_inflow_matches_vm() {
 /// carries no pass machinery -- the routing change is transparent to it.
 #[test]
 fn ordinary_model_still_lowers_through_the_dispatch() {
-    let datamodel = crate::test_common::TestProject::new("plain")
+    let datamodel = simlin_engine::test_common::TestProject::new("plain")
         .with_sim_time(0.0, 5.0, 1.0)
         .aux("rate", "2", None)
         .stock("level", "0", &["inflow"], &[], None)
@@ -895,4 +895,36 @@ fn ordinary_model_still_lowers_through_the_dispatch() {
     let slab = run_artifact(&artifact);
     let level = wasm_series(&artifact, &slab, "level");
     assert_eq!(level, vec![0.0, 2.0, 4.0, 6.0, 8.0, 10.0]);
+}
+
+/// `compile_datamodel_to_artifact` is a production path
+/// (`simlin_model_compile_to_wasm`) that never touches `compile_sim`: its own
+/// up-front reject scans for special-stock STOCKS, then it calls
+/// `compile_project_incremental` directly. Validating markers in the dispatch would
+/// have left the wasm backend silently accepting a stray overflow while the VM
+/// rejected it (`queue_compile_db_tests`) -- a backend divergence. Both must reject.
+#[test]
+fn overflow_marker_without_queue_is_rejected_by_the_wasm_backend() {
+    let project = parse(
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<xmile version="1.0" xmlns="http://docs.oasis-open.org/xmile/ns/XMILE/v1.0">
+  <header><name>q</name><vendor>t</vendor><product version="1.0">t</product></header>
+  <sim_specs method="Euler"><start>0</start><stop>2</stop><dt>0.5</dt></sim_specs>
+  <model><variables>
+    <stock name="src"><eqn>100</eqn><outflow>drain</outflow></stock>
+    <flow name="drain"><eqn>1</eqn><overflow/></flow>
+    <stock name="sink"><eqn>0</eqn><inflow>drain</inflow></stock>
+  </variables></model>
+</xmile>"#,
+    );
+    let main = project.models[0].name.clone();
+
+    let err = compile_datamodel_to_artifact(&project, &main, false, false)
+        .err()
+        .expect("the wasm backend must reject a stray <overflow/> too");
+    let crate::WasmGenError::Unsupported(msg) = err;
+    assert!(
+        msg.contains("QueueOverflowNotOnQueue"),
+        "the wasm compile error must carry the marker-placement rejection: {msg}"
+    );
 }

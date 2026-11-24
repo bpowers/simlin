@@ -137,7 +137,7 @@ impl Specs {
     /// Why no run can be made under these specs, if none can: a stop time
     /// before the start time, or a DT that is not a positive number. The one
     /// statement both backends refuse specs by (`Vm::with_specs`,
-    /// `wasmgen::compile_simulation`). Any positive DT is accepted, however
+    /// `simlin_wasmgen::compile_simulation`). Any positive DT is accepted, however
     /// small: whether its run can be held is the backend's question.
     pub fn refusal(&self) -> Option<&'static str> {
         if self.stop < self.start {
@@ -165,7 +165,7 @@ impl Specs {
     /// The index of the last step at or before `time`, as a number of steps:
     /// it is compared with a step count, which an `f64` holds exactly, and a
     /// time before the start is before step zero (negative). The wasm backend
-    /// computes the same expression (`wasmgen::module::emit_run_to`), so the
+    /// computes the same expression (`simlin_wasmgen::module::emit_run_to`), so the
     /// two stop at the same step for any target.
     pub fn step_at_or_before(&self, time: f64) -> f64 {
         ((time - self.start) / self.dt + STEP_TOLERANCE).floor()
@@ -202,7 +202,7 @@ impl Specs {
     /// time, `row` save steps from the start; as a number of steps, for
     /// comparing with a step count. Both backends decide whether a step is
     /// saved by comparing its index with this for the next row
-    /// (`Vm::run_steps`, `wasmgen::module::emit_save_advance`), in the same
+    /// (`Vm::run_steps`, `simlin_wasmgen::module::emit_save_advance`), in the same
     /// f64 operations, so they save the same steps.
     pub fn saved_row_step(&self, row: u64) -> f64 {
         Self::saved_row_step_at(self.save_step_in_steps(), row)

@@ -16,7 +16,7 @@ use wasm_encoder::{
     TypeSection, ValType,
 };
 
-use crate::bytecode::ByteCodeContext;
+use simlin_engine::bytecode::ByteCodeContext;
 use std::sync::OnceLock;
 
 /// Local layout for the test harness function. The function takes `module_off`
@@ -37,8 +37,9 @@ fn empty_ctx() -> &'static ByteCodeContext {
 /// tests build single root-only functions (0 module inputs) and never emit an
 /// `EvalModule`, so the map is never consulted. The whole-model `EvalModule` /
 /// `LoadModuleInput` parity is exercised end-to-end in `module.rs`'s tests.
-fn empty_module_fn_index() -> &'static IdentMap<(crate::vm::ModuleKey, StepPart), u32> {
-    static EMPTY: OnceLock<IdentMap<(crate::vm::ModuleKey, StepPart), u32>> = OnceLock::new();
+fn empty_module_fn_index() -> &'static IdentMap<(simlin_engine::vm::ModuleKey, StepPart), u32> {
+    static EMPTY: OnceLock<IdentMap<(simlin_engine::vm::ModuleKey, StepPart), u32>> =
+        OnceLock::new();
     EMPTY.get_or_init(IdentMap::default)
 }
 
@@ -958,7 +959,7 @@ fn run_lookup_opcode(
 
 /// The VM oracle for `mode` -- the exact function the opcode dispatches to.
 fn vm_lookup_oracle(mode: LookupMode, knots: &[(f64, f64)], index: f64) -> f64 {
-    crate::vm::lookup_in_mode(mode, knots, index)
+    simlin_engine::vm::lookup_in_mode(mode, knots, index)
 }
 
 fn assert_lookup_opcode_matches_vm(mode: LookupMode, knots: &[(f64, f64)], index: f64) {
@@ -1771,7 +1772,7 @@ fn vm_ramp(time: f64, slope: f64, start: f64, end: f64) -> f64 {
     }
 }
 fn vm_pulse(time: f64, dt: f64, volume: f64, first: f64, interval: f64) -> f64 {
-    crate::vm::pulse(time, dt, volume, first, interval)
+    simlin_engine::vm::pulse(time, dt, volume, first, interval)
 }
 
 /// Assert a wasm `Apply` result equals an exact f64 value (for the
@@ -1816,9 +1817,9 @@ fn apply_min_max() {
 /// zero, matching `round_ties_even`.
 #[test]
 fn apply_round() {
-    for &(input, expected) in crate::test_common::ROUND_TIES_TO_EVEN_CASES {
+    for &(input, expected) in simlin_engine::test_common::ROUND_TIES_TO_EVEN_CASES {
         let got = apply_eval(BuiltinId::Round, input, 0.0, 0.0, 0.0, 1.0);
-        crate::test_common::assert_round_case(input, got, expected, "wasm-apply");
+        simlin_engine::test_common::assert_round_case(input, got, expected, "wasm-apply");
     }
 }
 
@@ -2126,7 +2127,7 @@ fn load_temp_const_reads_temp_storage() {
 // Reuses `TEMP_BASE` / `ctx_with_arrays` from the Task 1 section above.
 // ════════════════════════════════════════════════════════════════════════
 
-use crate::bytecode::{DimensionInfo, RuntimeSparseMapping, StaticArrayView, ViewStorage};
+use simlin_engine::bytecode::{DimensionInfo, RuntimeSparseMapping, StaticArrayView, ViewStorage};
 use smallvec::SmallVec;
 
 fn seed_run(base_byte: u64, values: &[f64]) -> Vec<(u64, f64)> {
@@ -3289,7 +3290,7 @@ fn array_size_over_huge_view_is_free() {
 // per-element offset array into a `write_temp_id` temp region. Both are run
 // under DLR-FT and cross-checked against the VM: VectorSelect against a faithful
 // oracle of the `vm.rs:2444-2502` arm, VectorElmMap against the sibling
-// `crate::vm_vector_elm_map::vector_elm_map` function directly.
+// `simlin_engine::vm_vector_elm_map::vector_elm_map` function directly.
 // ════════════════════════════════════════════════════════════════════════
 
 /// The VM `VectorSelect` oracle (mirroring `vm.rs:2444-2502`): zip the two views
@@ -3313,12 +3314,12 @@ fn vm_vector_select_oracle(
     for _ in 0..size {
         let sel_off = sel_rv.flat_offset(&sel_idx);
         let sel_val = sel_data[sel_rv.base_off as usize + sel_off];
-        if crate::vm::is_truthy(sel_val) {
+        if simlin_engine::vm::is_truthy(sel_val) {
             let expr_off = expr_rv.flat_offset(&expr_idx);
             selected.push(expr_data[expr_rv.base_off as usize + expr_off]);
         }
-        crate::vm::increment_indices(&mut sel_idx, &sel_rv.dims);
-        crate::vm::increment_indices(&mut expr_idx, &expr_rv.dims);
+        simlin_engine::vm::increment_indices(&mut sel_idx, &sel_rv.dims);
+        simlin_engine::vm::increment_indices(&mut expr_idx, &expr_rv.dims);
     }
     if selected.is_empty() {
         max_value
@@ -3532,7 +3533,7 @@ fn run_vector_elm_map(
 }
 
 /// The VM oracle for `VectorElmMap`: run the sibling
-/// `crate::vm_vector_elm_map::vector_elm_map` over `RuntimeView`s built from the
+/// `simlin_engine::vm_vector_elm_map::vector_elm_map` over `RuntimeView`s built from the
 /// same static views, reading `curr` from `data`. Returns the written temp 0
 /// slots (`temp_slots` wide).
 fn vm_elm_map_oracle(
@@ -3545,12 +3546,12 @@ fn vm_elm_map_oracle(
     let mut context = ByteCodeContext::default();
     context.set_temp_info(vec![0], temp_slots);
     let mut temp_storage = vec![0.0f64; temp_slots];
-    crate::vm_vector_elm_map::vector_elm_map(
+    simlin_engine::vm_vector_elm_map::vector_elm_map(
         &source.to_runtime_view(0),
         &offset.to_runtime_view(0),
         0,
         full_source_len,
-        crate::vm::ChunkRegions::curr_only(data),
+        simlin_engine::vm::ChunkRegions::curr_only(data),
         &mut temp_storage,
         &context,
     );
@@ -3691,7 +3692,7 @@ fn build_round_probe_module() -> Vec<u8> {
     func.instruction(&Instruction::I32Const(0));
     func.instruction(&Instruction::I32Const(0));
     func.instruction(&Instruction::F64Load(memarg(0)));
-    crate::wasmgen::vector::emit_round_half_away(&mut func, ctx.scratch_local, ctx.apply_locals[0]);
+    crate::vector::emit_round_half_away(&mut func, ctx.scratch_local, ctx.apply_locals[0]);
     func.instruction(&Instruction::F64Store(memarg(0)));
     func.instruction(&Instruction::End);
     code.function(&func);
@@ -3878,7 +3879,7 @@ fn run_sort_op(
 }
 
 /// The VM oracle for `VectorSortOrder`: run the sibling
-/// `crate::vm_vector_sort_order::vector_sort_order` over a `RuntimeView`.
+/// `simlin_engine::vm_vector_sort_order::vector_sort_order` over a `RuntimeView`.
 fn vm_sort_order_oracle(
     input: &StaticArrayView,
     direction: i32,
@@ -3888,11 +3889,11 @@ fn vm_sort_order_oracle(
     let mut context = ByteCodeContext::default();
     context.set_temp_info(vec![0], temp_slots);
     let mut temp_storage = vec![0.0f64; temp_slots];
-    crate::vm_vector_sort_order::vector_sort_order(
+    simlin_engine::vm_vector_sort_order::vector_sort_order(
         &input.to_runtime_view(0),
         direction,
         0,
-        crate::vm::ChunkRegions::curr_only(data),
+        simlin_engine::vm::ChunkRegions::curr_only(data),
         &mut temp_storage,
         &context,
     );
@@ -3915,7 +3916,7 @@ fn vm_rank_oracle(
     for i in 0..size {
         let flat = rv.flat_offset(&idx);
         indexed.push((data[rv.base_off as usize + flat], i));
-        crate::vm::increment_indices(&mut idx, &rv.dims);
+        simlin_engine::vm::increment_indices(&mut idx, &rv.dims);
     }
     if direction == 1 {
         indexed.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -4314,7 +4315,7 @@ fn vm_lookup_array_oracle(
             let gf = tables[base_gf as usize + elem_off];
             vm_lookup_oracle(mode, gf, index)
         };
-        crate::vm::increment_indices(&mut idx, &rv.dims);
+        simlin_engine::vm::increment_indices(&mut idx, &rv.dims);
     }
     temp
 }

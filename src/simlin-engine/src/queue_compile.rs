@@ -1314,7 +1314,7 @@ fn apply_couplings(
 /// A coupled queue serve wired to one conveyor (derived from the plans by
 /// [`CouplingTable::build`]).
 ///
-/// Public because the wasm backend (`wasmgen::module`) unrolls the same interleaved
+/// Public because the wasm backend (`simlin_wasmgen::module`) unrolls the same interleaved
 /// order [`run_coupled_passes`] walks, and must read the very table the VM reads:
 /// deriving a second one there is how the two backends' admission priorities would
 /// drift apart.

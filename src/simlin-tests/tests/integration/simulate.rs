@@ -11,11 +11,11 @@ use simlin_base::{ErrorCode, Method, Results, SimSpecs as Specs};
 use simlin_engine::Vm;
 use simlin_engine::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
 use simlin_engine::queue_compile::build_vm;
-use simlin_engine::wasmgen::{WasmGenError, compile_datamodel_to_artifact};
 use simlin_formats::FilesystemDataProvider;
 use simlin_formats::project_io;
 use simlin_formats::serde::{deserialize, serialize};
 use simlin_formats::{load_csv, load_dat, open_vensim, open_vensim_with_data, xmile};
+use simlin_wasmgen::{WasmGenError, compile_datamodel_to_artifact};
 
 use crate::test_helpers::{
     WasmRunOutcome, ensure_results, ensure_results_excluding, ensure_wasm_matches,
@@ -7086,7 +7086,7 @@ fn corpus_clearn_macros_import() {
 /// runs by default; that is the fix for the problem this paragraph describes.
 ///
 /// Layout impact (the resource this gate protects -- #654's VM limit of 65,536
-/// u16 result slots, NOT `wasmgen::lower`'s unrelated `MAX_UNROLL_UNITS`): the
+/// u16 result slots, NOT `simlin_wasmgen::lower`'s unrelated `MAX_UNROLL_UNITS`): the
 /// per-step result-row width is **28,725 slots**, 44% of the ceiling, with
 /// 36,811 free. Both numbers come from
 /// `examples/ltm_slot_width.rs`, so re-deriving them is a command rather than a

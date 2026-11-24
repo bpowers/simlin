@@ -684,7 +684,7 @@ changing a cohort's schedule.
 
 > **Implementation note.** Neither backend quantizes on an *exponential* belt:
 > `conveyor.rs`'s `leak_step` returns from its exponential arm before reaching the
-> integer block, and `wasmgen/belt.rs` mirrors it. Whether this section should be
+> integer block, and `src/simlin-wasmgen/src/belt.rs` mirrors it. Whether this section should be
 > scoped to the linear model, or the combination rejected outright, is GH #942.
 
 ## 6. Variable transit time, `<sample>`, and `<len>`
@@ -1061,10 +1061,10 @@ rejection, `src/simlin-engine/src/db/assemble.rs`).
 ### 9.5 wasmgen
 
 The WebAssembly backend mirrors the VM opcode-for-opcode with **no silent VM
-fallback** (established rule, `src/simlin-engine/src/wasmgen`).
+fallback** (established rule, `src/simlin-wasmgen/src`).
 The conveyor
 side table and update pass are lowered to wasm the same way the GF/snapshot
-regions are, by `src/simlin-engine/src/wasmgen/belt.rs`: each belt's slats live
+regions are, by `src/simlin-wasmgen/src/belt.rs`: each belt's slats live
 in a bump-allocated growable ring addressed by a static descriptor, and the
 per-DT phase A / phase B update is emitted as unrolled, plan-specialized code
 (the only runtime loops are over the dynamic slat count).
@@ -1440,7 +1440,7 @@ wasm blob — reproduces the VM column-for-column, synthetic driven flows and
 container auxes included.
 
 That is round-trip fidelity and backend parity, not numeric truth.
-`wasmgen/belt.rs`
+`src/simlin-wasmgen/src/belt.rs`
 reproduces `conveyor.rs` bit for bit including its quirks (GH #942), so a shared
 belt-pass bug clears every gate here.
 The VM's own numerics are pinned automatically

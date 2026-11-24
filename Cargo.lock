@@ -2254,6 +2254,7 @@ dependencies = [
  "simlin-edit",
  "simlin-engine",
  "simlin-formats",
+ "simlin-wasmgen",
  "wasm-interpreter",
  "wasmalloc",
 ]
@@ -2315,7 +2316,6 @@ name = "simlin-engine"
 version = "0.1.0"
 dependencies = [
  "base64",
- "checked",
  "ed25519",
  "indexmap",
  "jsonschema",
@@ -2331,8 +2331,6 @@ dependencies = [
  "simlin-edit",
  "simlin-formats",
  "smallvec",
- "wasm-encoder",
- "wasm-interpreter",
 ]
 
 [[package]]
@@ -2413,7 +2411,23 @@ dependencies = [
  "simlin-edit",
  "simlin-engine",
  "simlin-formats",
+ "simlin-wasmgen",
  "tempfile",
+ "wasm-interpreter",
+]
+
+[[package]]
+name = "simlin-wasmgen"
+version = "0.1.0"
+dependencies = [
+ "checked",
+ "proptest",
+ "rand 0.9.5",
+ "simlin-base",
+ "simlin-engine",
+ "simlin-formats",
+ "smallvec",
+ "wasm-encoder",
  "wasm-interpreter",
 ]
 

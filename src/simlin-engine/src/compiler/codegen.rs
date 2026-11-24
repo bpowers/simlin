@@ -478,7 +478,7 @@ impl<'module> Compiler<'module> {
             //
             // No wasm-backend parity test accompanies the VM regression test
             // (`array_tests::…::elm_map_dynamic_source_subscript_uses_full_variable_extent_vm`)
-            // because the backends cannot diverge here: `wasmgen::vector`
+            // because the backends cannot diverge here: `simlin_wasmgen::vector`
             // rejects a dynamically-subscripted ELM MAP source outright
             // (`source_view.runtime_off_local.is_some()` =>
             // `WasmGenError::Unsupported`), so this shape never reaches wasm

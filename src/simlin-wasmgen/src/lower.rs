@@ -9,7 +9,7 @@
 
 //! Lowering of the bytecode VM's scalar-core opcode set to WebAssembly.
 //!
-//! The runtime data model mirrors the bytecode VM (`crate::vm`): all variable
+//! The runtime data model mirrors the bytecode VM (`simlin_engine::vm`): all variable
 //! values live in one flat f64 "slab" in linear memory, addressed by slot
 //! offset. A model runs over two chunks at a time -- `curr` (the values at the
 //! current timestep) and `next` (the values being computed for the following
@@ -70,10 +70,10 @@ use simlin_base::common::IdentMap;
 
 use wasm_encoder::{Function, Instruction, MemArg, ValType};
 
-use crate::bytecode::{
+use simlin_engine::bytecode::{
     BuiltinId, ByteCode, ByteCodeContext, GraphicalFunctionId, LookupMode, Op2, Opcode,
 };
-use crate::vm::{StepPart, make_module_key};
+use simlin_engine::vm::{StepPart, make_module_key};
 
 use super::WasmGenError;
 use super::views::{ElementAddr, RegionBases};
@@ -260,7 +260,7 @@ pub(crate) struct EmitCtx<'a> {
     /// `module.rs` before any program function is emitted (the module
     /// instantiation graph is acyclic, so every child index exists by the time its
     /// caller is emitted). Empty for a single-module (no-submodule) program.
-    pub module_fn_index: &'a IdentMap<(crate::vm::ModuleKey, StepPart), u32>,
+    pub module_fn_index: &'a IdentMap<(simlin_engine::vm::ModuleKey, StepPart), u32>,
     /// The module instance's `ByteCodeContext`, holding the compile-time array
     /// tables the view opcodes reference by index (`static_views`, `dim_lists`,
     /// `dimensions`, `temp_offsets`) *and* the `modules`

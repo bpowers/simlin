@@ -42,7 +42,7 @@ pub fn implicit_vars_of(
 /// This is the SINGLE copy of the case rows, consumed by all three backend
 /// tests -- the end-to-end VM pipeline (`round_builtin_tests`), the VM's
 /// `apply()` unit test (`vm::tests::apply_round_ties_to_even`), and the wasm
-/// backend's parity test (`wasmgen::lower_tests::apply_round`) -- so the
+/// backend's parity test (`simlin_wasmgen::lower_tests::apply_round`) -- so the
 /// backends are pinned against identical rows and cannot drift apart. The
 /// exact .5 ties are the load-bearing rows: `f64::round` (ties away from
 /// zero) agrees with `round_ties_even` on every non-tie input, so a table
@@ -1030,7 +1030,7 @@ pub fn parse_array_declaration(decl: &str) -> (String, Vec<String>) {
 /// Shared by the VM pin
 /// (`array_operand_materialization_tests::an_array_view_inside_a_module_instance_reads_that_instance`)
 /// and the wasm pin
-/// (`wasmgen::module::tests::compile_simulation_arrayed_submodel_views_address_their_instance`),
+/// (`simlin_wasmgen::module::tests::compile_simulation_arrayed_submodel_views_address_their_instance`),
 /// because the two backends agreeing proves nothing here: the wasm view emitter
 /// mirrors the VM opcode for opcode, so it mirrored this defect too. Both assert
 /// the absolute series.

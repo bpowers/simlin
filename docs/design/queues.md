@@ -417,7 +417,7 @@ conveyors are (`QueueNonEulerMethod`, mirroring `ConveyorNonEulerMethod`).
 
 ### 10.4 wasmgen
 
-A queue model IS lowered by the wasm backend (`wasmgen/passes.rs`).
+A queue model IS lowered by the wasm backend (`src/simlin-wasmgen/src/passes.rs`).
 The wasmgen
 datamodel entry point routes through the same `queue_compile::compile_sim`
 dispatch the VM takes, so it compiles the identical expanded project and resolves

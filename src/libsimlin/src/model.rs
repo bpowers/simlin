@@ -173,12 +173,12 @@ pub unsafe extern "C" fn simlin_model_compile_to_wasm(
     // release the project locks before doing this independent work.
     let artifact = match build
         .map_err(|e| {
-            simlin_engine::wasmgen::WasmGenError::Unsupported(format!(
+            simlin_wasmgen::WasmGenError::Unsupported(format!(
                 "wasmgen: incremental compile failed: {e}"
             ))
         })
         .and_then(|build| {
-            simlin_engine::wasmgen::compile_simulation_with_plans(
+            simlin_wasmgen::compile_simulation_with_plans(
                 &build.compiled,
                 &build.conveyor_plans,
                 &build.queue_plans,

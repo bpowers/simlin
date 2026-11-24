@@ -5248,7 +5248,7 @@ mod cross_module_array_reference_tests {
     /// instead, they read `bvals[0]` and `bvals[1]` -- 100 and 200, a silent
     /// wrong answer with no diagnostic anywhere.
     ///
-    /// No wasm-backend twin: `wasmgen::vector` rejects a dynamically-subscripted
+    /// No wasm-backend twin: `simlin_wasmgen::vector` rejects a dynamically-subscripted
     /// ELM MAP source outright, so this shape never reaches wasm lowering. The
     /// static shapes below share the operand with wasm by construction -- it is
     /// baked into the resolved bytecode both backends read -- so they cannot

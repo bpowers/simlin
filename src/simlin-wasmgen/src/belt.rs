@@ -133,7 +133,7 @@
 
 use wasm_encoder::{BlockType, Function, Instruction as Ins, ValType};
 
-use crate::conveyor_compile::{ContainerKind, ConveyorPlan};
+use simlin_engine::conveyor_compile::{ContainerKind, ConveyorPlan};
 
 use super::WasmGenError;
 use super::errors::ErrorScope;
@@ -616,7 +616,7 @@ pub(super) fn reject_unsupported(plans: &[ConveyorPlan]) -> Result<(), WasmGenEr
             // inserts.
             if inf.source
                 || inf.dist.is_some()
-                || inf.placement != crate::conveyor::Placement::Beginning
+                || inf.placement != simlin_engine::conveyor::Placement::Beginning
             {
                 return unsupported("a conveyor inflow with a non-default isee:spreadflow");
             }
@@ -628,7 +628,7 @@ pub(super) fn reject_unsupported(plans: &[ConveyorPlan]) -> Result<(), WasmGenEr
     //
     // Guarded on a non-empty plan set so an ordinary or queue-only compile never
     // touches the conveyor thread-local: it has nothing to do with those models.
-    if !plans.is_empty() && crate::conveyor::slat_bound() > i32::MAX as usize {
+    if !plans.is_empty() && simlin_engine::conveyor::slat_bound() > i32::MAX as usize {
         return Err(WasmGenError::Unsupported(
             "wasmgen: the conveyor slat bound exceeds i32::MAX".to_string(),
         ));
@@ -1138,7 +1138,7 @@ impl<'a> ConveyorPass<'a> {
             f.instruction(&Ins::Call(self.fns.slat_count));
             f.instruction(&Ins::LocalSet(n_slats));
             f.instruction(&Ins::LocalGet(n_slats));
-            f.instruction(&f64_const(crate::conveyor::slat_bound() as f64));
+            f.instruction(&f64_const(simlin_engine::conveyor::slat_bound() as f64));
             f.instruction(&Ins::F64Gt);
             f.instruction(&Ins::If(BlockType::Empty));
             scope
@@ -1468,7 +1468,7 @@ impl<'a> ConveyorPass<'a> {
         // has a finite, i32-overflowing `n_slats` that the VM never looks at, and
         // `trunc_f64_s` traps rather than saturating.
         f.instruction(&Ins::LocalGet(locals.n_slats));
-        f.instruction(&f64_const(crate::conveyor::slat_bound() as f64));
+        f.instruction(&f64_const(simlin_engine::conveyor::slat_bound() as f64));
         f.instruction(&Ins::F64Gt);
         f.instruction(&Ins::If(BlockType::Empty));
         inner.entered().entered().raise(

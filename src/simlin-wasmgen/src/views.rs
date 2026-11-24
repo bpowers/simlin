@@ -7,7 +7,7 @@
 // state is the `Vec<ViewDesc>` the emitter threads through `emit_bytecode`.
 
 //! Compile-time view descriptors -- the wasm backend's analogue of the VM's
-//! runtime `view_stack` (`crate::vm`).
+//! runtime `view_stack` (`simlin_engine::vm`).
 //!
 //! The VM resolves every array access through a runtime stack of [`RuntimeView`]s
 //! built by the `Push*View` opcodes and narrowed by the dynamic `View*`
@@ -19,9 +19,9 @@
 //! [`ViewDesc::element_addr`] -- so Tasks 2-4 and Phase 6 all address
 //! elements identically to the VM's `flat_offset` / `offset_for_iter_index`.
 //!
-//! [`RuntimeView`]: crate::bytecode::RuntimeView
+//! [`RuntimeView`]: simlin_engine::bytecode::RuntimeView
 
-use crate::bytecode::{ByteCodeContext, StaticArrayView, ViewStorage};
+use simlin_engine::bytecode::{ByteCodeContext, StaticArrayView, ViewStorage};
 
 /// Where a view's base address lives, mirroring how the VM resolves the base of
 /// a `RuntimeView` element read (`reduce_view` in `vm.rs`).
@@ -71,7 +71,7 @@ pub(crate) struct RegionBases {
 }
 
 /// A single sparse-dimension mapping, mirroring
-/// [`crate::bytecode::RuntimeSparseMapping`]: the view's index along
+/// `simlin_engine::bytecode::RuntimeSparseMapping`: the view's index along
 /// `dim_index` is remapped through `parent_offsets` before being multiplied by
 /// the stride (`RuntimeView::flat_offset`).
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -80,7 +80,7 @@ pub(crate) struct SparseDim {
     pub parent_offsets: Vec<u16>,
 }
 
-/// Compile-time mirror of the static parts of [`crate::bytecode::RuntimeView`].
+/// Compile-time mirror of the static parts of `simlin_engine::bytecode::RuntimeView`.
 ///
 /// Holds exactly the geometry needed to compute an element's byte address:
 /// `base` (where the storage lives), `dims`/`strides`/`offset`/`sparse` (the
@@ -121,7 +121,7 @@ impl ViewDesc {
     /// `StaticArrayView::to_runtime_view` adds the executing instance's
     /// `module_off` to it for the three chunk-shaped regions. The wasm bases
     /// mirror that, region for region.
-    pub fn from_static(view: &StaticArrayView) -> Self {
+    pub(crate) fn from_static(view: &StaticArrayView) -> Self {
         ViewDesc {
             base_off: view.base_off,
             base: match view.storage {
@@ -150,7 +150,12 @@ impl ViewDesc {
     /// Build a contiguous view over a full variable array from a dim-list (the
     /// `(n_dims, sizes)` for `PushVarViewDirect`). Strides are row-major, built
     /// right-to-left, exactly as `RuntimeView::for_var`.
-    pub fn contiguous(base_off: u32, base: ViewBase, dims: Vec<u16>, dim_ids: Vec<u16>) -> Self {
+    pub(crate) fn contiguous(
+        base_off: u32,
+        base: ViewBase,
+        dims: Vec<u16>,
+        dim_ids: Vec<u16>,
+    ) -> Self {
         let mut strides = Vec::with_capacity(dims.len());
         let mut stride = 1i32;
         for &d in dims.iter().rev() {
@@ -174,13 +179,13 @@ impl ViewDesc {
     /// `size() == product of dims` (`RuntimeView::size`). A scalar view (no
     /// dims) has size 1. The array reducer (Task 2) bounds its unrolled fold by
     /// this.
-    pub fn size(&self) -> usize {
+    pub(crate) fn size(&self) -> usize {
         self.dims.iter().map(|&d| d as usize).product()
     }
 
     /// Whether the view is contiguous: offset 0, no sparse mappings, and
     /// row-major strides (`RuntimeView::is_contiguous`).
-    pub fn is_contiguous(&self) -> bool {
+    pub(crate) fn is_contiguous(&self) -> bool {
         if self.offset != 0 || !self.sparse.is_empty() {
             return false;
         }
@@ -206,7 +211,7 @@ impl ViewDesc {
     /// dynamic-subscript base (`PushVarViewDirect`) is always dense, so this
     /// never arises in practice; rejecting it keeps a wrong module from being
     /// emitted if it ever did.
-    pub fn apply_single_subscript_dynamic(&mut self, dim_idx: usize) -> Option<i32> {
+    pub(crate) fn apply_single_subscript_dynamic(&mut self, dim_idx: usize) -> Option<i32> {
         if dim_idx >= self.dims.len() {
             return None;
         }
@@ -227,13 +232,13 @@ impl ViewDesc {
 
     /// The stride of `dim_idx` (for a dynamic subscript's runtime offset
     /// computation), or `None` if out of range.
-    pub fn stride_at(&self, dim_idx: usize) -> Option<i32> {
+    pub(crate) fn stride_at(&self, dim_idx: usize) -> Option<i32> {
         self.strides.get(dim_idx).copied()
     }
 
     /// The size of `dim_idx` (the bound a dynamic subscript range-checks
     /// against), or `None` if out of range.
-    pub fn dim_at(&self, dim_idx: usize) -> Option<u16> {
+    pub(crate) fn dim_at(&self, dim_idx: usize) -> Option<u16> {
         self.dims.get(dim_idx).copied()
     }
 
@@ -243,7 +248,7 @@ impl ViewDesc {
     /// short-circuit to `offset + iter_idx`; otherwise the flat index is
     /// decomposed into row-major multi-dim indices and each (sparse-remapped)
     /// index multiplied by its stride.
-    pub fn flat_element_offset(&self, iter_idx: usize) -> usize {
+    pub(crate) fn flat_element_offset(&self, iter_idx: usize) -> usize {
         if self.dims.is_empty() {
             return self.offset as usize;
         }
@@ -279,7 +284,7 @@ impl ViewDesc {
     /// `parent_offsets`. The broadcast path below builds the multi-dim index
     /// itself (rather than from a flat iteration index), so it routes through
     /// this rather than [`flat_element_offset`](Self::flat_element_offset).
-    pub fn flat_offset_for_indices(&self, indices: &[u16]) -> usize {
+    pub(crate) fn flat_offset_for_indices(&self, indices: &[u16]) -> usize {
         let mut flat = self.offset as usize;
         for (i, &idx) in indices.iter().enumerate() {
             let actual = if let Some(s) = self.sparse.iter().find(|s| s.dim_index == i) {
@@ -324,7 +329,7 @@ impl ViewDesc {
     /// the indexed size-fallback), and rebuilds the source indices (bounds-checked
     /// per dimension). `is_indexed` for each dim comes from `ctx.dimensions`,
     /// exactly as the VM resolves it.
-    pub fn iter_broadcast_offset(
+    pub(crate) fn iter_broadcast_offset(
         &self,
         iter: &ViewDesc,
         current: usize,
@@ -393,7 +398,7 @@ impl ViewDesc {
     /// A dynamically-subscripted view (`runtime_off_local` set, Task 4) carries
     /// the runtime addend + validity flag in the returned [`ElementAddr`]; static
     /// views leave both `None`, so the address is fully constant.
-    pub fn element_addr(
+    pub(crate) fn element_addr(
         &self,
         iter_idx: usize,
         bases: RegionBases,
@@ -409,7 +414,7 @@ impl ViewDesc {
     /// from an iteration index). Static-view behaviour is byte-identical to
     /// `element_addr` for the same flat offset (both `runtime_off_local` /
     /// `valid_local` are `None`).
-    pub fn element_addr_for_flat(
+    pub(crate) fn element_addr_for_flat(
         &self,
         flat: usize,
         bases: RegionBases,
@@ -481,7 +486,7 @@ pub(crate) struct ElementAddr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bytecode::{RuntimeSparseMapping, RuntimeView};
+    use simlin_engine::bytecode::{RuntimeSparseMapping, RuntimeView};
     use smallvec::SmallVec;
 
     /// Build the VM `RuntimeView` equivalent of a `ViewDesc` so the two
@@ -722,7 +727,7 @@ mod tests {
         let mut ctx = ByteCodeContext::default();
         for _ in 0..n {
             let nid = ctx.intern_name("D");
-            ctx.add_dimension(crate::bytecode::DimensionInfo::indexed(nid, size));
+            ctx.add_dimension(simlin_engine::bytecode::DimensionInfo::indexed(nid, size));
         }
         ctx
     }
@@ -790,12 +795,12 @@ mod tests {
         // the VM returns NaN.
         let mut ctx = ByteCodeContext::default();
         let n0 = ctx.intern_name("A");
-        ctx.add_dimension(crate::bytecode::DimensionInfo::indexed(n0, 2)); // id 0
+        ctx.add_dimension(simlin_engine::bytecode::DimensionInfo::indexed(n0, 2)); // id 0
         let n1 = ctx.intern_name("B");
-        ctx.add_dimension(crate::bytecode::DimensionInfo::indexed(n1, 3)); // id 1
+        ctx.add_dimension(simlin_engine::bytecode::DimensionInfo::indexed(n1, 3)); // id 1
         // A named (non-indexed) dim id 2 used only by the source.
         let n2 = ctx.intern_name("C");
-        ctx.add_dimension(crate::bytecode::DimensionInfo::named(
+        ctx.add_dimension(simlin_engine::bytecode::DimensionInfo::named(
             n2,
             SmallVec::from_slice(&[n0, n1]),
         )); // id 2, size 2, named
@@ -814,9 +819,9 @@ mod tests {
         // Rebuild with distinct sizes: DimA=2 (id 0), DimB=4 (id 1).
         let mut ctx2 = ByteCodeContext::default();
         let na = ctx2.intern_name("A");
-        ctx2.add_dimension(crate::bytecode::DimensionInfo::indexed(na, 2));
+        ctx2.add_dimension(simlin_engine::bytecode::DimensionInfo::indexed(na, 2));
         let nb = ctx2.intern_name("B");
-        ctx2.add_dimension(crate::bytecode::DimensionInfo::indexed(nb, 4));
+        ctx2.add_dimension(simlin_engine::bytecode::DimensionInfo::indexed(nb, 4));
         let _ = ctx;
 
         let iter = view_with_dim_ids(&[2, 4], &[0, 1]);

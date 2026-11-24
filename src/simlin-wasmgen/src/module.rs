@@ -55,11 +55,11 @@ use wasm_encoder::{
 
 use std::collections::HashMap;
 
-use crate::bytecode::{ByteCode, CompiledModule, Opcode};
-use crate::conveyor_compile::ConveyorPlan;
-use crate::queue_compile::{CouplingTable, QueuePlan};
-use crate::vm::{CompiledSimulation, ModuleKey, StepPart};
 use simlin_base::results::{DT_OFF, FINAL_TIME_OFF, INITIAL_TIME_OFF, Method, Specs, TIME_OFF};
+use simlin_engine::bytecode::{ByteCode, CompiledModule, Opcode};
+use simlin_engine::conveyor_compile::ConveyorPlan;
+use simlin_engine::queue_compile::{CouplingTable, QueuePlan};
+use simlin_engine::vm::{CompiledSimulation, ModuleKey, StepPart};
 
 use super::WasmGenError;
 use super::belt::{self, ConveyorPass, ConveyorPassLayout, ConveyorPassLocals};
@@ -202,7 +202,7 @@ const RI_BELT_N_SLATS: u32 = 1;
 /// unsupported construct surfaces as [`WasmGenError`].
 ///
 /// A CONVEYOR or QUEUE model routes through the shared special-stock dispatch
-/// ([`crate::queue_compile::compile_sim`]) -- the same one the VM takes -- so the
+/// (`simlin_engine::queue_compile::compile_sim`) -- the same one the VM takes -- so the
 /// expanded project and the resolved [`ConveyorPlan`]/[`QueuePlan`]s are
 /// byte-identical to the VM's, and [`super::belt`]/[`super::passes`] lower the
 /// belt and FIFO passes into the blob. There is no up-front special-stock reject
@@ -223,22 +223,22 @@ pub fn compile_datamodel_to_artifact(
     ltm_enabled: bool,
     ltm_discovery_mode: bool,
 ) -> Result<WasmArtifact, WasmGenError> {
-    let mut db = crate::db::SimlinDb::default();
-    let sync = crate::db::sync_from_datamodel_incremental(&mut db, datamodel, None);
+    let mut db = simlin_engine::db::SimlinDb::default();
+    let sync = simlin_engine::db::sync_from_datamodel_incremental(&mut db, datamodel, None);
     // The discovery flag rides on the freshly-synced `SourceProject`; `db` is
     // owned by this function and dropped at return, so it can never leak.
     // Whether the overlay is assembled is an argument of the compile.
-    crate::db::set_project_ltm_discovery_mode(&mut db, sync.project, ltm_discovery_mode);
+    simlin_engine::db::set_project_ltm_discovery_mode(&mut db, sync.project, ltm_discovery_mode);
     // The unified dispatch: an ordinary model goes to `compile_project_incremental`
     // (under the requested overlay), a special-stock model to the expansion build
     // path. Going through it rather than reimplementing the dispatch is what
     // guarantees the wasm blob simulates the SAME expanded project the VM does.
-    let build = crate::queue_compile::compile_sim(
+    let build = simlin_engine::queue_compile::compile_sim(
         &mut db,
         sync.project,
         datamodel,
         model_name,
-        crate::db::LtmOverlay::from(ltm_enabled),
+        simlin_engine::db::LtmOverlay::from(ltm_enabled),
     )
     .map_err(|e| {
         WasmGenError::Unsupported(format!("wasmgen: incremental compile failed: {e:?}"))
@@ -959,7 +959,7 @@ fn compile_with_passes(
     // `CompiledSimulation::is_overridable_offset`), so the validity region this
     // list seeds rejects exactly the offsets the VM does.
     overridable_defaults.retain(|(off, _)| {
-        !crate::queue_compile::is_pass_written(conveyor_plans, queue_plans, *off)
+        !simlin_engine::queue_compile::is_pass_written(conveyor_plans, queue_plans, *off)
     });
 
     let pages = total_bytes.div_ceil(WASM_PAGE_SIZE).max(1);
@@ -1335,7 +1335,8 @@ fn collect_instance_input_counts(sim: &CompiledSimulation) -> IdentMap<ModuleKey
             for op in &bc.code {
                 if let Opcode::EvalModule { id, n_inputs } = op {
                     let decl = &module.context.modules[*id as usize];
-                    let child_key = crate::vm::make_module_key(&decl.model_name, &decl.input_set);
+                    let child_key =
+                        simlin_engine::vm::make_module_key(&decl.model_name, &decl.input_set);
                     counts.entry(child_key).or_insert(u32::from(*n_inputs));
                 }
             }
@@ -1483,7 +1484,8 @@ fn collect_all_stock_offsets(
             }
             Opcode::EvalModule { id, .. } => {
                 let decl = &module.context.modules[*id as usize];
-                let child_key = crate::vm::make_module_key(&decl.model_name, &decl.input_set);
+                let child_key =
+                    simlin_engine::vm::make_module_key(&decl.model_name, &decl.input_set);
                 offsets.extend(collect_all_stock_offsets(
                     modules,
                     &child_key,
@@ -1557,7 +1559,7 @@ fn collect_overridable_defaults(
         }
     }
     for decl in &module.context.modules {
-        let child_key = crate::vm::make_module_key(&decl.model_name, &decl.input_set);
+        let child_key = simlin_engine::vm::make_module_key(&decl.model_name, &decl.input_set);
         out.extend(collect_overridable_defaults(
             modules,
             &child_key,

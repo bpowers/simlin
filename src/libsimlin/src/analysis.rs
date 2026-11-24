@@ -1094,7 +1094,7 @@ pub unsafe extern "C" fn simlin_analyze_links_from_wasm_results(
         return ptr::null_mut();
     }
     let layout_bytes = std::slice::from_raw_parts(layout_ptr, layout_len);
-    let layout = match simlin_engine::wasmgen::WasmLayout::deserialize(layout_bytes) {
+    let layout = match simlin_wasmgen::WasmLayout::deserialize(layout_bytes) {
         Some(l) => l,
         None => {
             store_error(
@@ -1273,7 +1273,7 @@ pub(crate) fn results_from_layout_and_slab(
     db: &dyn simlin_engine::db::Db,
     model: SourceModel,
     project: SourceProject,
-    layout: &simlin_engine::wasmgen::WasmLayout,
+    layout: &simlin_wasmgen::WasmLayout,
     slab: &[f64],
 ) -> Result<simlin_base::Results, SimlinError> {
     let capacity = layout.n_chunks.checked_mul(layout.n_slots).ok_or_else(|| {
@@ -1650,7 +1650,7 @@ pub unsafe extern "C" fn simlin_analyze_rel_loop_score_from_wasm_results(
     };
 
     let layout_bytes = std::slice::from_raw_parts(layout_ptr, layout_len);
-    let layout = match simlin_engine::wasmgen::WasmLayout::deserialize(layout_bytes) {
+    let layout = match simlin_wasmgen::WasmLayout::deserialize(layout_bytes) {
         Some(l) => l,
         None => {
             store_error(

@@ -25,7 +25,7 @@ use simlin_base::{Results, SimSpecs};
 use simlin_engine::Vm;
 use simlin_engine::db::LtmSyntheticVar;
 use simlin_engine::ltm::CausalGraph;
-use simlin_engine::wasmgen::{
+use simlin_wasmgen::{
     WasmGenError, WasmLayout, compile_datamodel_to_artifact, compile_simulation, decode_error_word,
 };
 use wasm::addrs::ModuleAddr;
@@ -57,7 +57,7 @@ use wasm::validate;
 ///
 /// **Heavy-twin note** (`#[ignore]`d C-LEARN and World3): the wasm backend
 /// open-codes the transcendentals `exp`/`ln`/`sin`/`cos`/`tan`/`atan`/
-/// `asin`/`acos`/`log10`/`pow` in `src/simlin-engine/src/wasmgen/math.rs`,
+/// `asin`/`acos`/`log10`/`pow` in `src/simlin-wasmgen/src/math.rs`,
 /// which can differ from Rust libm by a few ULP. For a link-score equation
 /// that routes through a transcendental, the propagation through a chain of
 /// `k` links stays well within the `1e-6` relative floor; the heavy twins
@@ -374,7 +374,7 @@ pub fn wasm_results_for_special(
 /// stops at `Vm::into_results` (no `loop_partitions` book-keeping -- the
 /// caller compares the `$⁚ltm⁚*` slot series directly, not the post-sim
 /// relative loop scores). The `db` is owned by this function, so the flag
-/// flip never leaks (same rationale as `wasmgen::compile_datamodel_to_artifact`).
+/// flip never leaks (same rationale as `simlin_wasmgen::compile_datamodel_to_artifact`).
 ///
 /// Imperative Shell: drives the salsa compile pipeline and the VM.
 #[allow(dead_code)]
@@ -611,7 +611,7 @@ pub fn ensure_wasm_matches(
 /// deliberately does NOT rebuild the VM's message: that needs the model's
 /// `ConveyorPlan` list, which neither `run_wasm_results` caller has to hand, and the
 /// panic below names the raw code and belt index, which is enough to identify a
-/// fixture that started raising. `simlin_engine::wasmgen::reconstruct_error` is the
+/// fixture that started raising. `simlin_wasmgen::reconstruct_error` is the
 /// reconstruction, unit-tested against the VM's exact text in
 /// `wasmgen/errors_tests.rs`.
 fn assert_no_runtime_error(store: &mut Store<()>, inst: checked::Stored<ModuleAddr>) {
@@ -627,7 +627,7 @@ fn assert_no_runtime_error(store: &mut Store<()>, inst: checked::Stored<ModuleAd
         panic!(
             "the wasm blob raised a runtime error during this run: code {} (ErrorCode \
              discriminant), belt/plan index {}. Rebuild the message with \
-             `simlin_engine::wasmgen::reconstruct_error` against the model's ConveyorPlan list.",
+             `simlin_wasmgen::reconstruct_error` against the model's ConveyorPlan list.",
             err.code, err.belt
         );
     }

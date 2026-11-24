@@ -1727,7 +1727,7 @@ fn the_first_step_of_an_array_previous_is_the_scalar_fallback() {
 /// which is exactly why this is asserted rather than assumed: the wasm backend
 /// deliberately does NOT clear its snapshot regions and reproduces the semantics
 /// with a `select` instead
-/// (`wasmgen::module_tests::compile_simulation_repeated_run_resets_previous_fallback_for_an_array_view`,
+/// (`simlin_wasmgen::module_tests::compile_simulation_repeated_run_resets_previous_fallback_for_an_array_view`,
 /// which fails without it). The two backends must agree, so both sides of the
 /// axis carry a row.
 #[test]

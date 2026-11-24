@@ -18,8 +18,8 @@
 //! element-for-element:
 //!
 //! - [`emit_vector_select`] -- `vm.rs:2444-2502`
-//! - [`emit_vector_elm_map`] -- `crate::vm_vector_elm_map::vector_elm_map`
-//! - [`emit_vector_sort_order`] -- `crate::vm_vector_sort_order::vector_sort_order`
+//! - [`emit_vector_elm_map`] -- `simlin_engine::vm_vector_elm_map::vector_elm_map`
+//! - [`emit_vector_sort_order`] -- `simlin_engine::vm_vector_sort_order::vector_sort_order`
 //! - [`emit_rank`] -- `vm.rs:2540-2584`
 //! - [`emit_lookup_array`] -- `vm.rs:2586-2629`
 //!
@@ -46,7 +46,7 @@
 
 use wasm_encoder::{BlockType, Function, Instruction as Ins, ValType};
 
-use crate::bytecode::{GraphicalFunctionId, LookupMode};
+use simlin_engine::bytecode::{GraphicalFunctionId, LookupMode};
 
 use super::WasmGenError;
 use super::lower::{
@@ -611,7 +611,7 @@ fn emit_f64_minmax_rust(ctx: &EmitCtx, f: &mut Function, want_min: bool) {
 // ── VectorElmMap (vm_vector_elm_map.rs:33-116) ──────────────────────────────
 
 /// Lower `VectorElmMap { write_temp_id, full_source_len }`, mirroring
-/// `crate::vm_vector_elm_map::vector_elm_map`. The views are `offset_view = top`,
+/// `simlin_engine::vm_vector_elm_map::vector_elm_map`. The views are `offset_view = top`,
 /// `source_view = top-1`. For each element `i` of the offset view: `flat_i =
 /// base_i + round(offset[i])` over the source's FULL row-major storage, where
 /// `base_i` is 0 for a full contiguous source else the source's flat offset at
@@ -799,7 +799,7 @@ fn emit_storage_indexed_load(storage: StorageBase, flat_i: u32, ctx: &EmitCtx, f
 // ── VectorSortOrder (vm_vector_sort_order.rs:49-101) ─────────────────────────
 
 /// Lower `VectorSortOrder { write_temp_id }`, mirroring
-/// `crate::vm_vector_sort_order::vector_sort_order`. `input_view = top`; the
+/// `simlin_engine::vm_vector_sort_order::vector_sort_order`. `input_view = top`; the
 /// `direction` operand is popped (`.round() as i32`). The innermost (last)
 /// dimension is the sorted axis; outer dims select independent rows (a scalar/1-D
 /// view is one row of `inner == size`). Per row, the `(value, local_idx 0..inner)`
