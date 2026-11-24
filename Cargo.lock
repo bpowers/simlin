@@ -2273,13 +2273,10 @@ dependencies = [
  "buffa",
  "calamine",
  "checked",
- "criterion",
  "csv",
  "ed25519",
- "ed25519-dalek",
  "indexmap",
  "jsonschema",
- "mimalloc",
  "proptest",
  "quick-xml 0.41.0",
  "rand 0.9.5",
@@ -2291,7 +2288,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "simlin-engine",
  "smallvec",
  "tempfile",
  "unicode-xid",
@@ -2327,6 +2323,27 @@ dependencies = [
  "simlin-mcp-core",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "simlin-tests"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "buffa",
+ "checked",
+ "criterion",
+ "csv",
+ "ed25519-dalek",
+ "mimalloc",
+ "rand 0.9.5",
+ "rayon",
+ "salsa",
+ "serde",
+ "serde_json",
+ "simlin-engine",
+ "tempfile",
+ "wasm-interpreter",
 ]
 
 [[package]]

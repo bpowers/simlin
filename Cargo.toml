@@ -7,6 +7,7 @@ members = [
     "src/simlin-engine",
     "src/simlin-mcp",
     "src/simlin-mcp-core",
+    "src/simlin-tests",
 ]
 
 # Release builds optimize for speed (opt-level = 3) on every target. The wasm32

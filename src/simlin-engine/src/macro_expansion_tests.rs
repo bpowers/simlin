@@ -791,7 +791,7 @@ y=
 //
 // These end-to-end tests reproduce the pattern on a tiny inline `.mdl`
 // (C-LEARN itself is 1.4 MB; its full-corpus guard is the `#[ignore]`d
-// `corpus_clearn_macros_import` in `tests/integration/simulate.rs`). The
+// `corpus_clearn_macros_import` in `simlin-tests/tests/integration/simulate.rs`). The
 // `INITIAL(x)`->`INIT(x)` rename inside the body (the #554 trigger) is
 // independent of the invocation's arity, so the macros' two params are
 // incidental.
@@ -1495,7 +1495,7 @@ sibling=
         .collect();
 
     // The metasd-harness "macro-attributable" classifier (kept in lockstep
-    // with `tests/integration/metasd_macros.rs`): a project-level macro-registry build
+    // with `simlin-tests/tests/integration/metasd_macros.rs`): a project-level macro-registry build
     // error (the #554 cascade class) or a macro/model name collision.
     let macro_attributable: Vec<&crate::db::Diagnostic> = diags
         .iter()

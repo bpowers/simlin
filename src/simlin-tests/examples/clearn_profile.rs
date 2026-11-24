@@ -11,7 +11,7 @@
 //! count to give an external sampler sustained signal on one stage.
 //!
 //! Usage:
-//!   cargo run --release -p simlin-engine --example clearn_profile
+//!   cargo run --release -p simlin-tests --features instruments --example clearn_profile
 //!   CLEARN_COMPILE_ITERS=20 CLEARN_PROFILE=compile \
 //!     perf record -g -- target/release/examples/clearn_profile
 //!   CLEARN_RUN_ITERS=200 CLEARN_PROFILE=run \

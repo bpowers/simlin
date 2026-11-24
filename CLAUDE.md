@@ -24,6 +24,7 @@ Exception: protobuf files must follow standard versioning (we have a DB with ser
 | `src/app`             | TypeScript  | Full-featured SD application                                      | [CLAUDE.md](/src/app/CLAUDE.md)             |
 | `src/notebook-widget` | TypeScript  | anywidget module hosting the Editor in notebook cells (pysimlin)  | [CLAUDE.md](/src/notebook-widget/CLAUDE.md) |
 | `src/server`          | TypeScript  | Express.js backend (Firebase Auth, Firestore)                     | [CLAUDE.md](/src/server/CLAUDE.md)          |
+| `src/simlin-tests`    | Rust        | The engine's integration tests, benchmarks and instruments        | [CLAUDE.md](/src/simlin-tests/CLAUDE.md)    |
 | `src/simlin-cli`      | Rust        | CLI for simulation/conversion (testing/debugging)                 | [CLAUDE.md](/src/simlin-cli/CLAUDE.md)      |
 | `src/pysimlin`        | Python/Rust | Python bindings for the simulation engine                         | [CLAUDE.md](/src/pysimlin/CLAUDE.md)        |
 | `website`             | TypeScript  | Rspress-based documentation site                                  | [CLAUDE.md](/website/CLAUDE.md)             |

@@ -21,7 +21,7 @@
 //! question and a separate harness (`ltm_fallback_eval`).
 //!
 //! Usage:
-//!   cargo run --release --example ltm_discovery_bench [model.mdl ...]
+//!   cargo run --release -p simlin-tests --features instruments --example ltm_discovery_bench [model.mdl ...]
 
 use std::time::Instant;
 

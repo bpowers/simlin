@@ -13,7 +13,7 @@
 //! against. **All 12 goldens came through it byte-identical, with no
 //! regeneration**, which is the strongest available evidence that the shorter
 //! route produces the same value rather than a plausible one. The
-//! integration corpus (`tests/integration/simulate.rs`) pins *numeric* results
+//! integration corpus (`simlin-tests/tests/integration/simulate.rs`) pins *numeric* results
 //! of whole models, which is necessary but far too coarse here: it cannot see a
 //! fragment change shape, a fragment stop being emitted (an `Option::None`
 //! arm), a resource id get renumbered, or a fragment stop being deterministic.

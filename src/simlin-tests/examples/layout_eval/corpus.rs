@@ -69,7 +69,7 @@ impl Tier {
 }
 
 /// One corpus entry. Paths are relative to `CARGO_MANIFEST_DIR`
-/// (`src/simlin-engine`) unless absolute.
+/// (`src/simlin-tests`) unless absolute.
 #[derive(Clone, Debug)]
 pub struct ModelSpec {
     pub key: String,

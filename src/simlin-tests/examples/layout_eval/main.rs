@@ -22,13 +22,13 @@
 //! (`layout::eval_stats`), and the edit audit.
 //!
 //! Usage:
-//!   cargo run --release -p simlin-engine --features png_render,file_io --example layout_eval
+//!   cargo run --release -p simlin-tests --features instruments --example layout_eval
 //!
 //! Env knobs:
 //!   LAYOUT_EVAL_MODELS         comma list of corpus keys to run (default: all)
 //!   LAYOUT_EVAL_TIERS          comma list of size classes: small,medium,large
 //!   LAYOUT_EVAL_EXTRA          comma list of ad-hoc key=path models to add
-//!                              (paths relative to src/simlin-engine or absolute)
+//!                              (paths relative to src/simlin-tests or absolute)
 //!   LAYOUT_EVAL_SEEDS          number of seeds M to sample (default: 25)
 //!   LAYOUT_EVAL_OUT            output directory (default: repo-root target/layout-eval)
 //!   LAYOUT_EVAL_COMPARE        a previous run's output dir: diff this run against

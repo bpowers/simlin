@@ -344,7 +344,7 @@ pub type IdentSet<K> = std::collections::HashSet<K, IdentBuildHasher>;
 /// map.** A value salsa caches must not depend on a map's iteration order
 /// (sort first), and what holds the engine to that is the determinism suites
 /// (`db::fragment_determinism_tests`, `db::diagnostic_determinism_tests`,
-/// `tests/integration/build_determinism.rs`), which build the same thing
+/// `simlin-tests/tests/integration/build_determinism.rs`), which build the same thing
 /// repeatedly and compare. They detect an order that leaked only if the order
 /// actually differs from one build to the next, and under an unkeyed hasher it
 /// does not: `multi_table_fragment_is_stable_across_fresh_databases` passes

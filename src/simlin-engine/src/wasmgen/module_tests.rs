@@ -443,7 +443,7 @@ fn compile_simulation_one_point_gf_matches_vm() {
 /// The `build_vm` companion is kept as the oracle-of-record: both backends build
 /// the same fixture, which is the whole point of removing the gate. Slab-level
 /// parity for this and every other belt feature lives in `wasmgen::belt`'s tests,
-/// and the end-to-end corpus gate in `tests/integration/simulate.rs`.
+/// and the end-to-end corpus gate in `simlin-tests/tests/integration/simulate.rs`.
 #[test]
 fn conveyor_models_lower_through_the_datamodel_entry_point() {
     let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");

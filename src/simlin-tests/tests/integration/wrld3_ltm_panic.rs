@@ -29,7 +29,7 @@ use simlin_engine::open_vensim;
 
 fn load_wrld3() -> simlin_engine::datamodel::Project {
     let mdl_content = std::fs::read_to_string("../../test/metasd/WRLD3-03/wrld3-03.mdl").expect(
-        "failed to read wrld3-03.mdl -- run tests from the repo root or simlin-engine crate",
+        "failed to read wrld3-03.mdl -- run tests from the repo root or the simlin-tests crate",
     );
     open_vensim(&mdl_content).expect("open_vensim should parse wrld3-03.mdl without I/O errors")
 }

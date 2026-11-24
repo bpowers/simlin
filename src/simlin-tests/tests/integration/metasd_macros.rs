@@ -100,7 +100,7 @@ struct CorpusModel {
     /// (directory under `test/metasd/` plus file stem, snake_cased) so it
     /// stays legible in a failure report.
     name: &'static str,
-    /// Path relative to `src/simlin-engine/` (the `../../test/...` prefix).
+    /// Path relative to `src/simlin-tests/` (the `../../test/...` prefix).
     path: &'static str,
     sim: SimTier,
 }

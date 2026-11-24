@@ -163,7 +163,7 @@ Everything else is tracked queries:
 
 - A cached value is a pure function of its inputs.
   Never let `HashMap` iteration order reach a cached value or the compiled artifact: sort first (`temp_sizes_by_id`, sorted table idents in `Compiler::new`, sorted module inputs in `Var::new`, sorted runlist seeds).
-  Pinned by the 12-repeat `db::fragment_determinism_tests` and `db::diagnostic_determinism_tests`, and on the surfaces a host reads by `tests/integration/build_determinism.rs`, which opens a file twice in one process and builds every artifact from each open (saves, diagnostics, links, the wasm blob and layout, results, loop analysis): an artifact that differs took its order from a map.
+  Pinned by the 12-repeat `db::fragment_determinism_tests` and `db::diagnostic_determinism_tests`, and on the surfaces a host reads by `src/simlin-tests/tests/integration/build_determinism.rs`, which opens a file twice in one process and builds every artifact from each open (saves, diagnostics, links, the wasm blob and layout, results, loop analysis): an artifact that differs took its order from a map.
   They detect an order only where it differs between two builds, so `IdentMap` and `IdentSet` draw a random key per map in every build with debug assertions (`common::IdentBuildHasher`; FxHash in a release build).
   One of them failing now and then is an order that leaked, and the fix is a sort.
 - AST constants hold `ast::Literal`, compared by bit pattern, so a `NaN` literal (every stdlib template declares `initial_value = NAN`) does not defeat backdating.
@@ -210,7 +210,7 @@ Everything else is tracked queries:
   A reference whose dimensions disagree with its reader's -- an arrayed variable read where one value is needed, or a variable subscripted on more dimensions than it has -- is refused as one `MismatchedDimensions` error carrying a `common::MismatchedRead` (the variable read and its dimensions the reader has no element of), on the variable the person wrote and at the reference, whichever stage refuses it: codegen's view in a scalar position (`codegen::view_in_scalar_position`), the lowering's unpaired axes, a subscript count, a stock's flow, a module's input; a helper's refusal is its parent's (`db::fragment_compile`, which keeps a module call's argument spans for it).
   `mismatched_read_tests` rows every stage.
   The loud-safe refusals each keep their test: the stack bound, `resource_base`'s id capacity, `renumber_opcode`'s checked adds, the combiner's SCC segmentation (`db::dep_graph_tests::a_prologue_reading_an_scc_member_refuses_the_recurrence`) and `fragment_vars_in_layout`.
-- **The VM is the correctness oracle for wasmgen.** Every emitted module is run under a pure-Rust wasm interpreter in tests and compared with `Vm::run_to_end`; the corpus in `tests/integration/simulate.rs` does this for every VM-simulated model (`ensure_wasm_matches`), and `simulate_ltm_wasm` does it for every exposed key of an LTM run.
+- **The VM is the correctness oracle for wasmgen.** Every emitted module is run under a pure-Rust wasm interpreter in tests and compared with `Vm::run_to_end`; the corpus in `src/simlin-tests/tests/integration/simulate.rs` does this for every VM-simulated model (`ensure_wasm_matches`), and `simulate_ltm_wasm` does it for every exposed key of an LTM run.
 - **Constant folding is platform-deterministic.** `compiler/fold.rs` folds only IEEE-exact operations with the VM's own `eval_op2`; `^` and transcendentals stay runtime so the VM and the wasm blob agree bit for bit.
 - **Graphical functions:** a per-element arrayed GF's tables are laid out at the element's row-major declared-dimension index (`variable::reorder_arrayed_element_tables`), because `Lookup`/`LookupArray` index `graphical_functions[base_gf + element_offset]`.
   A standalone lookup-only variable (empty or `"0+0"` equation plus a table) is a static table: excluded from every runlist, no series, and a bare reference to it is `LookupReferencedWithoutArgument`.
@@ -297,7 +297,7 @@ Rules:
 - No silent wrong numbers in LTM: a link-score fragment that fails to compile is reported by `model_ltm_fragment_diagnostics` as a `Warning`, never silently stubbed to zero, and a target whose lowering failed or a read the describers cannot name is declined with a warning (`ltm_unified_tests::a_target_whose_lowering_failed_is_declined_not_scored`).
   Every LTM warning is a fact on the derivation's value (`LtmVariablesResult::diagnostics`, the fragment pass's `Vec<Diagnostic>`, `ShapedLinkScore::Unscoreable`'s payload) that `db::model_all_diagnostics` emits once per model, so a declined edge, a mode flip or a failed fragment in a sub-model is reported once however many parents instantiate it.
 - LTM runs under Euler, RK2 and RK4 alike.
-  A link score is a ratio of integration-step (dt) deltas reported at the saved steps: `PREVIOUS` reads the state the previous dt step ended in (the VM snapshots `prev_values` on every dt iteration, before the save/advance decision, so with save_step > dt a recorded score is the last dt step's ratio, not the saved interval's), and the VM and wasm both re-evaluate the flows at the restored end-of-step state before snapshotting it under RK, so the scores follow the method's own trajectory (`tests/integration/ltm_integration_method.rs`: a flow proportional to its stock scores identically under all three methods; a nonlinear one does not).
+  A link score is a ratio of integration-step (dt) deltas reported at the saved steps: `PREVIOUS` reads the state the previous dt step ended in (the VM snapshots `prev_values` on every dt iteration, before the save/advance decision, so with save_step > dt a recorded score is the last dt step's ratio, not the saved interval's), and the VM and wasm both re-evaluate the flows at the restored end-of-step state before snapshotting it under RK, so the scores follow the method's own trajectory (`src/simlin-tests/tests/integration/ltm_integration_method.rs`: a flow proportional to its stock scores identically under all three methods; a nonlinear one does not).
   Conveyor and queue models do not participate in LTM.
   Open LTM work is organized under the `ltm` label on GitHub (epic #488).
 
@@ -400,7 +400,7 @@ Integration is Euler-only.
   Variables pair by canonical ident exactly.
   Units, documentation and views are not meaning, and a control variable a format keeps as the specs, with the same value, is no change.
   The check reads the save back with this engine's reader, so a writer and a reader that agree with each other and not with the format's own tool are a fixed point it cannot see through.
-  `tests/integration/save_meaning.rs` holds it to the corpus in every pair of formats (read as MDL or XMILE; saved as MDL, XMILE, native JSON, protobuf): one table lists every save that does not keep its model, with the check's verdict and the cause (the format cannot hold it, or a defect), ratcheted both ways, and an independent run comparison holds the check to calling every save whose series differ a change to the results.
+  `src/simlin-tests/tests/integration/save_meaning.rs` holds it to the corpus in every pair of formats (read as MDL or XMILE; saved as MDL, XMILE, native JSON, protobuf): one table lists every save that does not keep its model, with the check's verdict and the cause (the format cannot hold it, or a defect), ratcheted both ways, and an independent run comparison holds the check to calling every save whose series differ a change to the results.
   The whole-corpus sweep is a gate (ignored; C-LEARN included); a few models that make every pair run in the default suite against the same table.
 - `xmile/` reads and writes XMILE with `simlin:` vendor extensions for element mappings, data sources, EXCEPT metadata, and multi-output macro invocations.
   Two contracts the XMILE writer keeps: every attribute it emits goes through `push_attribute`, and a newline inside a name is spelled as the two-character XMILE escape `\n` (the datamodel's stored form, which Stella also writes), never a raw newline -- XML attribute normalization would read one back as a space; only the free-text attributes decode the escape (`decode_free_text_attribute`).
@@ -592,7 +592,7 @@ It is behind the `agent_tools` feature (default on; libsimlin's browser bundle l
 ## Tests
 
 - Unit tests live beside their code, either inline or in a sibling `*_tests.rs` mounted with `#[cfg(test)] #[path]` so `use super::*` still resolves.
-  Integration tests are one harness, `tests/integration/main.rs` (add a `mod`, not a new `tests/*.rs`); `tests/vm_alloc.rs` is separate only because it installs a global allocator.
+  The integration tests, benches and examples are [simlin-tests](/src/simlin-tests/CLAUDE.md).
   `test_common::TestProject` is the model builder, exported behind the `test-support` feature for sibling crates' tests.
 - There is one compiler, in tests too: a test that needs a variable's lowered `Expr2` reads `db::lowered_source_variable` (or `model_lowered_variables` for a model's worth), a test that needs its compiled form reads it through the production per-variable lowering (`TestProject::flow_exprs`, over `db::var_fragment::explicit_fragment_input` + `compiler::fragment::lower_fragment`), a test that needs a refusal's location reads `TestProject::error_diagnostics`, and a loop-discovery test drives `ltm_finding::discover_loops_with_graph` with the graph and context `analysis::analyze_model` builds.
   Never add a whole-model parse, lowering or compile path for tests to compare against: it is a second implementation that every compiler change then has to be made in twice, and it can only agree with the production one by construction where the two share code.
@@ -603,11 +603,11 @@ It is behind the `agent_tools` feature (default on; libsimlin's browser bundle l
   `#[ignore]` means exactly "needs an optimized build", so every ignored test passes under `scripts/gates.sh` (the `gates` cargo profile: optimized, with debug assertions and overflow checks), which CI's `gates` job runs on every push to main and every pull request to main; a test that records a known defect asserts the defect in the default suite instead.
   The corpus sweeps and the C-LEARN and World3 gates are gates.
   The default suite's budget is CPU-seconds on four cores, which rayon hides from a test's wall time (`docs/dev/rust.md`); test a threshold with a test-only override, not a fixture large enough to trip it.
-- `scripts/gates.sh` runs the ignored tests only; it builds with the `ext_data` feature (the Excel data provider) on and also runs that feature's tests (`data_provider::`), which no default build compiles.
+- `scripts/gates.sh` runs the ignored tests only, this crate's and simlin-tests'; it builds with the `ext_data` feature (the Excel data provider) on and also runs that feature's tests (`data_provider::`), which no default build compiles.
 
 ## Cargo features and generated files
 
-Features: `schema`, `ai_info`, `file_io` (CSV/filesystem providers; a production dependency kept out of wasm, always on for test targets via the self dev-dependency), `ext_data`, `png_render`, `ltm_bench`, `test-support`, `layout_eval`.
+Features: `schema`, `ai_info`, `file_io` (CSV/filesystem providers; a production dependency kept out of wasm, which a test build has whatever its features: `cfg(any(test, feature = "file_io"))`), `ext_data`, `png_render`, `ltm_bench`, `test-support`, `layout_eval`.
 
 Generated, do not edit: `src/project_io.gen.rs` from `project_io.proto` (`pnpm build:gen-protobufs`) and `src/stdlib.gen.rs` from the repo-root `stdlib/*.stmx` (`pnpm rebuild-stdlib`).
 Both carry a hash that a test checks.

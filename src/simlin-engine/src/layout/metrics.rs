@@ -100,7 +100,7 @@ const ALIGN_REACH: f64 = 300.0;
 /// (`test_scale_invariance_of_scale_free_terms`).
 ///
 /// `Serialize`/`Deserialize` let the layout-quality eval sweep
-/// (`examples/layout_eval/`) emit the per-term breakdown into its artifacts
+/// (`simlin-tests/examples/layout_eval/`) emit the per-term breakdown into its artifacts
 /// and read a stored report back for comparison. Terms added after a report
 /// was written deserialize as `0.0`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]

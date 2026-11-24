@@ -374,7 +374,7 @@ pub struct ModelStats {
 /// aggregate (benchstat-style center over the corpus).
 ///
 /// `Serialize`/`Deserialize` let the corpus sweep write this report to the
-/// committed `examples/layout_eval_baseline.json` and read it back for the
+/// committed `simlin-tests/examples/layout_eval_baseline.json` and read it back for the
 /// baseline-vs-candidate diff (`compare`). The full report -- including each
 /// model's per-seed `samples` -- round-trips so `compare` can re-run
 /// Mann-Whitney U over the seed-sample cost sets.

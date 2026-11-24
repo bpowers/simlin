@@ -14,7 +14,7 @@ use crate::bytecode::{
 };
 use crate::common::{Canonical, Error, ErrorCode, ErrorKind, Ident, IdentMap, Result};
 use crate::dimensions::match_dimensions_two_pass;
-use crate::results::{DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, TIME_OFF};
+use crate::results::{DT_OFF, FINAL_TIME_OFF, INITIAL_TIME_OFF, TIME_OFF};
 #[allow(unused_imports)]
 pub use crate::results::{Method, Results, Specs};
 use crate::sim_err;
@@ -152,7 +152,7 @@ impl CompiledSimulation {
     /// silently weakening the oracle. The contract is maintained by the
     /// `Vm::new` code that builds `ResolvedModule`s by cloning `compiled_flows`
     /// out of this `CompiledSimulation` and fusing the clone separately.
-    #[doc(hidden)] // test-support: used by the oracle in tests/integration/simulate.rs
+    #[doc(hidden)] // test-support: used by the oracle in simlin-tests/tests/integration/simulate.rs
     pub fn invariant_flow_offsets(&self) -> Vec<usize> {
         let Some(module) = self.modules.get(&self.root) else {
             return Vec::new();
@@ -178,7 +178,7 @@ impl CompiledSimulation {
 
     /// The root module's invariant flow-prefix opcode length (GH #712). 0 when
     /// no flow variable is run-invariant. Exposed for the partition test.
-    #[doc(hidden)] // test-support: used by the oracle in tests/integration/simulate.rs
+    #[doc(hidden)] // test-support: used by the oracle in simlin-tests/tests/integration/simulate.rs
     pub fn flows_invariant_opcode_len(&self) -> usize {
         self.modules
             .get(&self.root)
@@ -920,7 +920,7 @@ impl Vm {
     /// corrupts every stock and hides the property under test. See
     /// `only_documented_classes_carry_across_a_step`.
     #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)] // test-support: used by tests/integration/simulate.rs
+    #[doc(hidden)] // test-support: used by simlin-tests/tests/integration/simulate.rs
     pub fn poison_next_chunk_for_test(&mut self) {
         self.poison_next = true;
     }
@@ -1089,7 +1089,7 @@ impl Vm {
                 let (curr, next) = borrow_two(&mut data, n_slots, self.curr_chunk, self.next_chunk);
                 #[cfg(any(test, feature = "test-support"))]
                 if poison_next {
-                    next[IMPLICIT_VAR_COUNT..].fill(POISON_SENTINEL);
+                    next[crate::results::IMPLICIT_VAR_COUNT..].fill(POISON_SENTINEL);
                 }
 
                 if self.conveyor_plans.is_empty() && self.queue_plans.is_empty() {

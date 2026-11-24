@@ -4,7 +4,7 @@
 
 //! A save is a fixed point: what the writer writes reads back as a model the
 //! writer writes the same text for. The corpus holds the whole-file property
-//! (`tests/integration/mdl_roundtrip.rs`, `writer_output_idempotence_ratchet`);
+//! (`simlin-tests/tests/integration/mdl_roundtrip.rs`, `writer_output_idempotence_ratchet`);
 //! these tests pin the rules that make it hold, each over the cases its rule
 //! decides between.
 

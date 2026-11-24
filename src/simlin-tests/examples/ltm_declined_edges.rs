@@ -12,7 +12,7 @@
 //! invisible to the fragment count precisely because nothing was emitted.
 //!
 //! Usage:
-//!   cargo run --release -p simlin-engine --example ltm_declined_edges
+//!   cargo run --release -p simlin-tests --features instruments --example ltm_declined_edges
 //!   LTM_DECLINE_MODEL=path/to/model.mdl cargo run --release ... --example ltm_declined_edges
 
 use std::collections::BTreeMap;

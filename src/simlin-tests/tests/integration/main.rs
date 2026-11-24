@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! Single integration-test harness for simlin-engine.
+//! The engine crates' single integration-test harness.
 //!
 //! All integration tests are modules of this one binary rather than separate
 //! `tests/*.rs` files. Each top-level test file becomes its own ~100MB binary
@@ -15,10 +15,10 @@
 //! under `tests/`. The one exception is `tests/vm_alloc.rs`, which installs a
 //! counting `#[global_allocator]` and therefore must remain its own process.
 //!
-//! Feature gating: `file_io` is always on for this harness -- the crate takes a
-//! self dev-dependency that enables it (see Cargo.toml), because `file_io`
-//! gates a production dependency, not test coverage (GH #925). No module here
-//! needs another feature. One that comes to need one gates itself with
+//! Feature gating: `file_io` is always on for this harness -- the package's
+//! edge onto the engine asks for it (see Cargo.toml), because `file_io` gates a
+//! production dependency, not test coverage (GH #925). No module here needs
+//! another feature. One that comes to need one gates itself with
 //! `#[cfg(feature = ...)]` on its `mod` line rather than taking a
 //! `required-features` entry, which would skip the whole harness when the
 //! feature is off.

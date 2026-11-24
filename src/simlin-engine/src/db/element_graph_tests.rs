@@ -2459,7 +2459,7 @@ fn element_graph_flow_to_stock_across_an_element_map_reads_the_map() {
 /// whether an edge may carry an arrayed score at all -- so a row here pins all
 /// three. The end-to-end pins are `a_permuted_mapped_pair_scores_the_maps_diagonal`
 /// and `an_agreeing_mapped_pair_keeps_the_arrayed_score` in
-/// `tests/integration/ltm_array_agg.rs`.
+/// `simlin-tests/tests/integration/ltm_array_agg.rs`.
 #[test]
 fn bare_axis_pairing_enumeration() {
     use super::BareAxis;

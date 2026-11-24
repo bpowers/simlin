@@ -1,0 +1,163 @@
+[package]
+name = "simlin-tests"
+version = "0.1.0"
+authors = ["Bobby Powers <bobbypowers@gmail.com>"]
+license = "Apache-2.0"
+edition = "2024"
+publish = false
+
+# The engine crates' black-box tests (one `tests/integration` harness and the
+# allocation counter beside it), benchmarks and instruments. They are a package
+# of their own because they use every crate at once: a crate's own unit tests
+# cannot without depending on what is built on it. Nothing depends on this
+# package, so all of its dependencies are dev-dependencies.
+
+[features]
+# The examples are instruments: programs that print a measurement or write a
+# report for a person. Each lists this feature, so a plain `cargo test` links
+# none of them and `cargo clippy --all-targets --all-features` still checks them
+# all.
+instruments = ["simlin-engine/layout_eval", "simlin-engine/png_render"]
+# The Excel data provider, for the corpus models whose data is in a spreadsheet.
+ext_data = ["simlin-engine/ext_data"]
+# The loop-score tracing `ltm_full_bench` prints.
+ltm_bench = ["simlin-engine/ltm_bench"]
+
+[dev-dependencies]
+# `file_io` is what makes the corpus tests run (`load_dat`, `load_csv`,
+# `FilesystemDataProvider`). It is asked for here, where nothing can turn it
+# off, and no test in this package is gated on a feature: a gate that is off
+# compiles its test away without a word (GH #925).
+simlin-engine = { path = "../simlin-engine", features = ["file_io", "test-support"] }
+buffa = "0.9"
+salsa = "0.28.5"
+rayon = "1"
+rand = { version = "0.9", default-features = false, features = ["std_rng"] }
+# The VDF parity harness (tests/integration/vdf_parity.rs) requires
+# bitwise-exact f64 decoding of tools/vdf_xray.py's JSON output. Without
+# float_roundtrip, serde_json's fast float parser can be off by one ULP,
+# which reads as a phantom Rust-vs-Python divergence.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+serde = { version = "1", features = ["derive"] }
+# default features pull in the plotters HTML-report stack (plotters,
+# criterion-plot, tinytemplate, cast, oorandom, ...); we only ever read the
+# terminal summary, so trim to the bench-runner harness alone.
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+csv = "1"
+tempfile = "3"
+base64 = "0.22"
+ed25519-dalek = "2"
+
+# The wasm interpreter the wasmgen backend's output is run under, at the commit
+# simlin-engine pins.
+wasm-interpreter = { git = "https://github.com/DLR-FT/wasm-interpreter.git", rev = "64cedbba603edfd64cbb6b5a19f5fa34530bb03a" }
+checked = { git = "https://github.com/DLR-FT/wasm-interpreter.git", rev = "64cedbba603edfd64cbb6b5a19f5fa34530bb03a", features = ["linker", "interop"] }
+
+[[example]]
+name = "backend_bench"
+required-features = ["instruments"]
+
+[[example]]
+name = "clearn_discover"
+required-features = ["instruments"]
+
+[[example]]
+name = "clearn_profile"
+required-features = ["instruments"]
+
+[[example]]
+name = "depgraph_dump"
+required-features = ["instruments"]
+
+[[example]]
+name = "layout_eval"
+required-features = ["instruments"]
+
+[[example]]
+name = "layout_probe_models"
+required-features = ["instruments"]
+
+[[example]]
+name = "ltm_declined_edges"
+required-features = ["instruments"]
+
+[[example]]
+name = "ltm_discovery_bench"
+required-features = ["instruments"]
+
+[[example]]
+name = "ltm_edge_coverage"
+required-features = ["instruments"]
+
+[[example]]
+name = "ltm_fallback_eval"
+required-features = ["instruments"]
+
+[[example]]
+name = "ltm_fragment_failures"
+required-features = ["instruments"]
+
+[[example]]
+name = "ltm_full_bench"
+required-features = ["instruments"]
+
+[[example]]
+name = "ltm_helper_census"
+required-features = ["instruments"]
+
+[[example]]
+name = "ltm_mem_bench"
+required-features = ["instruments"]
+
+[[example]]
+name = "ltm_search_graph_dump"
+required-features = ["instruments"]
+
+[[example]]
+name = "ltm_slot_width"
+required-features = ["instruments"]
+
+[[example]]
+name = "ltm_var_dump"
+required-features = ["instruments"]
+
+[[example]]
+name = "mdl_compile_census"
+required-features = ["instruments"]
+
+[[bench]]
+name = "array_ops"
+harness = false
+
+[[bench]]
+name = "simulation"
+harness = false
+
+[[bench]]
+name = "compiler"
+harness = false
+
+[[bench]]
+name = "rapidhash_bench"
+harness = false
+
+# Every native binary that embeds the engine (simlin-cli, simlin-mcp, and
+# libsimlin's `mimalloc` feature, which pysimlin's build turns on) installs
+# mimalloc as its global allocator. The compile path is
+# allocation-bound, so a harness on system malloc measures an allocator no
+# shipped native build actually runs, and over-credits any change that only
+# moves malloc traffic.
+#
+# A dev-dependency does NOT select an allocator -- each harness has to install
+# one -- so every harness that reports a timing or a memory figure does:
+# `examples/clearn_profile.rs`, `examples/backend_bench.rs` and
+# `examples/ltm_mem_bench.rs` back their counting allocators with it, and all
+# four benches declare it directly. Adding a harness here means adding the
+# `#[global_allocator]` too, or its numbers describe a different allocator than
+# the rest.
+#
+# Allocation *counts* stay the allocator-independent metric, and the one that
+# carries over to the wasm bundle, which links neither mimalloc nor this
+# dependency.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+mimalloc = "0.1"

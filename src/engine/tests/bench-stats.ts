@@ -7,7 +7,7 @@
 // benchmark (backend-bench.ts). The timed `body` and the wall clock `now` are
 // both injected, so this module is deterministic and side-effect-free: it never
 // reads the clock itself nor touches a model/WASM. It mirrors the methodology
-// of `src/simlin-engine/examples/backend_bench.rs` (the `Stat`/`bench` pair),
+// of `src/simlin-tests/examples/backend_bench.rs` (the `Stat`/`bench` pair),
 // adding the explicit warmup phase AC9.1 requires.
 //
 // The single deliberate impurity is `defaultNow()` (a `performance.now()` read).
@@ -128,7 +128,7 @@ export type SeriesCloseResult =
   | { readonly match: false; readonly index: number; readonly expected: number; readonly actual: number };
 
 // VM-vs-wasm parity tolerance for the same salsa-compiled simulation. These are
-// the engine's corpus-wide VM-vs-wasm bounds (src/simlin-engine/tests/integration/test_helpers.rs
+// the engine's corpus-wide VM-vs-wasm bounds (src/simlin-tests/tests/integration/test_helpers.rs
 // `ensure_results`, the comparator the heavy C-LEARN/WORLD3 wasm tests clear),
 // NOT the far tighter teacup-only 1e-9 in tests/wasm-model.test.ts: a large model
 // run to its final time accumulates floating-point reassociation noise far above

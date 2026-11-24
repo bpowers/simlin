@@ -31,8 +31,8 @@
 //!   - the emitted wasm blob size.
 //!
 //! Usage:
-//!   cargo run --release -p simlin-engine --example backend_bench
-//!   BENCH_MODELS=fishbanks,wrld3 cargo run --release -p simlin-engine --example backend_bench
+//!   cargo run --release -p simlin-tests --features instruments --example backend_bench
+//!   BENCH_MODELS=fishbanks,wrld3 cargo run --release -p simlin-tests --features instruments --example backend_bench
 //!   BENCH_TIME_BUDGET=5 cargo run ...   # per-phase wall-clock budget, seconds
 //!
 //! `BENCH_MODELS` is a comma list drawn from {fishbanks, wrld3, clearn};
@@ -232,7 +232,7 @@ fn fmt_ms(v: f64) -> String {
 struct ModelSpec {
     key: &'static str,
     label: &'static str,
-    /// Path relative to CARGO_MANIFEST_DIR (src/simlin-engine).
+    /// Path relative to CARGO_MANIFEST_DIR (src/simlin-tests).
     rel_path: &'static str,
     format: Format,
 }

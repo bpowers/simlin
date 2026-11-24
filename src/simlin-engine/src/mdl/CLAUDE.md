@@ -69,7 +69,7 @@ What follows from what the diagram does not draw is reported once over the whole
 A cloud is never a loss, even one no kept flow ends in: it holds nothing, and the writer draws a cloud wherever a flow it writes needs one, so a file Simlin saved would otherwise report its own clouds.
 Then come the custom graphs, tables and reports (`settings::custom_outputs`).
 Vensim stores an input/output object as a comment record with bit 4 of `bits` set and its kind in `tpos` (`VensimComment::io_object`, after Vensim's documented sketch format).
-Tests: `import_loss_tests.rs` (a sketch holding one of each) and [tests/integration/import_losses.rs](/src/simlin-engine/tests/integration/import_losses.rs) (World3).
+Tests: `import_loss_tests.rs` (a sketch holding one of each) and [simlin-tests/tests/integration/import_losses.rs](/src/simlin-tests/tests/integration/import_losses.rs) (World3).
 
 ### Expression Formatting
 - `xmile_compat.rs` -- XMILE-compatible expression formatter (function renames, argument reordering, name formatting, per-element subscript substitution).
@@ -155,7 +155,7 @@ Tests: `import_loss_tests.rs` (a sketch holding one of each) and [tests/integrat
   - **Sketch uids** are dense per segment (`SketchUidRemap::dense_for_segment`), every record its own.
   - **The save step** is written as it was read: one that follows the time step (`SAVEPER = TIME STEP`, one the importer cannot evaluate, or none) imports as no save step and is written as `TIME STEP`; a number is written as that number.
 - The first save normalizes what the datamodel does not hold: a flow label's own position (written at its label side's default offset) and a control variable the importer cannot evaluate (written as its value).
-- Integration: [tests/integration/mdl_roundtrip.rs](/src/simlin-engine/tests/integration/mdl_roundtrip.rs) (whole equations, arrayed models included); [tests/integration/mdl_vensim_truth.rs](/src/simlin-engine/tests/integration/mdl_vensim_truth.rs) (the reader against Vensim's own runs, release; `mdl_vensim_truth_series.tsv` pins each differing file's differing series, rewritten by `UPDATE_VENSIM_TRUTH_SERIES=1`); [tests/integration/save_meaning.rs](/src/simlin-engine/tests/integration/save_meaning.rs) (saves every corpus model in every format, asks `save_check` what each save changes, and lists every save that does not keep its model with the cause: the format cannot hold it, or a writer or reader defect).
+- Integration: [simlin-tests/tests/integration/mdl_roundtrip.rs](/src/simlin-tests/tests/integration/mdl_roundtrip.rs) (whole equations, arrayed models included); [simlin-tests/tests/integration/mdl_vensim_truth.rs](/src/simlin-tests/tests/integration/mdl_vensim_truth.rs) (the reader against Vensim's own runs, release; `mdl_vensim_truth_series.tsv` pins each differing file's differing series, rewritten by `UPDATE_VENSIM_TRUTH_SERIES=1`); [simlin-tests/tests/integration/save_meaning.rs](/src/simlin-tests/tests/integration/save_meaning.rs) (saves every corpus model in every format, asks `save_check` what each save changes, and lists every save that does not keep its model with the cause: the format cannot hold it, or a writer or reader defect).
 
 ## Known Gaps
 

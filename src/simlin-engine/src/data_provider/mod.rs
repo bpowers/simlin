@@ -133,7 +133,7 @@ fn data_provider_error(file: &str) -> Error {
 
 /// Convert a column letter(s) to a 0-based column index.
 /// "A" -> 0, "B" -> 1, ..., "Z" -> 25, "AA" -> 26, etc.
-#[cfg(feature = "file_io")]
+#[cfg(any(test, feature = "file_io"))]
 pub(crate) fn col_index(col: &str) -> Result<usize> {
     if col.is_empty() || !col.bytes().all(|b| b.is_ascii_alphabetic()) {
         return Err(Error::new(
@@ -153,7 +153,7 @@ pub(crate) fn col_index(col: &str) -> Result<usize> {
 /// Parse an A1-style cell reference into 0-based (row, col) indices.
 /// "A1" -> (0, 0), "B2" -> (1, 1), "AA10" -> (9, 26)
 /// Trailing '*' (Vensim range indicator) is stripped before parsing.
-#[cfg(feature = "file_io")]
+#[cfg(any(test, feature = "file_io"))]
 pub(crate) fn parse_cell_ref(s: &str) -> Result<(usize, usize)> {
     let s = s.trim().trim_end_matches('*');
     let split = s.find(|c: char| c.is_ascii_digit()).ok_or_else(|| {
@@ -196,7 +196,7 @@ pub(crate) fn parse_cell_ref(s: &str) -> Result<(usize, usize)> {
 /// 1-based row number ("2" -> (1, 0)). When a plain row number is
 /// given, the column defaults to 0 and the caller should override it
 /// from the separate col_label argument (4-arg GET DIRECT CONSTANTS).
-#[cfg(feature = "file_io")]
+#[cfg(any(test, feature = "file_io"))]
 pub(crate) fn parse_row_or_cell_ref(s: &str) -> Result<(usize, usize)> {
     let trimmed = s.trim().trim_end_matches('*');
     if trimmed.bytes().all(|b| b.is_ascii_digit()) {
@@ -224,17 +224,17 @@ pub(crate) fn parse_row_or_cell_ref(s: &str) -> Result<(usize, usize)> {
 }
 
 /// Check if a string is purely column letters (no digits).
-#[cfg(feature = "file_io")]
+#[cfg(any(test, feature = "file_io"))]
 pub(crate) fn is_column_only(s: &str) -> bool {
     let s = s.trim();
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphabetic())
 }
 
-#[cfg(feature = "file_io")]
+#[cfg(any(test, feature = "file_io"))]
 mod csv_provider;
-#[cfg(all(feature = "file_io", feature = "ext_data"))]
+#[cfg(all(any(test, feature = "file_io"), feature = "ext_data"))]
 mod excel_provider;
-#[cfg(feature = "file_io")]
+#[cfg(any(test, feature = "file_io"))]
 pub use csv_provider::FilesystemDataProvider;
 
 #[cfg(test)]
@@ -286,7 +286,6 @@ mod tests {
         assert!(err.details.as_ref().unwrap().contains("subs.csv"));
     }
 
-    #[cfg(feature = "file_io")]
     #[test]
     fn test_col_index() {
         assert_eq!(col_index("A").unwrap(), 0);
@@ -298,7 +297,6 @@ mod tests {
         assert_eq!(col_index("b").unwrap(), 1);
     }
 
-    #[cfg(feature = "file_io")]
     #[test]
     fn test_col_index_rejects_invalid_input() {
         assert!(col_index("").is_err());
@@ -307,7 +305,6 @@ mod tests {
         assert!(col_index("$A").is_err());
     }
 
-    #[cfg(feature = "file_io")]
     #[test]
     fn test_parse_cell_ref() {
         assert_eq!(parse_cell_ref("A1").unwrap(), (0, 0));
@@ -316,21 +313,18 @@ mod tests {
         assert_eq!(parse_cell_ref("AA1").unwrap(), (0, 26));
     }
 
-    #[cfg(feature = "file_io")]
     #[test]
     fn test_parse_cell_ref_strips_star() {
         assert_eq!(parse_cell_ref("B2*").unwrap(), (1, 1));
         assert_eq!(parse_cell_ref("A1*").unwrap(), (0, 0));
     }
 
-    #[cfg(feature = "file_io")]
     #[test]
     fn test_parse_cell_ref_errors() {
         assert!(parse_cell_ref("123").is_err());
         assert!(parse_cell_ref("").is_err());
     }
 
-    #[cfg(feature = "file_io")]
     #[test]
     fn test_parse_cell_ref_row_zero_returns_error() {
         let result = parse_cell_ref("A0");
@@ -340,7 +334,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "file_io")]
     #[test]
     fn test_parse_row_or_cell_ref_cell_reference() {
         assert_eq!(parse_row_or_cell_ref("B2").unwrap(), (1, 1));
@@ -348,7 +341,6 @@ mod tests {
         assert_eq!(parse_row_or_cell_ref("C10").unwrap(), (9, 2));
     }
 
-    #[cfg(feature = "file_io")]
     #[test]
     fn test_parse_row_or_cell_ref_plain_row_number() {
         assert_eq!(parse_row_or_cell_ref("2").unwrap(), (1, 0));
@@ -356,13 +348,11 @@ mod tests {
         assert_eq!(parse_row_or_cell_ref("10").unwrap(), (9, 0));
     }
 
-    #[cfg(feature = "file_io")]
     #[test]
     fn test_parse_row_or_cell_ref_rejects_row_zero() {
         assert!(parse_row_or_cell_ref("0").is_err());
     }
 
-    #[cfg(feature = "file_io")]
     #[test]
     fn test_is_column_only() {
         assert!(is_column_only("A"));

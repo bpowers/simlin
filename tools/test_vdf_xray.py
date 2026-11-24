@@ -2024,7 +2024,7 @@ class DecodedRecordSpanClassCodeGuardTests(unittest.TestCase):
 class ExtractJsonTests(unittest.TestCase):
     """
     Tests for the machine-readable `--extract-json` mode consumed by the Rust
-    differential parity harness (tests/integration/vdf_parity.rs).
+    differential parity harness (src/simlin-tests/tests/integration/vdf_parity.rs).
     """
 
     def _payload(self, relpaths: list[str]) -> dict:

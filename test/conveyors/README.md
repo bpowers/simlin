@@ -8,7 +8,7 @@ other SD tool writes the queue/conveyor XMILE dialect we parse. What the integra
 harness adds is that every other path — protobuf round-trip, XMILE round-trip, and
 the wasm backend — reproduces the VM column-for-column, synthetic driven flows and
 container auxes included. That harness is `simulate_special_path` in
-`src/simlin-engine/tests/integration/simulate.rs`, NOT the ordinary `simulate_path`
+`src/simlin-tests/tests/integration/simulate.rs`, NOT the ordinary `simulate_path`
 (which would trip the `ConveyorNotExpanded` guard).
 
 **Know what that does and does not buy you.** The harness checks round-trip fidelity

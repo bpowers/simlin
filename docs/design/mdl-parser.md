@@ -196,16 +196,16 @@ The production paths return errors rather than panicking:
 ## What Holds the Reader to Ground Truth
 
 Vensim's own output does.
-The MDL corpus tests in `tests/integration/simulate.rs` (`simulate_mdl_path` and its variants) import a corpus `.mdl` that has a Vensim run beside it (`output.csv`, `output.tab`, or the model's `.dat`), simulate it, and compare the result with that run.
+The MDL corpus tests in `src/simlin-tests/tests/integration/simulate.rs` (`simulate_mdl_path` and its variants) import a corpus `.mdl` that has a Vensim run beside it (`output.csv`, `output.tab`, or the model's `.dat`), simulate it, and compare the result with that run.
 A change to how a file imports is right when every such test still passes.
 
-The census in `tests/integration/mdl_vensim_truth.rs` asks the same question of every corpus `.mdl` with a Vensim run beside it, and pins, for each file that differs, the series that differ (`mdl_vensim_truth_series.tsv`).
+The census in `src/simlin-tests/tests/integration/mdl_vensim_truth.rs` asks the same question of every corpus `.mdl` with a Vensim run beside it, and pins, for each file that differs, the series that differ (`mdl_vensim_truth_series.tsv`).
 It is a gate: `scripts/gates.sh mdl_vensim_truth`.
 
 The gates that read a `.mdl` and compare Simlin with Simlin (the save fixed point, the save-meaning check) cannot stand in for them: a reader that is wrong is wrong on both sides of those.
 
 C-LEARN (`test/xmutil_test_models/C-LEARN v77 for Vensim.mdl`) exercises subscripts, subranges, bang notation, and element-specific equations extensively.
-It is held to its own Vensim reference run by `simulates_clearn` and its companions in `tests/integration/simulate.rs`.
+It is held to its own Vensim reference run by `simulates_clearn` and its companions in `src/simlin-tests/tests/integration/simulate.rs`.
 
 ### Key xmutil Reference Code for Subscript Handling
 

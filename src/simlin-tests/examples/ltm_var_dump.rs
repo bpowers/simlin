@@ -9,9 +9,9 @@
 //! moved or in which direction. Diffing two runs of this does:
 //!
 //! ```text
-//! cargo run --release -p simlin-engine --example ltm_var_dump > after.txt
+//! cargo run --release -p simlin-tests --features instruments --example ltm_var_dump > after.txt
 //! # (revert the change under test)
-//! cargo run --release -p simlin-engine --example ltm_var_dump > before.txt
+//! cargo run --release -p simlin-tests --features instruments --example ltm_var_dump > before.txt
 //! comm -13 <(sort before.txt) <(sort after.txt)   # added
 //! comm -23 <(sort before.txt) <(sort after.txt)   # removed
 //! ```

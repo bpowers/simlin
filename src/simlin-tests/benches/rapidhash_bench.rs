@@ -10,7 +10,7 @@
 //! (8..=320 bytes, ~188 bytes mean, ~47 u32 elements) and one large
 //! size (1 KiB) to sanity-check behavior outside the hot range.
 //!
-//! Run with `cargo bench -p simlin-engine --bench rapidhash_bench`.
+//! Run with `cargo bench -p simlin-tests --bench rapidhash_bench`.
 
 use std::hint::black_box;
 

@@ -4,10 +4,10 @@
 
 //! Full-path LTM compile benchmark.
 //!
-//! Usage: `cargo run --release --example ltm_full_bench -- [mdl]`
+//! Usage: `cargo run --release -p simlin-tests --features instruments --example ltm_full_bench -- [mdl]`
 //!
 //! Example:
-//!   cargo run --release --example ltm_full_bench -- \
+//!   cargo run --release -p simlin-tests --features instruments --example ltm_full_bench -- \
 //!       test/metasd/WRLD3-03/wrld3-03.mdl
 //!
 //! The per-loop loop-score equation-bytes / RSS tracing inside

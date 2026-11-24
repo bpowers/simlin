@@ -3100,7 +3100,7 @@ def extract_results_json_payload(paths: list[Path]) -> dict[str, list[dict]]:
     Machine-readable extraction over multiple files: map each path string (as
     given on the command line) to its `extract_named_results` output as
     `[{name, ot_index, values}]`. Consumed by the Rust differential parity
-    harness (`src/simlin-engine/tests/integration/vdf_parity.rs`); accepting
+    harness (`src/simlin-tests/tests/integration/vdf_parity.rs`); accepting
     many paths lets one interpreter launch cover a whole corpus. Raises on
     dataset files or extraction failure rather than skipping -- the caller
     treats a nonzero exit as fatal.

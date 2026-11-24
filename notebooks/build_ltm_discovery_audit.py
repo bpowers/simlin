@@ -15,7 +15,7 @@ of the same algorithm, written from the design
 from the Rust: the point is to disagree with the engine when the engine is
 wrong, which a transliteration cannot do.
 
-Before executing, this script builds and runs `examples/ltm_search_graph_dump`,
+Before executing, this script builds and runs `src/simlin-tests/examples/ltm_search_graph_dump`,
 which emits the exact element-level edge set discovery consumes (from the
 public `ltm_finding::link_score_offsets`), its per-step link-score series, the
 engine's cycle partitions, and the engine's own reported loops with their score
@@ -125,16 +125,18 @@ def regenerate_dump(key: str) -> Path:
     if not model.exists():
         raise SystemExit(f"model not found: {model}")
 
-    print(f"[{key}] cargo build --release --example ltm_search_graph_dump")
+    print(f"[{key}] cargo build --release --features instruments --example ltm_search_graph_dump")
     subprocess.run(
         [
             "cargo",
             "build",
             "--release",
+            "--features",
+            "instruments",
             "--example",
             "ltm_search_graph_dump",
             "--manifest-path",
-            str(REPO / "src" / "simlin-engine" / "Cargo.toml"),
+            str(REPO / "src" / "simlin-tests" / "Cargo.toml"),
         ],
         check=True,
         cwd=REPO,
@@ -185,7 +187,7 @@ That is checkable, because the loop universe is computable independently. This
 notebook:
 
 1. Runs the engine (`pysimlin`) and records what it reports.
-2. Loads `examples/ltm_search_graph_dump`'s JSON: the exact element-level edge set
+2. Loads `src/simlin-tests/examples/ltm_search_graph_dump`'s JSON: the exact element-level edge set
    discovery consumes (from the public `ltm_finding::link_score_offsets`), each
    edge's per-step link-score series, the engine's cycle partitions, and the
    engine's reported loops with their raw and relative score series.

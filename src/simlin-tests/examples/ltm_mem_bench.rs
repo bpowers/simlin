@@ -20,13 +20,13 @@
 //!    O(|SCC|) is used.
 //!
 //! Usage:
-//!   cargo run --release --example ltm_mem_bench -- [mdl] [budget]
-//!   cargo run --release --example ltm_mem_bench -- --synthetic
+//!   cargo run --release -p simlin-tests --features instruments --example ltm_mem_bench -- [mdl] [budget]
+//!   cargo run --release -p simlin-tests --features instruments --example ltm_mem_bench -- --synthetic
 //!
 //! Examples:
-//!   cargo run --release --example ltm_mem_bench -- \
+//!   cargo run --release -p simlin-tests --features instruments --example ltm_mem_bench -- \
 //!       test/metasd/WRLD3-03/wrld3-03.mdl 10000000
-//!   cargo run --release --example ltm_mem_bench -- --synthetic
+//!   cargo run --release -p simlin-tests --features instruments --example ltm_mem_bench -- --synthetic
 //!
 //! Designed as a repeatable measurement harness for iterating on the
 //! LTM enumeration algorithm without having to reason about the full

@@ -374,7 +374,7 @@ mathematical effect on the model) produces identical LTM results. This ensures t
 analysis depends only on the model's mathematical behavior, not on the modeler's structural
 presentation choices. Simlin holds this at every time step: a stock with separate flows and
 its twin with one net flow give the same flow-to-stock link scores and the same relative
-loop scores at the same `t` (`tests/integration/ltm_flow_to_stock.rs`).
+loop scores at the same `t` (`src/simlin-tests/tests/integration/ltm_flow_to_stock.rs`).
 
 This aggregation invariance is the key 2023 correction. Any value-based flow-to-stock
 formulation is deprecated and should not be used.

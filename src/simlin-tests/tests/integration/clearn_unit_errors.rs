@@ -9,7 +9,7 @@
 //! "template" so we can see WHAT kinds of unit errors Simlin emits and how
 //! many of each.  Run with:
 //!
-//!   cargo test -p simlin-engine --test integration clearn_unit_errors -- --nocapture
+//!   cargo test -p simlin-tests --test integration clearn_unit_errors -- --nocapture
 
 use simlin_engine::common::UnitError;
 use simlin_engine::db::{
@@ -20,7 +20,7 @@ use simlin_engine::open_vensim;
 fn load_clearn() -> simlin_engine::datamodel::Project {
     let mdl_content =
         std::fs::read_to_string("../../test/xmutil_test_models/C-LEARN v77 for Vensim.mdl")
-            .expect("failed to read C-LEARN mdl -- run from the simlin-engine crate dir");
+            .expect("failed to read C-LEARN mdl -- run from the simlin-tests crate dir");
     open_vensim(&mdl_content).expect("open_vensim should parse C-LEARN without I/O errors")
 }
 

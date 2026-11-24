@@ -1080,7 +1080,7 @@ loudly by `belt::reject_unsupported`, and there are exactly two such conditions 
 see below.
 Both backends simulate belts in production, and the whole
 `test/conveyors/` corpus is gated on them agreeing column-for-column
-(`tests/integration/simulate.rs`, `simulate_special_path`).
+(`src/simlin-tests/tests/integration/simulate.rs`, `simulate_special_path`).
 
 The lowering covers everything but §8 spread inputs:
 
@@ -1453,7 +1453,7 @@ Running the prototype from a Rust test against the fixtures below is deliberatel
 not done (GH #951).
 
 Each hand-authored fixture below has one `simulate_special_path` test in
-`tests/integration/simulate.rs`, listed in `CONVEYOR_CORPUS_FIXTURES`:
+`src/simlin-tests/tests/integration/simulate.rs`, listed in `CONVEYOR_CORPUS_FIXTURES`:
 
 - `minimal_conveyor.xmile` — transit time + capacity, single outflow, no leak.
   The clean core-conveyor oracle, at its steady state (`V = inflow · T`).

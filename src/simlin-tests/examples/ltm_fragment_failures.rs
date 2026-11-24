@@ -17,7 +17,7 @@
 //! number of root causes can be told apart from a long tail.
 //!
 //! Usage:
-//!   cargo run --release -p simlin-engine --example ltm_fragment_failures
+//!   cargo run --release -p simlin-tests --features instruments --example ltm_fragment_failures
 //!   LTM_FAIL_MODEL=path/to/model.mdl cargo run --release ... --example ltm_fragment_failures
 //!   LTM_FAIL_SHOW=8 ...   # representative equations printed per bucket
 //!   LTM_FAIL_BUCKET=agg-subscript ...   # dump every equation in one bucket

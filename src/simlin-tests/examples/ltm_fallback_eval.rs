@@ -75,7 +75,7 @@
 //! a genuine miss in a small competing one.
 //!
 //! Usage:
-//!   cargo run --release --example ltm_fallback_eval [model.mdl ...]
+//!   cargo run --release -p simlin-tests --features instruments --example ltm_fallback_eval [model.mdl ...]
 
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;

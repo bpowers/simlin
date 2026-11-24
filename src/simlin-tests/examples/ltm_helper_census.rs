@@ -12,9 +12,9 @@
 //! `model_ltm_implicit_var_info` total printed above the breakdown.
 //!
 //! Usage:
-//!   cargo run --release -p simlin-engine --example ltm_helper_census
-//!   CLEARN_MODEL=path/to/model.mdl cargo run --release -p simlin-engine \
-//!       --example ltm_helper_census
+//!   cargo run --release -p simlin-tests --features instruments --example ltm_helper_census
+//!   CLEARN_MODEL=path/to/model.mdl cargo run --release -p simlin-tests \
+//!       --features instruments --example ltm_helper_census
 
 use std::collections::BTreeMap;
 

@@ -173,14 +173,14 @@ pub use self::vm::{CompiledSimulation, Vm};
 pub use self::vm_profile::BytecodeProfile;
 
 // Re-export compat functions at the crate root for convenience
-#[cfg(feature = "file_io")]
+#[cfg(any(test, feature = "file_io"))]
 pub use self::compat::{load_csv, load_dat};
 pub use self::compat::{
     open_systems, open_vensim, open_vensim_with_data, open_vensim_with_data_and_warnings,
     open_vensim_with_warnings, open_xmile, open_xmile_with_warnings, to_mdl, to_mdl_with_warnings,
     to_systems, to_xmile,
 };
-#[cfg(feature = "file_io")]
+#[cfg(any(test, feature = "file_io"))]
 pub use self::data_provider::FilesystemDataProvider;
 pub use self::data_provider::{DataProvider, NullDataProvider};
 #[cfg(test)]

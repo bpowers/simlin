@@ -1903,7 +1903,7 @@ pub(crate) fn module_input_sets_for(
 /// Returns a map from model name to the set of distinct input sets that model
 /// is instantiated with.
 ///
-/// Public for the corpus sweep (`examples/depgraph_dump.rs`), which dumps
+/// Public for the corpus sweep (`simlin-tests/examples/depgraph_dump.rs`), which dumps
 /// every model under every wiring this enumeration produces; a caller must
 /// refuse a module cycle reachable from `main_model_name` first
 /// (`project_module_graph(..).cycle_error_from`), as `assemble_simulation`

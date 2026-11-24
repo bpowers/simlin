@@ -23,7 +23,7 @@
 //! re-implementing the rule set per caller. The rules are documented in
 //! `docs/design/vdf.md` ("Section 5: dimension sets"); the numeric
 //! evidence is pinned by the MDL-derived expectations in
-//! `tests/integration/vdf_multidim.rs`.
+//! `simlin-tests/tests/integration/vdf_multidim.rs`.
 
 use std::collections::{HashMap, HashSet};
 

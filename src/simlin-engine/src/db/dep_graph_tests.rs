@@ -756,7 +756,7 @@ fn consistency_violation_none_for_init_only_resolved_scc_not_dt_instrumented() {
 // that sourced only `AssignCurr` would find neither, and one narrowed to a
 // particular nesting depth would find one. The shape guards below assert that
 // -- the `App` in an `AssignTemp` and NOT in an `AssignCurr` -- for both.
-// VEM shapes are the known-good `tests/integration/compiler_vector.rs` fixtures
+// VEM shapes are the known-good `simlin-tests/tests/integration/compiler_vector.rs` fixtures
 // (`vector_elm_map(source[*], offsets[*])` and the nested
 // `max(vector_elm_map(...), 15)` hoisting form) so the model compiles and
 // the only thing under test is the membership set.
@@ -1437,7 +1437,7 @@ fn dt_self_recurrence_not_double_resolved_as_init_scc() {
 // cycle is init-ONLY (no dt SCC). This is the empirical confirmation that
 // the chosen fixture shape produces a `phase: Initial` `ResolvedScc` with
 // >= 2 members (the precondition the `init_recurrence.mdl` end-to-end
-// simulation test in `tests/integration/simulate.rs` relies on), and a permanent
+// simulation test in `simlin-tests/tests/integration/simulate.rs` relies on), and a permanent
 // regression guard at the datamodel/verdict level.
 
 /// Two arrayed stocks `cs[t]` / `ecs[t]` over a 3-element named dimension

@@ -411,7 +411,7 @@ fn other_dep_verdict(
 /// index-nested read, is not one), in which case the call stays live, clock
 /// included: the isolated input and the clock are then inseparable inside one
 /// call, and the score attributes that call's whole change to the input (the
-/// stated residual, pinned by `tests/integration/ltm_frozen_clock.rs`). Inside
+/// stated residual, pinned by `simlin-tests/tests/integration/ltm_frozen_clock.rs`). Inside
 /// a subtree the wrap is about to lag (`frozen`: a frozen dep's subscript
 /// index) the call is left verbatim, because the enclosing synthesized freeze
 /// already lags it once -- a capture evaluates the whole `arr[TIME]` at `t`
@@ -2952,7 +2952,7 @@ pub(crate) fn generate_loop_score_variables(
 /// shipped all of that in every build; GH #464). The feature build re-creates
 /// the instrumentation: it logs cumulative loop-score equation bytes and RSS
 /// at power-of-two sample points plus every 10,000 loops. Enable it with
-/// `cargo run --release --example ltm_full_bench --features ltm_bench -- <mdl>`.
+/// `cargo run --release -p simlin-tests --features instruments,ltm_bench --example ltm_full_bench -- <mdl>`.
 mod loop_score_trace {
     #[cfg(feature = "ltm_bench")]
     pub(super) struct LoopScoreTrace {
@@ -4027,7 +4027,7 @@ pub(crate) fn generate_net_flow_equation(
 /// invariant to whether the stock's flows are written separately or as one
 /// net flow (the paper's section 4.4). No `dt` appears: the ratio of two
 /// flow deltas is dimensionless as written, and an isolated loop scores
-/// exactly `+/-1` at every `dt` (`tests/integration/ltm_dt_invariance.rs`).
+/// exactly `+/-1` at every `dt` (`simlin-tests/tests/integration/ltm_dt_invariance.rs`).
 ///
 /// The result is shaped like the stock: `Equation::Scalar` for a scalar
 /// stock, `Equation::ApplyToAll(stock_dims, _)` for an arrayed one, the flow
@@ -5479,7 +5479,7 @@ fn generate_linear_body_partial(
 /// previous step's evaluation of that row and `R(all-frozen terms) =
 /// PREVIOUS(agg)` exactly, because per-variable `PREVIOUS` sampling commutes
 /// with arithmetic; a row that is never the argmin therefore scores 0
-/// (`tests/integration/ltm_frozen_clock.rs`, the GH #763 repro). An original
+/// (`simlin-tests/tests/integration/ltm_frozen_clock.rs`, the GH #763 repro). An original
 /// `PREVIOUS` co-input is frozen whole as well; the selected row's lagged
 /// source reads retain the temporal-edge policy of the ordinary wrapper.
 ///

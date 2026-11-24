@@ -494,8 +494,8 @@ pub struct DiscoveryResult {
     /// `Some` exactly when the fallback ran -- the mirror of `universe_loops`
     /// being `Some` exactly when the enumeration ran, so a caller never has to
     /// ask `enumeration_complete` twice to know which candidate-count field to
-    /// read. Reported by `examples/ltm_discovery_bench` and
-    /// `examples/ltm_fallback_eval` alongside the enumeration's `universe_loops`
+    /// read. Reported by `simlin-tests/examples/ltm_discovery_bench` and
+    /// `simlin-tests/examples/ltm_fallback_eval` alongside the enumeration's `universe_loops`
     /// so the two generators' candidate VOLUMES are directly comparable, not
     /// only their final reported counts (which retention and the cap both
     /// shrink).
@@ -555,7 +555,7 @@ pub type LinkScoreOffset = ((Ident<Canonical>, Ident<Canonical>), usize);
 ///
 /// Exposed for analysis and diagnostic tooling that needs to reason about the
 /// edges discovery actually consumes -- notably
-/// `examples/ltm_edge_coverage.rs`, which reports how many causal edges carry a
+/// `simlin-tests/examples/ltm_edge_coverage.rs`, which reports how many causal edges carry a
 /// live score. Such a tool must not re-derive this mapping: an A2A score
 /// occupies one slot per element and the projection is subtle enough that a
 /// second implementation would drift, and a measuring instrument that disagrees
@@ -589,7 +589,7 @@ pub fn cross_agg_stitching_limits() -> (usize, usize) {
 /// every edge in [`link_score_offsets`]' order. Identical to the recorded series
 /// except on module-input edges, where an audit that derived activity from the
 /// raw composite alone would drop cycles production enumerates. Exposed for the
-/// audit instrument (`examples/ltm_search_graph_dump.rs`) for the same reason the
+/// audit instrument (`simlin-tests/examples/ltm_search_graph_dump.rs`) for the same reason the
 /// edge set is: it must consume what discovery consumes, never re-derive it.
 pub fn link_activity_series(
     results: &Results,
@@ -1852,7 +1852,7 @@ pub struct DiscoveryStepStats {
 /// steps -- not what any particular candidate generator does with it. That is
 /// what makes it usable to explain a discovery cost or a completeness verdict
 /// after the fact, and it is the diagnostics surface behind
-/// `examples/clearn_discover.rs`.
+/// `simlin-tests/examples/clearn_discover.rs`.
 #[derive(Debug)]
 pub struct DiscoveryGraphStats {
     /// Total nodes in the runtime graph (link-score edge endpoints + stocks).

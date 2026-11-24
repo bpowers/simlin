@@ -6,7 +6,7 @@ imported equation file.
 This document describes how diagram quality is
 measured -- the layout-quality metric (`src/simlin-engine/src/layout/metrics.rs`),
 its taste checks (`layout/taste.rs`), and the on-demand eval harness
-(`src/simlin-engine/examples/layout_eval/`) -- and the loop for improving the
+(`src/simlin-tests/examples/layout_eval/`) -- and the loop for improving the
 layout algorithm against them.
 
 ## The metric
@@ -104,7 +104,7 @@ style, and only loops care.
 ## The eval harness
 
 ```
-cargo run --release -p simlin-engine --features png_render,file_io --example layout_eval
+cargo run --release -p simlin-tests --features instruments --example layout_eval
 ```
 
 Knobs (environment variables): `LAYOUT_EVAL_MODELS` (corpus keys),
@@ -140,7 +140,7 @@ corpus-wide taste matrix).
 
 ### The corpus and its references
 
-`examples/layout_eval/corpus.rs` grades how far each model's shipped diagram can
+`src/simlin-tests/examples/layout_eval/corpus.rs` grades how far each model's shipped diagram can
 be trusted:
 
 - **Curated**: one view authored in Stella or Simlin, whose drawing conventions
@@ -167,7 +167,7 @@ median ratios for the aggregate.
 The contact sheet shows the earlier run's term
 values beside the current ones.
 The committed baseline
-(`examples/layout_eval_baseline.json`, see its README) is diffed the same way on
+(`src/simlin-tests/examples/layout_eval_baseline.json`, see its README) is diffed the same way on
 every run.
 
 ## Evaluating edits

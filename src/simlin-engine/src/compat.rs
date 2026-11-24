@@ -3,28 +3,28 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use std::io::BufRead;
-#[cfg(feature = "file_io")]
+#[cfg(any(test, feature = "file_io"))]
 use std::io::BufReader;
 
-#[cfg(feature = "file_io")]
+#[cfg(any(test, feature = "file_io"))]
 use crate::common::IdentMap;
 use crate::common::Result;
 use crate::datamodel::Project;
 
-#[cfg(feature = "file_io")]
+#[cfg(any(test, feature = "file_io"))]
 use std::collections::HashMap;
-#[cfg(feature = "file_io")]
+#[cfg(any(test, feature = "file_io"))]
 use std::error::Error;
-#[cfg(feature = "file_io")]
+#[cfg(any(test, feature = "file_io"))]
 use std::fs::File;
-#[cfg(feature = "file_io")]
+#[cfg(any(test, feature = "file_io"))]
 use std::result::Result as StdResult;
 
-#[cfg(feature = "file_io")]
+#[cfg(any(test, feature = "file_io"))]
 use crate::common::{Canonical, Ident};
-#[cfg(feature = "file_io")]
+#[cfg(any(test, feature = "file_io"))]
 use crate::results::Method;
-#[cfg(feature = "file_io")]
+#[cfg(any(test, feature = "file_io"))]
 use crate::results::{Results, Specs};
 
 use crate::mdl;
@@ -101,7 +101,7 @@ pub fn open_systems(contents: &str) -> Result<Project> {
     systems::translate::translate(&model, systems::translate::DEFAULT_ROUNDS)
 }
 
-#[cfg(feature = "file_io")]
+#[cfg(any(test, feature = "file_io"))]
 pub fn load_dat(file_path: &str) -> StdResult<Results, Box<dyn Error>> {
     use crate::float::approx_eq;
 
@@ -213,7 +213,7 @@ pub fn load_dat(file_path: &str) -> StdResult<Results, Box<dyn Error>> {
     })
 }
 
-#[cfg(feature = "file_io")]
+#[cfg(any(test, feature = "file_io"))]
 pub fn load_csv(file_path: &str, delimiter: u8) -> StdResult<Results, Box<dyn Error>> {
     let mut rdr = csv::ReaderBuilder::new()
         .delimiter(delimiter)
@@ -289,7 +289,7 @@ pub fn load_csv(file_path: &str, delimiter: u8) -> StdResult<Results, Box<dyn Er
     })
 }
 
-#[cfg(all(test, feature = "file_io"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;

@@ -38,7 +38,7 @@
 //! harness and the thing it measures cannot drift apart.
 //!
 //! Usage:
-//!   cargo run --release -p simlin-engine --example ltm_edge_coverage
+//!   cargo run --release -p simlin-tests --features instruments --example ltm_edge_coverage
 //!   LTM_COV_MODEL=path/to/model.mdl cargo run --release ... --example ltm_edge_coverage
 //!   LTM_COV_LIST=1 ...   # list every dead-on-cycle edge
 //!   LTM_COV_EDGES=needle ...   # element edges + scores + diagnostics for a name

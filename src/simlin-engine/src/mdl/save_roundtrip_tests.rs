@@ -6,7 +6,7 @@
 //! model read, saved and read again is the model it was, up to [`normalized`],
 //! which states each thing a save is known not to keep and why.
 //!
-//! `tests/integration/save_meaning.rs` asks whether a save keeps what a model
+//! `simlin-tests/tests/integration/save_meaning.rs` asks whether a save keeps what a model
 //! means; this asks the stronger question of whether it keeps the datamodel,
 //! so a writer or reader change that moves a field no simulation reads is
 //! seen too.

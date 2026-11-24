@@ -17,7 +17,7 @@ SipHash is `core/src/hash/sip.rs` wherever it ended up, FxHash is the
 Usage:
 
     # build with symbols, then profile one compile (see docs/dev/benchmarks.md)
-    cargo build --profile bench -p simlin-engine --example clearn_profile
+    cargo build --profile bench -p simlin-tests --features instruments --example clearn_profile
     valgrind --tool=callgrind --callgrind-out-file=callgrind.out \\
         --toggle-collect='clearn_profile::compile_retained' \\
         target/release/examples/clearn_profile

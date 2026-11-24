@@ -14,7 +14,7 @@ diff:
 
 ```
 LAYOUT_EVAL_SEEDS=8 LAYOUT_EVAL_WRITE_BASELINE=1 \
-  cargo run --release -p simlin-engine --features png_render,file_io --example layout_eval
+  cargo run --release -p simlin-tests --features instruments --example layout_eval
 ```
 
 The sweep takes a few minutes (WRLD3 and covid19 dominate); the JSON is a few

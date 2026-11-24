@@ -14,8 +14,8 @@ use crate::datamodel::Project;
 const IMPORTS: usize = 13;
 
 /// One import of the MDL file `path` (from the checkout's root) without a
-/// data provider and, where the build reads data files, one with the data
-/// its directory holds: each the project or the reader's refusal. A file that
+/// data provider and one with the data its directory holds: each the project
+/// or the reader's refusal. A file that
 /// reads data is refused without it, and which reference the refusal names is
 /// part of what an import decides.
 type Imports = (Result<Project, String>, Option<Result<Project, String>>);
@@ -25,13 +25,10 @@ fn import(path: &str) -> Option<Imports> {
     let bytes = std::fs::read(&file).ok()?;
     let text = String::from_utf8_lossy(&bytes);
     let without = open_vensim_with_data(&text, None).map_err(|e| e.to_string());
-    #[cfg(feature = "file_io")]
     let with = file.parent().map(|dir| {
         let provider = crate::data_provider::FilesystemDataProvider::new(dir);
         open_vensim_with_data(&text, Some(&provider)).map_err(|e| e.to_string())
     });
-    #[cfg(not(feature = "file_io"))]
-    let with = None;
     Some((without, with))
 }
 

@@ -123,7 +123,7 @@ use simlin_engine::{Results, ltm_finding, open_vensim};
 use crate::test_helpers::ltm_discovery_inputs;
 
 /// World3-03 in Vensim MDL form. Paths are relative to the
-/// `simlin-engine` crate directory (where `cargo test` runs).
+/// `simlin-tests` crate directory (where `cargo test` runs).
 const WORLD3_MDL: &str = "../../test/metasd/WRLD3-03/wrld3-03.mdl";
 
 /// C-LEARN v77, a large Vensim model. It compiles via the incremental
@@ -204,7 +204,7 @@ fn discovery_inputs(datamodel_project: &datamodel::Project) -> DiscoveryInputs {
 /// `discover_loops_with_graph` pass the caller drives.
 fn world3_discovery_inputs() -> DiscoveryInputs {
     let mdl = std::fs::read_to_string(WORLD3_MDL).expect(
-        "failed to read wrld3-03.mdl -- run tests from the repo root or the simlin-engine crate",
+        "failed to read wrld3-03.mdl -- run tests from the repo root or the simlin-tests crate",
     );
     let datamodel_project = open_vensim(&mdl).expect("open_vensim should parse wrld3-03.mdl");
     discovery_inputs(&datamodel_project)

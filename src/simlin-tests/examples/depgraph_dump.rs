@@ -11,10 +11,10 @@
 //! without changing any number is invisible to the simulate corpus; see
 //! "Measuring a change" in docs/design/engine-performance.md).
 //!
-//! Usage, from `src/simlin-engine`:
+//! Usage:
 //!
-//!   cargo run --example depgraph_dump -- /tmp/depgraph.base.txt   # on base
-//!   cargo run --example depgraph_dump -- /tmp/depgraph.new.txt    # on the tree
+//!   cargo run -p simlin-tests --features instruments --example depgraph_dump -- /tmp/depgraph.base.txt   # on base
+//!   cargo run -p simlin-tests --features instruments --example depgraph_dump -- /tmp/depgraph.new.txt    # on the tree
 //!   diff /tmp/depgraph.base.txt /tmp/depgraph.new.txt
 //!
 //! Every `.xmile`, `.stmx` and `.mdl` under `test/` is opened; a model the

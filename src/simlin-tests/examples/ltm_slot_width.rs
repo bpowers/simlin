@@ -12,7 +12,7 @@
 //! that rustdoc are regenerable rather than folklore.
 //!
 //! Usage:
-//!   cargo run --release -p simlin-engine --example ltm_slot_width
+//!   cargo run --release -p simlin-tests --features instruments --example ltm_slot_width
 //!   LTM_WIDTH_MODEL=path/to/model.mdl cargo run --release ... --example ltm_slot_width
 
 use std::path::PathBuf;

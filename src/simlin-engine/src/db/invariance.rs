@@ -27,7 +27,7 @@
 //! reads are the SOURCE relation, so a conditional whose literal condition the
 //! compiler folds away keeps the reads of both arms: such a flow may be
 //! under-hoisted, never wrongly hoisted ("Phase 8.5 semantic divergences").
-//! The end-to-end bit-constancy oracle (`tests/integration/simulate.rs`
+//! The end-to-end bit-constancy oracle (`simlin-tests/tests/integration/simulate.rs`
 //! `oracle_*`) pins the production mechanism.
 //!
 //! The flow runlist (`ModelDepGraphResult.runlist_flows`) is a topological

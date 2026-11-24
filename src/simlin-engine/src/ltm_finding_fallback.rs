@@ -58,7 +58,7 @@
 //! Loop scores are still recomputed exactly from the recorded link-score
 //! series afterwards. The configuration only decides WHICH cycles are
 //! proposed, never what they are worth, which is why it is selectable and
-//! settled by measurement (`examples/ltm_fallback_eval`) rather than by
+//! settled by measurement (`simlin-tests/examples/ltm_fallback_eval`) rather than by
 //! argument.
 
 use std::cmp::Ordering;
@@ -230,7 +230,7 @@ pub struct FallbackConfig {
 impl FallbackConfig {
     /// The configuration production uses unless a caller pins another one.
     ///
-    /// Measured, not argued: `examples/ltm_fallback_eval` sweeps the strategy
+    /// Measured, not argued: `simlin-tests/examples/ltm_fallback_eval` sweeps the strategy
     /// space against the exact enumeration on World3 and C-LEARN, and this is
     /// the best point in it subject to the fallback staying under half the
     /// exact run's time. Closing on every edge is what earns its place --
@@ -249,7 +249,7 @@ impl FallbackConfig {
     };
 
     /// [`Self::DEFAULT`] with the weight replaced -- the spelling the weight
-    /// comparison in `examples/ltm_fallback_eval` uses.
+    /// comparison in `simlin-tests/examples/ltm_fallback_eval` uses.
     pub const fn with_weight(weight: FallbackWeight) -> FallbackConfig {
         FallbackConfig {
             weight,
@@ -1174,7 +1174,7 @@ fn order_hops(tie_break: FallbackTieBreak, hops: u32) -> u32 {
 /// `MAX_LOOPS`.
 ///
 /// It is still sized with real headroom over what the corpus actually
-/// produces -- `examples/ltm_discovery_bench` measured 2,150 deduped
+/// produces -- `simlin-tests/examples/ltm_discovery_bench` measured 2,150 deduped
 /// candidates on World3-03 (the densest runtime graph in the repo corpus) and
 /// 159 on C-LEARN v77, both under [`FallbackConfig::DEFAULT`]'s `EveryEdge`
 /// closures, ~9x below this bound (was ~90x below the old 200,000). A trip is
