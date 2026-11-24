@@ -1153,7 +1153,7 @@ fn walk_all_in_expr(
         Expr2::App(builtin, _, _) => {
             let pushed_reducer_key = crate::ltm_agg::builtin_routes_through_agg(builtin);
             if pushed_reducer_key {
-                reducer_keys.push(crate::patch::expr2_to_string(expr));
+                reducer_keys.push(crate::ast::expr2_to_string(expr));
             }
             // Builtin arity is one of the three child counts not bounded by the
             // AST node's own shape (`BuiltinFn::Mean` is the only variadic

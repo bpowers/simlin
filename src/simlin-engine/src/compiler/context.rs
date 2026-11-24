@@ -7,7 +7,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::ast::{
-    self, ArrayView, BinaryOp, Expr3, Expr3LowerContext, IndexExpr3, Loc, TempAllocator,
+    self, ArrayView, BinaryOp, DepKind, DepShape, Expr3, Expr3LowerContext, IndexExpr3, Loc,
+    ModelShape, TempAllocator,
 };
 use crate::common::{
     Canonical, CanonicalDimensionName, CanonicalElementName, ErrorCode, ErrorKind, Ident, IdentMap,
@@ -22,7 +23,6 @@ use crate::{Error, sim_err};
 
 use super::dimensions::{UnaryOp, allocate_implicit_axes, axis_reordering};
 use super::expr::{BuiltinFn, Expr, SubscriptIndex, VarRef};
-use super::fragment::{DepKind, DepShape, ModelShape};
 use super::subscript::{
     IndexOp, Subscript3Config, ViewBuildConfig, ViewBuildResult, build_view_from_ops,
     normalize_subscripts3,
@@ -2966,7 +2966,7 @@ fn test_positional_fallback_ignores_unrelated_mapping() {
 /// name and the variable's slot inside it.
 #[test]
 fn resolve_walks_module_shapes_and_refuses_loudly_off_the_chain() {
-    use super::fragment::{ModelShape, ShapeEntry};
+    use crate::ast::{ModelShape, ShapeEntry};
     use crate::common::CanonicalDimensionName;
 
     let d = Dimension::Indexed(CanonicalDimensionName::from_raw("d"), 3);

@@ -1026,7 +1026,7 @@ pub(super) fn pin_only_source_refs(
 /// (quoted) reference to its aggregate node.
 ///
 /// `reducers` maps the canonical reducer-subexpression text (exactly as
-/// `crate::patch::expr2_to_string` / `print_eqn` renders it -- lowercased,
+/// `crate::ast::expr2_to_string` / `print_eqn` renders it -- lowercased,
 /// whitespace-normalized) to the agg node's name. `equation_text` is parsed
 /// to `Expr0`, and any subexpression of it whose `print_eqn` equals one of
 /// those keys is replaced by a `Var(agg_name)` node, then the whole tree is

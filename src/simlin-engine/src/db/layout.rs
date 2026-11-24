@@ -343,8 +343,8 @@ pub(crate) fn model_shape(
     model: SourceModel,
     project: SourceProject,
     overlay: LtmOverlay,
-) -> std::sync::Arc<crate::compiler::fragment::ModelShape> {
-    use crate::compiler::fragment::{DepShape, ModelShape, ShapeEntry};
+) -> std::sync::Arc<crate::ast::ModelShape> {
+    use crate::ast::{DepShape, ModelShape, ShapeEntry};
 
     let layout = compute_layout(db, model, project, overlay);
     let source_vars = model.variables(db);
@@ -420,8 +420,8 @@ pub(crate) fn module_dep_shape(
     project: SourceProject,
     model_name: &str,
     overlay: LtmOverlay,
-) -> crate::compiler::fragment::DepShape {
-    use crate::compiler::fragment::{DepShape, ModelShape};
+) -> crate::ast::DepShape {
+    use crate::ast::{DepShape, ModelShape};
 
     let sub_canonical = canonicalize(model_name);
     let shape = match project.models(db).get(sub_canonical.as_ref()) {

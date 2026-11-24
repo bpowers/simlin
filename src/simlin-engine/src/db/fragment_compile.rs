@@ -20,9 +20,9 @@ use std::collections::BTreeSet;
 use salsa::Accumulator;
 
 use super::*;
-use crate::ast::LoweringScope;
+use crate::ast::{DepShape, LoweringScope};
 use crate::common::{Canonical, Ident, IdentMap};
-use crate::compiler::fragment::{DepShape, FragmentInput, lower_fragment};
+use crate::compiler::fragment::{FragmentInput, lower_fragment};
 use crate::db::assemble::EmitRefusal;
 use crate::db::var_fragment::{
     DeclaredName, ExplicitFragment, ResolvedHeads, explicit_fragment_input,

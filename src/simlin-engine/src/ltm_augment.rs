@@ -1277,8 +1277,8 @@ pub(crate) use wrap_test_support::{
 /// wrap itself.
 ///
 /// `target_expr` is the target equation's own AST, lowered from its `Expr2`
-/// by [`crate::patch::expr2_to_expr0`] -- **not** parsed from printed text.
-/// Track A's generation half deleted that round trip: `patch::expr2_to_string`
+/// by [`crate::ast::expr2_to_expr0`] -- **not** parsed from printed text.
+/// Track A's generation half deleted that round trip: `ast::expr2_to_string`
 /// IS `print_eqn(expr2_to_expr0(..))`, so parsing its output back was a parse of
 /// our own print of the very tree we already had in this shape. Two things
 /// follow, and the second is the load-bearing one:
@@ -2355,7 +2355,7 @@ fn subscript_idents_in_expr0(
 ///
 /// `to_elem_eqn` is the target's OWN equation AST for this element (the hoisted
 /// reducers still spelled `SUM(...)`, NOT agg-substituted -- Track A stage 1),
-/// lowered straight from its `Expr2` by [`crate::patch::expr2_to_expr0`]: the
+/// lowered straight from its `Expr2` by [`crate::ast::expr2_to_expr0`]: the
 /// shared A2A body for an `Equation::ApplyToAll` target, or the matching
 /// per-element slot (or the default slot) for an `Equation::Arrayed` one. `reducer_subst` maps each hoisted reducer's
 /// canonical text to its agg name; it is empty for a true scalar `from`. `to_deps`
@@ -3530,7 +3530,7 @@ fn build_arrayed_link_score_equation(
                          slot: u16,
                          freeze_helpers: &mut Vec<ArrayFreezeHelper>|
      -> Result<Option<String>, PartialEquationError> {
-        let elem_eqn = crate::patch::expr2_to_expr0(expr);
+        let elem_eqn = crate::ast::expr2_to_expr0(expr);
         // Per-element dependency set: walk *only this slot's* expression
         // (the union over all elements -- what `identifier_set` on the
         // whole `Ast::Arrayed` returns -- would over-freeze refs absent
@@ -3619,7 +3619,7 @@ fn build_arrayed_link_score_equation(
 }
 
 /// The ceteris-paribus wrap's input AST for a Scalar/ApplyToAll target: its
-/// lowered body ([`crate::patch::expr2_to_expr0`]), which involves no text.
+/// lowered body ([`crate::ast::expr2_to_expr0`]), which involves no text.
 ///
 /// A target with no such body is declined (`MissingTypedTarget`), never
 /// scored: `ast()` is `None` exactly when the target's `Expr0 -> Expr2`
@@ -3635,9 +3635,7 @@ fn build_arrayed_link_score_equation(
 fn scalar_or_a2a_target_expr(target_var: &Variable) -> Result<Expr0, PartialEquationError> {
     use crate::ast::Ast;
     match target_var.ast() {
-        Some(Ast::Scalar(expr) | Ast::ApplyToAll(_, expr)) => {
-            Ok(crate::patch::expr2_to_expr0(expr))
-        }
+        Some(Ast::Scalar(expr) | Ast::ApplyToAll(_, expr)) => Ok(crate::ast::expr2_to_expr0(expr)),
         Some(Ast::Arrayed(..)) | None => Err(PartialEquationError::missing_typed_target(
             target_var.ident.as_str(),
         )),
@@ -4537,7 +4535,7 @@ pub(crate) struct ClassifiedReducer {
     pub is_bare: bool,
     /// The reducer's array argument (its "body") -- e.g. the AST of
     /// `pop[*] * (1 - weight[*])` for `SUM(pop[*] * (1 - weight[*]))`, lowered
-    /// straight from the target's `Expr2` by [`crate::patch::expr2_to_expr0`].
+    /// straight from the target's `Expr2` by [`crate::ast::expr2_to_expr0`].
     /// A tree, never its printed text: a consumer that needs the body reads it
     /// directly rather than parsing a print of a tree the generator already
     /// holds.
@@ -4691,7 +4689,7 @@ fn classify_builtin_if_references_source(
     if !expr_references_var(array_arg, canonical_source.as_ref()) {
         return None;
     }
-    Some((kind, upper, crate::patch::expr2_to_expr0(array_arg)))
+    Some((kind, upper, crate::ast::expr2_to_expr0(array_arg)))
 }
 
 /// Check if an Expr2 references a variable with the given canonical name,

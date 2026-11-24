@@ -81,7 +81,7 @@ pub(crate) fn test_occurrences_for_var(
         return out;
     };
     let walk_slot = |expr: &crate::ast::Expr2, slot: u16, out: &mut Vec<OccurrenceSite>| {
-        let e0 = crate::patch::expr2_to_expr0(expr);
+        let e0 = crate::ast::expr2_to_expr0(expr);
         let mut path = vec![slot];
         walk_wrap_test_occurrences(
             &e0,

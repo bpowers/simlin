@@ -18,7 +18,8 @@
 use std::collections::BTreeSet;
 
 use super::*;
-use crate::compiler::fragment::{DepKind, FragmentInput, lower_fragment};
+use crate::ast::DepKind;
+use crate::compiler::fragment::{FragmentInput, lower_fragment};
 use crate::compiler::symbolic::PerVarBytecodes;
 use crate::datamodel;
 use crate::test_common::TestProject;

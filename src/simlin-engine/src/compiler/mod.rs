@@ -99,7 +99,7 @@ pub(crate) struct PositionalRead {
 fn test_context<'a>(
     dimensions: &'a [Dimension],
     dimensions_ctx: &'a DimensionsContext,
-    deps: &'a crate::common::IdentMap<Ident<Canonical>, fragment::DepShape>,
+    deps: &'a crate::common::IdentMap<Ident<Canonical>, crate::ast::DepShape>,
     var_sizes: &'a VarSizes,
     inputs: &'a BTreeSet<Ident<Canonical>>,
 ) -> Context<'a> {
@@ -117,10 +117,10 @@ fn test_context<'a>(
 
 /// Scalar dependency shapes for `names`.
 #[cfg(test)]
-fn scalar_deps(names: &[&str]) -> crate::common::IdentMap<Ident<Canonical>, fragment::DepShape> {
+fn scalar_deps(names: &[&str]) -> crate::common::IdentMap<Ident<Canonical>, crate::ast::DepShape> {
     names
         .iter()
-        .map(|name| (Ident::new(name), fragment::DepShape::var(vec![])))
+        .map(|name| (Ident::new(name), crate::ast::DepShape::var(vec![])))
         .collect()
 }
 
@@ -184,11 +184,11 @@ fn test_module_var_new_missing_input_source_returns_error() {
     };
 
     // deps only contain "my_module" -- NOT "missing_source"
-    let mut deps: crate::common::IdentMap<Ident<Canonical>, fragment::DepShape> =
+    let mut deps: crate::common::IdentMap<Ident<Canonical>, crate::ast::DepShape> =
         Default::default();
     deps.insert(
         module_ident.clone(),
-        fragment::DepShape::module(Arc::new(fragment::ModelShape::default())),
+        crate::ast::DepShape::module(Arc::new(crate::ast::ModelShape::default())),
     );
 
     let dims_ctx = DimensionsContext::default();
@@ -482,9 +482,9 @@ fn test_arrayed_default_equation_applies_to_missing_elements() {
         },
     };
 
-    let mut deps: crate::common::IdentMap<Ident<Canonical>, fragment::DepShape> =
+    let mut deps: crate::common::IdentMap<Ident<Canonical>, crate::ast::DepShape> =
         Default::default();
-    deps.insert(Ident::new("x"), fragment::DepShape::var(dims.clone()));
+    deps.insert(Ident::new("x"), crate::ast::DepShape::var(dims.clone()));
 
     let inputs = BTreeSet::new();
     let dims_ctx = DimensionsContext::from(std::slice::from_ref(&datamodel_dim));

@@ -48,10 +48,10 @@ use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use crate::ast::LoweringScope;
+use crate::ast::{DepShape, LoweringScope};
 use crate::canonicalize;
 use crate::common::{Canonical, Ident, IdentMap};
-use crate::compiler::fragment::{DepShape, FragmentInput};
+use crate::compiler::fragment::FragmentInput;
 use crate::db::{
     Db, Diagnostic, DiagnosticError, DiagnosticSeverity, ImplicitVarMeta, LtmOverlay,
     ModuleInputSet, ParsedVariableResult, SourceModel, SourceProject, SourceVariable,

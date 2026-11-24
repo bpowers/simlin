@@ -731,7 +731,7 @@ pub struct AggNode {
     ///   make *which occurrence won the dedup* observable and would stop
     ///   `enumerate_agg_nodes` backdating across an edit that only moves an
     ///   equation's byte offsets. Neither reader looks at a `Loc`
-    ///   ([`crate::patch::expr2_to_expr0`] carries them along unread; the
+    ///   ([`crate::ast::expr2_to_expr0`] carries them along unread; the
     ///   polarity analyzer matches on none), so removing them changes no answer.
     ///   Pinned by `the_carried_reducer_is_normalized_so_offset_only_edits_backdate`.
     /// * `ArrayBounds` -- removed, and load-bearing: the ASTs this enumerator
@@ -771,14 +771,14 @@ pub struct AggNode {
 impl AggNode {
     /// The reducer as the typed `Expr0` the equation generators consume -- the
     /// agg's own equation and the frozen re-evaluation of the feeder link
-    /// scores. A projection of [`AggNode::reducer`] (`patch::builtin_to_untyped`,
+    /// scores. A projection of [`AggNode::reducer`] (`ast::builtin_to_untyped`,
     /// the same map `expr2_to_expr0` applies to every lowered subtree the
     /// generators wrap), so it never goes through the lexer. It prints as
     /// `reducer_key` except that a bare arrayed source is spelled (see the
     /// field).
     pub(crate) fn reducer_expr0(&self) -> Expr0 {
         Expr0::App(
-            crate::patch::builtin_to_untyped(&self.reducer),
+            crate::ast::builtin_to_untyped(&self.reducer),
             crate::ast::Loc::default(),
         )
     }
@@ -1122,7 +1122,7 @@ fn walk_var_equation(
         // it is broadcast to an arrayed variable (every element holds the same
         // value); a partial reduce keyed by the active A2A dimension
         // (`rowsum[D1] = SUM(matrix[D1, *])`) keeps `[D1]` as its result dims.
-        let key = crate::patch::expr2_to_string(expr);
+        let key = crate::ast::expr2_to_string(expr);
         let result_dims = candidate.result_dims;
         let reducer = candidate.reducer;
         // DECLINE the degenerate square-source shape (repeated result dim,
@@ -1347,7 +1347,7 @@ fn walk_subexpr_for_aggs(
                 // not-statically-describable carve-outs.
                 && let Some(sources) = agg_sources(candidate.source_vars, &candidate.slices, ctx)
             {
-                let key = crate::patch::expr2_to_string(expr);
+                let key = crate::ast::expr2_to_string(expr);
                 register_agg(
                     result,
                     next_synthetic_n,
@@ -1689,7 +1689,7 @@ fn register_agg(
             let reducer = reducer.map(|e| spell_bare_sources(e, &sources));
             // The node's identity is the SPELLED reducer, not the owner's
             // text `key`: see `AggNodesResult`.
-            let identity = crate::patch::expr2_to_string(&Expr2::App(
+            let identity = crate::ast::expr2_to_string(&Expr2::App(
                 reducer.clone(),
                 None,
                 crate::ast::Loc::default(),
@@ -3051,7 +3051,7 @@ fn collect_from_read_slices_in_reducers(
 ) {
     match expr {
         Expr2::App(builtin, _, _) if !in_reducer && reducer_is_hoistable(builtin) => {
-            let key = crate::patch::expr2_to_string(expr);
+            let key = crate::ast::expr2_to_string(expr);
             let reducer_is_synthetic_hoisted = hoisted_synthetic_keys.contains(&key);
             // A maximal residual reducer: collect every read of `from` among
             // its args unless a synthetic agg already represents this reducer.

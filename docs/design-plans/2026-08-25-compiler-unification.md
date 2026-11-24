@@ -1435,7 +1435,7 @@ classified on the typed tier -- is declined loudly
 (`PartialEquationErrorKind::MissingTypedTarget`) rather than scored around a
 body the compiler refused. The compile path has no round trip; the engine has
 one, off it: LTM's link-score generation prints the target's LOWERED body
-(`patch::expr2_to_expr0` + `print_eqn`) around the guard form and parses that
+(`ast::expr2_to_expr0` + `print_eqn`) around the guard form and parses that
 text once in `db::ltm::equation::LtmArm::new`, the GH #965 generated-text
 boundary, which applies to every variable and to captures alike. An
 apply-to-all body whose only helpers are snapshots stays an `Ast::ApplyToAll`

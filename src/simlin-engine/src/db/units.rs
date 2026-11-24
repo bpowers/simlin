@@ -727,7 +727,7 @@ fn check_conveyor_param_units(
     // Nothing synthesized here enters a memo: the auxes must not add
     // constraints to the model under analysis, or reach another reader.
     let dim_ctx = project_dimensions_context(db, project);
-    let mut shapes: crate::common::IdentMap<Ident<Canonical>, crate::compiler::fragment::DepShape> =
+    let mut shapes: crate::common::IdentMap<Ident<Canonical>, crate::ast::DepShape> =
         Default::default();
     for (name, sv) in model.variables(db) {
         if sv.kind(db) != SourceVariableKind::Module {

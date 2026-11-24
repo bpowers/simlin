@@ -1200,7 +1200,7 @@ pub(super) fn try_implicit_scalar_to_arrayed_link_scores(
             Ast::ApplyToAll(_, expr) => {
                 let class = crate::variable::classify_dependencies(ast, target_ast_dims, None);
                 (
-                    Some(crate::patch::expr2_to_expr0(expr)),
+                    Some(crate::ast::expr2_to_expr0(expr)),
                     class.names(),
                     class.referenced_tables,
                 )
@@ -1214,7 +1214,7 @@ pub(super) fn try_implicit_scalar_to_arrayed_link_scores(
                             None,
                         );
                         (
-                            Some(crate::patch::expr2_to_expr0(expr)),
+                            Some(crate::ast::expr2_to_expr0(expr)),
                             class.names(),
                             class.referenced_tables,
                         )
@@ -1849,7 +1849,7 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
         // element-invariant -- compute them once, outside the loop. Only the
         // pin PROJECTION varies per element, and that is `build_var`'s job.
         Ast::ApplyToAll(_, expr) => {
-            let elem_eqn = crate::patch::expr2_to_expr0(expr);
+            let elem_eqn = crate::ast::expr2_to_expr0(expr);
             let elem_dep_class = crate::variable::classify_dependencies(ast, target_ast_dims, None);
             let elem_deps = elem_dep_class.names();
             let pinnable = pinnable_deps(&elem_deps, &elem_dep_class.referenced_tables);
@@ -1891,7 +1891,7 @@ pub(super) fn try_scalar_to_arrayed_link_scores(
                             None,
                         );
                         (
-                            Some(crate::patch::expr2_to_expr0(expr)),
+                            Some(crate::ast::expr2_to_expr0(expr)),
                             class.names(),
                             class.referenced_tables,
                         )
@@ -2954,7 +2954,7 @@ fn emit_per_element_link_scores(
     // Per target element: the body text + dep sets (shared for A2A,
     // per-slot for Arrayed -- mirroring `try_scalar_to_arrayed_link_scores`).
     let a2a_parts: Option<ElemEqnParts> = if let Ast::ApplyToAll(_, expr) = ast {
-        let eqn = crate::patch::expr2_to_expr0(expr);
+        let eqn = crate::ast::expr2_to_expr0(expr);
         let class = crate::variable::classify_dependencies(ast, target_ast_dims, None);
         let deps = class.names();
         let pinnable = pinnable_deps(&deps, &class.referenced_tables);
@@ -3020,7 +3020,7 @@ fn emit_per_element_link_scores(
                 let slot = per_elem.get(&canonical_elem).or(default_expr.as_ref());
                 match slot {
                     Some(expr) => {
-                        let eqn = crate::patch::expr2_to_expr0(expr);
+                        let eqn = crate::ast::expr2_to_expr0(expr);
                         let class = crate::variable::classify_dependencies(
                             &Ast::Scalar(expr.clone()),
                             target_ast_dims,
@@ -4041,7 +4041,7 @@ pub(super) fn emit_agg_to_target_link_scores(
             match crate::ltm_augment::generate_agg_to_scalar_target_equation(
                 &agg.name,
                 to,
-                &crate::patch::expr2_to_expr0(expr),
+                &crate::ast::expr2_to_expr0(expr),
                 &reducer_subst,
                 &all_deps,
                 Some(project_dimensions_context(db, project)),
@@ -4079,7 +4079,7 @@ pub(super) fn emit_agg_to_target_link_scores(
             // `Expr0`); a doomed wrap surfaces on the first element's generator
             // `Err` and dooms the edge once, via the same GH #661 warning path
             // the per-element loop uses.
-            let to_own_eqn = crate::patch::expr2_to_expr0(expr);
+            let to_own_eqn = crate::ast::expr2_to_expr0(expr);
             if to_dims.is_empty() {
                 return;
             }
@@ -4220,7 +4220,7 @@ pub(super) fn emit_agg_to_target_link_scores(
                             to,
                             // Qualified for equation text; the name keeps the bare form.
                             &crate::ltm_augment::qualify_element_csv(element, &to_dims),
-                            &crate::patch::expr2_to_expr0(slot_expr),
+                            &crate::ast::expr2_to_expr0(slot_expr),
                             &reducer_subst,
                             &slot_deps,
                             &deps_to_subscript(element),

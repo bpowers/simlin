@@ -8,21 +8,23 @@ use crate::builtins::{BuiltinContents, UntypedBuiltinFn, walk_builtin_expr};
 use crate::common::{
     Canonical, CanonicalElementName, EquationError, EquationResult, Ident, IdentMap, canonicalize,
 };
-use crate::compiler::fragment::DepShape;
 use crate::dimensions::{Dimension, DimensionsContext};
 use unicode_xid::UnicodeXID;
 
 mod array_view;
 mod canonical;
+mod dep_shape;
 mod expr0;
 mod expr1;
 mod expr2;
 mod expr3;
 mod literal;
+mod to_expr0;
 
 pub use array_view::{ArrayView, SparseInfo};
 pub(crate) use canonical::operator_for_call;
 pub use canonical::{Aliases, CanonicalEqn};
+pub(crate) use dep_shape::{DepKind, DepShape, ModelShape, ShapeEntry};
 pub use expr0::{BinaryOp, Expr0, IndexExpr0, UnaryOp};
 pub use expr1::{Expr1, IndexExpr1};
 #[allow(unused_imports)]
@@ -30,6 +32,7 @@ pub use expr2::{ArrayBounds, Expr2, Expr2Context, IndexExpr2, NodeBounds};
 #[allow(unused_imports)]
 pub use expr3::{Expr3, Expr3LowerContext, IndexExpr3, TempAllocator};
 pub use literal::Literal;
+pub(crate) use to_expr0::{builtin_to_untyped, expr2_to_expr0, expr2_to_string};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ast<Expr> {

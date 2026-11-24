@@ -20,7 +20,8 @@ use std::collections::{BTreeSet, HashMap};
 use crate::canonicalize;
 use crate::common::{Canonical, Ident, IdentMap};
 
-use crate::compiler::fragment::{DepShape, FragmentInput, lower_fragment};
+use crate::ast::DepShape;
+use crate::compiler::fragment::{FragmentInput, lower_fragment};
 use crate::db::var_fragment::{dimensions_named, model_dep_shape, source_dep_shape};
 use crate::db::{
     Db, Diagnostic, DiagnosticError, LtmLinkId, LtmSyntheticVar, RefShape, SourceModel,

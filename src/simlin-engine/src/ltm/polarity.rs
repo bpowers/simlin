@@ -176,7 +176,7 @@ fn substitute_subexpr_in_expr2(
     target_text: &str,
     replacement: &Ident<Canonical>,
 ) -> Expr2 {
-    if crate::patch::expr2_to_string(expr) == target_text {
+    if crate::ast::expr2_to_string(expr) == target_text {
         return Expr2::Var(replacement.clone(), None, crate::ast::Loc::default());
     }
     match expr {
