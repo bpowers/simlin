@@ -43,7 +43,7 @@ def content_hash(data: bytes) -> str:
 def atomic_write(path: _PathLike, data: bytes) -> None:
     """Write ``data`` to ``path`` atomically: a sibling tempfile is written,
     fsynced, and renamed over the target, so a reader (our own watcher, an
-    editor, ``simlin-serve``) sees either the old bytes or the new bytes and
+    editor, ``simlin-mcp``) sees either the old bytes or the new bytes and
     never a partial file.  This is the same convention as
     ``simlin_engine::io::atomic_write``.
 

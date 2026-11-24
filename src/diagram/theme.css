@@ -209,8 +209,8 @@
  * they are live wherever a host sets data-theme="dark" on an ancestor of the
  * Editor: the notebook widget does (its `theme` trait, `auto` following
  * JupyterLab's theme / prefers-color-scheme, lands on its wrapper, and its
- * portaled surfaces render inside that wrapper). The web app and simlin-serve
- * are light-only and never set it, so the chrome overrides are inert there.
+ * portaled surfaces render inside that wrapper). The web app is light-only and
+ * never sets it, so the chrome overrides are inert there.
  * Every chrome/component token needs a dark value here for that reason: a
  * token missing from this block renders a white box with invisible text in a
  * dark notebook.

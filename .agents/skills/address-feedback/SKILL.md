@@ -34,7 +34,7 @@ and walk it with these questions in mind:
    ```
    The test for whether you've finished: every consumer should be calling the same primitive, not reimplementing the rule inline.
 
-3. **Threat-model alignment**: If the PR touches auth, transport, path validation, file-creation, or anything described in `docs/threat-model.md`, cross-reference each promise against your code. The threat model is a contract; if your PR's code doesn't match it, either fix the code or update the threat model — but don't ship divergence silently.
+3. **Security-boundary alignment**: If the PR touches auth, transport, path validation, or file creation, cross-reference each promise the docs and comments make about that boundary against your code. Those promises are a contract; if your PR's code doesn't match them, either fix the code or update the text — but don't ship divergence silently.
 
 4. **N≥3 duplication smell**: If the same conditional / helper / rule appears in 3+ places, refactor before merging. This is the source of the "next round of bugs" — every duplicated rule eventually drifts.
 

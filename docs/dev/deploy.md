@@ -4,7 +4,7 @@
 
 The web app at `app.simlin.com` runs on Google App Engine standard.
 GAE serves the static React SPA built from `src/app` and runs the Express backend in `src/server` (Firebase Auth, models persisted in Firestore as protobuf).
-`@simlin/mcp`, `@simlin/serve`, `pysimlin`, and `simlin-cli` are released separately to npm/PyPI -- they aren't part of this deploy.
+`@simlin/mcp`, `pysimlin`, and `simlin-cli` are released separately to npm/PyPI -- they aren't part of this deploy.
 
 Read this before your first deploy after a long gap: the deploy is one local command (with a [CI smoke gate](#ci-coverage-of-the-deploy-build) on the assembly path), the production config (`.app.prod.yaml`) isn't in the repo, and the only rollback is a GAE traffic split.
 
@@ -40,7 +40,7 @@ gcloud app deploy ./.app.prod.yaml               # upload the repo minus .gcloud
 pnpm --filter @simlin/app run deploy:clean       # git checkout the symlinks and index.html; rm build artifacts
 ```
 
-`pnpm build` builds *every* workspace package, including `website` (rspress) and `@simlin/serve-web` (rsbuild), neither of which ships.
+`pnpm build` builds *every* workspace package, including `website` (rspress) and `@simlin/notebook-widget` (rsbuild), neither of which ships.
 A failure in any of them aborts the deploy before `gcloud` runs.
 If you've touched only the app or server, `pnpm --filter "@simlin/app..." --filter "@simlin/server..." run build` is a narrower equivalent -- but `pnpm deploy:web` always runs the full build.
 

@@ -79,4 +79,3 @@ test/** -text
 # byte-exact (e.g. the SIR_output.csv golden the libsimlin tests reference).
 src/libsimlin/testdata/**          -text
 src/pysimlin/tests/fixtures/**     -text
-src/simlin-serve/tests/fixtures/** -text

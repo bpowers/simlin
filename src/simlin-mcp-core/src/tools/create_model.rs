@@ -8,9 +8,8 @@
 //!
 //! Builds an empty `datamodel::Project` from the input and asks
 //! [`ProjectAccess`] to persist it.  The `ProjectAccess::create` impl
-//! decides where the bytes land (filesystem path or registry key) and
-//! how they are serialised; this function only owns the in-memory
-//! construction.
+//! decides where the bytes land and how they are serialised; this function
+//! only owns the in-memory construction.
 
 use std::path::Path;
 
@@ -21,7 +20,7 @@ use simlin_engine::json as ejson;
 use crate::access::ProjectAccess;
 use crate::errors::AccessError;
 use crate::open::format_for_extension;
-use crate::types::{SourceFormat, build_empty_project_with_specs};
+use crate::types::{SourceFormat, build_empty_project, default_sim_specs};
 
 /// Input for the `CreateModel` tool.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -66,19 +65,6 @@ fn project_name_from_path(path: &Path) -> String {
     }
 }
 
-/// Sim-spec defaults shared with the HTTP `POST /api/projects/new`
-/// endpoint via [`crate::types::build_empty_project`].
-fn default_sim_specs_for_create() -> ejson::SimSpecs {
-    ejson::SimSpecs {
-        start_time: 0.0,
-        end_time: 100.0,
-        dt: "0.25".to_string(),
-        save_step: 1.0,
-        method: "euler".to_string(),
-        time_units: String::new(),
-    }
-}
-
 /// Create an empty model at the given path.
 ///
 /// CreateModel always produces a single `main` model with the requested
@@ -88,23 +74,17 @@ fn default_sim_specs_for_create() -> ejson::SimSpecs {
 /// path's extension (`format_for_extension`) so the file `ReadModel`
 /// later parses by extension holds the matching format; JSON is the
 /// default for `.sd.json` and any other extension.
-///
-/// The empty project body is built via
-/// [`crate::types::build_empty_project_with_specs`], the same helper the
-/// HTTP `POST /api/projects/new` endpoint goes through.  Both paths
-/// produce byte-identical files when invoked with default sim-specs and
-/// matching path stems; Phase 8's parity test locks that property.
 pub async fn create_model<A: ProjectAccess>(
     access: &A,
     input: CreateModelInput,
 ) -> Result<CreateModelOutput, AccessError> {
     let path = Path::new(&input.project_path);
 
-    let sim_specs = input.sim_specs.unwrap_or_else(default_sim_specs_for_create);
+    let sim_specs = input.sim_specs.unwrap_or_else(default_sim_specs);
     let project_name = project_name_from_path(path);
     let model_name = "main".to_string();
 
-    let mut project = build_empty_project_with_specs(sim_specs.clone());
+    let mut project = build_empty_project(sim_specs.clone());
     project.name = project_name;
 
     let format = format_for_extension(path).unwrap_or(SourceFormat::NativeJson);

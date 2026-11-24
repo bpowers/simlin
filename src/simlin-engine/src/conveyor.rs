@@ -27,7 +27,7 @@ use std::collections::VecDeque;
 /// no bound a hostile or typo'd `<len>` blows up the allocation two ways: a
 /// `usize`-saturating count (e.g. `1e300 / dt`) panics `vec![0.0; usize::MAX]`
 /// with "capacity overflow" -- a host-process abort under libsimlin's
-/// `panic = "abort"` release profile (wasm, pysimlin, serve) -- and a merely
+/// `panic = "abort"` release profile (wasm, pysimlin) -- and a merely
 /// enormous finite count (`1e12 / dt` -> ~4e12 slats -> ~32 TB) OOMs when
 /// committed. 1,000,000 slats is far beyond any physically meaningful
 /// `transit/dt` ratio yet trivially cheap to reject below, so a latched transit

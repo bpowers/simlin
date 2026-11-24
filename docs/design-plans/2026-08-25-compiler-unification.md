@@ -760,7 +760,7 @@ the unit suites over production diagnostics, and what pins the sharing is
 (`db::lowered_variable_tests`, `db::units_tests`). The memos are what a
 compile-only caller retains without a diagnostics pass to amortize them
 (pysimlin's `Model.simulate()` used alone, a C/Go embedder holding a project
-without `get_errors`, serve's transient `simulate_sync` as peak only: +6.0 MiB
+without `get_errors`: +6.0 MiB
 on C-LEARN at 8.5, 28.97 MiB against the pre-memo 22.94; ledger rows `8.2+8.3`,
 `8.3b` and `8.5`). An `Expr2` node's bounds slot
 is `ast::NodeBounds`, an `Option<Box<ArrayBounds>>` stated once: a bound is

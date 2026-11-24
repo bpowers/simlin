@@ -11,7 +11,8 @@ import { cleanup } from '@testing-library/react';
 afterEach(cleanup);
 
 // @testing-library/dom's waitFor advances fake timers only through a global
-// `jest` object (see src/simlin-serve/web/src/test-utils for the full story).
+// `jest` object (see src/diagram/tests/setup-testing-library.ts for the full
+// story).
 (globalThis as { jest?: { advanceTimersByTime: (ms: number) => void } }).jest = {
   advanceTimersByTime: (ms: number) => {
     rs.advanceTimersByTime(ms);

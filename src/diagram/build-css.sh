@@ -4,8 +4,8 @@ set -euo pipefail
 # Generate per-CSS-file outputs for the @simlin/diagram build.
 #
 # - `lib/<rel>/<file>.css` is a JavaScript stub exporting an empty proxy.
-#   The Node build (consumed by simlin-cli, simlin-serve's MCP layer, and
-#   any non-bundler user) imports `.css` modules through the package's
+#   The Node build (consumed by scripts/debug-diagram-gen.mjs and any
+#   other non-bundler user) imports `.css` modules through the package's
 #   `./*.css` export. Without a stub the import resolves to a literal CSS
 #   file that Node cannot evaluate; the proxy makes
 #   `import styles from "./foo.css"` return an object whose every property
@@ -15,10 +15,10 @@ set -euo pipefail
 #   browser bundle (consumed by Vite / esbuild / etc.) can apply real
 #   styles.
 #
-# Inlined as a bash script so the build runs identically on Linux,
-# macOS, and Windows. The previous in-package.json shell pipeline
-# relied on `find`/`while`/`dirname`/`sed` being on PATH, which fails
-# on the Windows GitHub runner where pnpm shells out through PowerShell.
+# A bash script rather than a package.json shell pipeline so the build runs
+# identically on Linux, macOS, and Windows: a pipeline relies on
+# `find`/`while`/`dirname`/`sed` being on PATH, which fails on Windows, where
+# pnpm shells out through PowerShell.
 # `bash <script>` runs through Git Bash on Windows and the system bash
 # on Unix.
 

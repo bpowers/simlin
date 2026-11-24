@@ -4,10 +4,10 @@
 
 // Keyboard scoping across Editor instances. The Editor listens for shortcuts at
 // the document level (Delete/Backspace, Escape, undo/redo), which is fine when
-// one Editor owns the whole page (src/app, simlin-serve) but not when several
-// share one -- a Jupyter notebook with an Editor per output cell. The
-// document-level handler must therefore act only when the key event belongs to
-// THIS instance. The four arms of that decision (editor-key-scope.ts):
+// one Editor owns the whole page (src/app) but not when several share one -- a
+// Jupyter notebook with an Editor per output cell. The document-level handler
+// must therefore act only when the key event belongs to THIS instance. The four
+// arms of that decision (editor-key-scope.ts):
 //
 //  1. the event's composedPath() includes this Editor's root -> this instance;
 //  2. the path includes ANOTHER Editor's root -> not this instance;
@@ -463,7 +463,7 @@ describe('Editor keyboard scoping across instances', () => {
     expect(document.activeElement).toBe(b.root);
   });
 
-  it('a single Editor still handles a key on <body> after a press inside it (the app/serve hosts)', async () => {
+  it('a single Editor still handles a key on <body> after a press inside it (the app host)', async () => {
     const a = mountEditor();
     select(a, 9);
     pressInside(a);

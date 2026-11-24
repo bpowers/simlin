@@ -4,6 +4,5 @@ packages:
   - 'src/diagram'
   - 'src/app'
   - 'src/server'
-  - 'src/simlin-serve/web'
   - 'src/notebook-widget'
   - 'website'

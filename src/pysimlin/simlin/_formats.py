@@ -8,10 +8,10 @@ Every place that maps a path or a byte payload to a model format --
 are how a file becomes loadable but unsavable (or the reverse), so new
 consumers must call these functions rather than re-deriving the mapping.
 
-The suffix table mirrors ``simlin-serve``'s ``discovery::format_for_path``
-(``.stmx``/``.xmile``/``.xml`` -> XMILE, ``.mdl`` -> Vensim, ``.sd.json`` ->
-native JSON) and adds what pysimlin's own readers already accepted
-(``.vpm``, protobuf suffixes, plain ``.json``).  JSON payloads are sniffed on
+The suffix table mirrors simlin-mcp-core's ``open::format_for_extension``
+(``.stmx``/``.xmile``/``.xml`` -> XMILE, ``.mdl`` -> Vensim, everything else
+JSON by content) and adds what pysimlin's own readers accept (``.vpm``,
+protobuf suffixes).  JSON payloads are sniffed on
 their top-level key exactly as ``simlin-mcp-core::open::open_project`` does:
 ``models`` is native Simlin JSON, ``variables`` is SD-AI JSON.  ``.sd.json``
 is the *write* default for native JSON; on read it is sniffed like any other

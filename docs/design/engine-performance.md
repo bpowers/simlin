@@ -297,7 +297,7 @@ Compile is allocation-bound, so a faster allocator pays off directly:
 | compile | 2450 ms | 1459 ms | **−40%** |
 | run | 168 ms | 167 ms | none (run is allocation-free post-win #1) |
 
-Wiring: the binaries (`simlin-cli`, `simlin-serve`, `simlin-mcp`) set
+Wiring: the binaries (`simlin-cli`, `simlin-mcp`) set
 `#[global_allocator] mimalloc::MiMalloc` in their `main.rs` (native binaries,
 never wasm) and depend on the `mimalloc` crate directly.
 `libsimlin` (the cdylib
@@ -306,7 +306,7 @@ an opt-in `mimalloc` feature that is additionally `cfg(not(target_arch =
 "wasm32"))`; pysimlin's build (`Makefile`, `scripts/build_wheels.py`) enables
 `--features mimalloc`.
 The feature is off by default.
-None of the three binaries
+Neither binary
 depends on `libsimlin`: the CLI deliberately does not, so its dependency closure
 holds no cdylib/staticlib crate. libsimlin's fixed-name (unhashed) rlib cannot
 coexist with the workspace's feature-unified variant of itself, so depending on

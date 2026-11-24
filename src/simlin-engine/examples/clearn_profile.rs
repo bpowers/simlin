@@ -37,8 +37,8 @@
 use std::alloc::{GlobalAlloc, Layout};
 
 // Back the counting allocator with mimalloc, which is what every native binary
-// embedding the engine installs (simlin-cli, simlin-serve, simlin-mcp, and
-// libsimlin under its `mimalloc` feature, which pysimlin's build turns on).
+// embedding the engine installs (simlin-cli, simlin-mcp, and libsimlin under
+// its `mimalloc` feature, which pysimlin's build turns on).
 // The compile path is allocation-bound, so profiling against system malloc
 // measures an allocator no shipped native build runs.
 use mimalloc::MiMalloc as Backing;

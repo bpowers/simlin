@@ -177,9 +177,9 @@ harness = false
 name = "rapidhash_bench"
 harness = false
 
-# Every native binary that embeds this engine (simlin-cli, simlin-serve,
-# simlin-mcp, and libsimlin's `mimalloc` feature, which pysimlin's build turns
-# on) installs mimalloc as its global allocator. The compile path is
+# Every native binary that embeds this engine (simlin-cli, simlin-mcp, and
+# libsimlin's `mimalloc` feature, which pysimlin's build turns on) installs
+# mimalloc as its global allocator. The compile path is
 # allocation-bound, so a harness on system malloc measures an allocator no
 # shipped native build actually runs, and over-credits any change that only
 # moves malloc traffic.

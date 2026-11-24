@@ -18,7 +18,6 @@ Exception: protobuf files must follow standard versioning (we have a DB with ser
 | `src/libsimlin`       | Rust        | Flat C FFI to simlin-engine (WASM, CGo, C/C++)                    | [CLAUDE.md](/src/libsimlin/CLAUDE.md)       |
 | `src/simlin-mcp-core` | Rust        | Transport-agnostic MCP tool surface (`ProjectAccess` trait, rmcp `ServerHandler`) | [CLAUDE.md](/src/simlin-mcp-core/CLAUDE.md) |
 | `src/simlin-mcp`      | Rust/JS     | Stdio MCP server for AI assistants (`@simlin/mcp` npm)            | [CLAUDE.md](/src/simlin-mcp/CLAUDE.md)      |
-| `src/simlin-serve`    | Rust/TS     | Local HTTP viewer/editor + in-process MCP (`@simlin/serve` npm)   | [CLAUDE.md](/src/simlin-serve/CLAUDE.md)    |
 | `src/engine`          | TypeScript  | Promise-based TypeScript API for WASM engine                      | [CLAUDE.md](/src/engine/CLAUDE.md)          |
 | `src/core`            | TypeScript  | Shared data models and common utilities                           | [CLAUDE.md](/src/core/CLAUDE.md)            |
 | `src/diagram`         | TypeScript  | React model editor and visualization toolkit                      | [CLAUDE.md](/src/diagram/CLAUDE.md)         |

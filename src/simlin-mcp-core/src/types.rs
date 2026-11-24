@@ -6,8 +6,6 @@
 //
 //! MCP-facing input/output types shared between tools.
 //!
-//! These types live in the core crate so both the stdio binary and the
-//! Phase 6 HTTP host serialise tool responses byte-for-byte identically.
 //! All `#[serde(rename_all = "camelCase")]` attributes are deliberate
 //! wire-format choices preserved from the pre-refactor `simlin-mcp`.
 
@@ -40,7 +38,7 @@ pub enum SourceFormat {
 /// degraded-on-disk construct from a model diagnostic.  The warning is scoped
 /// to the project's single non-macro model, which is the only model an MDL
 /// file can hold.
-pub fn mdl_export_warnings_to_outputs(
+pub(crate) fn mdl_export_warnings_to_outputs(
     project: &datamodel::Project,
     warnings: &[simlin_engine::mdl::ExportWarning],
 ) -> Vec<ErrorOutput> {
@@ -55,7 +53,7 @@ pub fn mdl_export_warnings_to_outputs(
 /// Same code/kind/prefix as the warnings so a client renders both channels
 /// uniformly; callers put it in a `Validation` error so the edit is rejected
 /// with the violated invariant named, rather than an opaque write failure.
-pub fn mdl_export_error_to_output(
+fn mdl_export_error_to_output(
     project: &datamodel::Project,
     err: &simlin_engine::Error,
 ) -> ErrorOutput {
@@ -95,9 +93,9 @@ fn mdl_export_output(project: &datamodel::Project, message: &str) -> ErrorOutput
 ///
 /// `edit_model` calls this on a dry run so an agent can preview what a real
 /// save would degrade, and before a real save so a structurally
-/// unrepresentable project is rejected up front rather than after the
-/// backing store has already merged it.
-pub fn preflight_export(
+/// unrepresentable project is rejected as a `Validation` error before the
+/// backing store is touched.
+pub(crate) fn preflight_export(
     project: &datamodel::Project,
     format: SourceFormat,
 ) -> Result<Vec<ErrorOutput>, crate::errors::AccessError> {
@@ -112,14 +110,11 @@ pub fn preflight_export(
     }
 }
 
-/// Sim-spec defaults used by [`build_empty_project`].
-///
-/// Matches the design plan's Phase 8 Note 5: an empty project gets a
-/// sensible end-time, a small dt for accuracy, save-step that aligns with
-/// dt boundaries, and the most universally accepted integrator (Euler).
-/// Callers that need different defaults pass a custom `SimSpecs` to
-/// `build_empty_project_with_specs`.
-fn default_empty_sim_specs() -> ejson::SimSpecs {
+/// The sim-specs a new model gets when the caller supplies none: a sensible
+/// end-time, a small dt for accuracy, a save-step that aligns with dt
+/// boundaries, and the most universally accepted integrator (Euler).
+/// `CreateModelInput`'s schema description documents these values to clients.
+pub(crate) fn default_sim_specs() -> ejson::SimSpecs {
     ejson::SimSpecs {
         start_time: 0.0,
         end_time: 100.0,
@@ -130,22 +125,9 @@ fn default_empty_sim_specs() -> ejson::SimSpecs {
     }
 }
 
-/// Build a minimal valid `datamodel::Project` with default sim-specs and
-/// one empty model named `main`.
-///
-/// Shared between the MCP `create_model` tool and the HTTP
-/// `POST /api/projects/new` endpoint so both paths produce byte-identical
-/// files when called with default inputs.  See `simlin-serve`'s parity
-/// test for the byte-for-byte verification.
-pub fn build_empty_project() -> datamodel::Project {
-    build_empty_project_with_specs(default_empty_sim_specs())
-}
-
-/// Variant of [`build_empty_project`] that accepts a caller-supplied
-/// `SimSpecs` so the MCP `create_model` tool can honour an
-/// `sim_specs` override on the input without reimplementing the rest of
-/// the project shape.  Default callers go through `build_empty_project`.
-pub fn build_empty_project_with_specs(sim_specs: ejson::SimSpecs) -> datamodel::Project {
+/// Build a minimal valid `datamodel::Project`: the given sim-specs and one
+/// empty model named `main`.
+pub(crate) fn build_empty_project(sim_specs: ejson::SimSpecs) -> datamodel::Project {
     let json_models = vec![ejson::Model {
         name: "main".to_string(),
         stocks: vec![],
@@ -350,7 +332,7 @@ mod tests {
 
     #[test]
     fn build_empty_project_has_one_model_named_main_with_no_variables() {
-        let project = build_empty_project();
+        let project = build_empty_project(default_sim_specs());
         assert_eq!(
             project.models.len(),
             1,
@@ -363,10 +345,9 @@ mod tests {
     }
 
     #[test]
-    fn build_empty_project_uses_canonical_default_sim_specs() {
-        // Locking the defaults so the parity test (HTTP create vs MCP
-        // create_model) keeps producing byte-identical files.
-        let project = build_empty_project();
+    fn default_sim_specs_are_the_documented_ones() {
+        // The values `CreateModelInput::sim_specs` promises clients.
+        let project = build_empty_project(default_sim_specs());
         let specs = &project.sim_specs;
         assert_eq!(specs.start, 0.0);
         assert_eq!(specs.stop, 100.0);
@@ -376,7 +357,7 @@ mod tests {
     }
 
     #[test]
-    fn build_empty_project_with_specs_carries_caller_overrides() {
+    fn build_empty_project_carries_caller_sim_specs() {
         let custom = ejson::SimSpecs {
             start_time: 5.0,
             end_time: 50.0,
@@ -385,7 +366,7 @@ mod tests {
             method: "rk4".to_string(),
             time_units: "weeks".to_string(),
         };
-        let project = build_empty_project_with_specs(custom);
+        let project = build_empty_project(custom);
         assert_eq!(project.sim_specs.start, 5.0);
         assert_eq!(project.sim_specs.stop, 50.0);
         assert_eq!(project.sim_specs.dt, simlin_engine::datamodel::Dt::Dt(0.5));
@@ -465,7 +446,7 @@ mod tests {
     /// an agent can attribute to the on-disk export rather than the model.
     #[test]
     fn mdl_export_warnings_map_to_generic_model_scoped_outputs() {
-        let mut project = build_empty_project();
+        let mut project = build_empty_project(default_sim_specs());
         project.models[0].name = "cooling".to_string();
         let warnings = vec![
             simlin_engine::mdl::ExportWarning {
@@ -493,7 +474,7 @@ mod tests {
     #[test]
     fn mdl_export_error_to_output_does_not_double_the_prefix() {
         use simlin_engine::common::{ErrorCode, ErrorKind};
-        let project = build_empty_project();
+        let project = build_empty_project(default_sim_specs());
         let cases = [
             (
                 Some("MDL export cannot faithfully reconstruct 1 macro"),
@@ -523,7 +504,7 @@ mod tests {
     /// structurally cannot hold.
     #[test]
     fn preflight_export_covers_every_format_and_both_mdl_channels() {
-        let clean = build_empty_project();
+        let clean = build_empty_project(default_sim_specs());
         for format in [
             SourceFormat::Xmile,
             SourceFormat::NativeJson,
@@ -537,7 +518,7 @@ mod tests {
             );
         }
 
-        let mut lossy = build_empty_project();
+        let mut lossy = build_empty_project(default_sim_specs());
         lossy.models[0].loop_metadata.push(datamodel::LoopMetadata {
             uids: vec![1],
             deleted: false,
@@ -552,7 +533,7 @@ mod tests {
             "{warnings:?}"
         );
 
-        let mut two_models = build_empty_project();
+        let mut two_models = build_empty_project(default_sim_specs());
         let mut second = two_models.models[0].clone();
         second.name = "second".to_string();
         two_models.models.push(second);

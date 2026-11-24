@@ -84,10 +84,9 @@ async fn spawn_server_pair_with_resources(
 }
 
 /// `get_info` must report the version and instructions the MOUNTING binary
-/// passed to `SimlinMcpServer::new`, not the library's own -- `simlin-mcp`
-/// and `simlin-serve` mount the same handler under different versions, and a
-/// handler that reached for `env!("CARGO_PKG_VERSION")` would report the
-/// library's version to both.
+/// passed to `SimlinMcpServer::new`, not the library's own -- a handler that
+/// reached for `env!("CARGO_PKG_VERSION")` would report this library's version
+/// to a client asking which `simlin-mcp` it is talking to.
 ///
 /// The rest of the advertised surface (server name, protocol version, the
 /// two capability flags) is pinned against the real running binary by

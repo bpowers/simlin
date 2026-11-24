@@ -395,66 +395,16 @@ Each entry has a description, component, severity, and measurement command.
 - **Owner**: unassigned
 - **Last reviewed**: 2026-05-13
 
-### 36. darwin-x64 Not Included in @simlin/mcp and @simlin/serve npm Distributions
+### 36. darwin-x64 Not Included in the @simlin/mcp npm Distribution
 
-- **Component**: simlin-mcp, simlin-serve (`.github/workflows/serve-release.yml`, `mcp-release.yml`)
+- **Component**: simlin-mcp (`.github/workflows/mcp-release.yml`)
 - **Severity**: low
-- **Description**: The npm release workflows for `@simlin/mcp` and `@simlin/serve` do not produce a macOS Intel (darwin-x64) binary.
-  Only `darwin-arm64` (Apple Silicon) and Linux targets are built.
-  Intel Mac users cannot install these packages via npm optionalDependencies.
-  The fix is to add `cargo-zigbuild --target x86_64-apple-darwin` steps to both release workflows and add `"@simlin/mcp-darwin-x64"` / `"@simlin/serve-darwin-x64"` entries to the respective `package.json` optionalDependencies.
+- **Description**: The npm release workflow for `@simlin/mcp` does not produce a macOS Intel (darwin-x64) binary.
+  The only macOS target it builds is `darwin-arm64` (Apple Silicon).
+  Intel Mac users cannot install the package via npm optionalDependencies.
+  The fix is to add a `cargo-zigbuild --target x86_64-apple-darwin` step to the release workflow and a `"@simlin/mcp-darwin-x64"` entry to the `package.json` optionalDependencies.
 - **Owner**: unassigned
 - **Last reviewed**: 2026-04-25
-
-### 37. macOS Watcher Loses Pre-Existing-File Removal and Rename Events
-
-- **Component**: simlin-serve (`src/watcher.rs`, `tests/watcher_merge.rs`)
-- **Severity**: medium
-- **Description**: Three watcher behaviours are lost on macOS for files that existed *before* the watcher's `FSEventStreamCreate` subscription:
-  1. **Rename source side**: an external `mv a.sd.json b.sd.json` doesn't produce a paired `Modify(Name(Both))` event.
-     FSEvents reports each side as a single-path `Modify(Name(Any))`, and `notify-debouncer-full` only pairs them when its file-id cache already knows the source — which only happens for files that arrived via a `Create` event after the watcher started.
-     The destination side merges via `handle_model_change`; the source side stays in the registry as a phantom entry.
-  2. **Rename-collision dual-removal**: `mv a b` where both are tracked never broadcasts the second `ProjectRemoved` because the destination side surfaces as a content-modify into the existing entry rather than a `Modify(Name(Both))` that would route to the `AlreadyExists` arm of `handle_model_rename`.
-  3. **Plain `unlink()` of a pre-existing file**: `external_remove_drops_registry_entry_and_broadcasts_removed` consistently times out on macOS-latest waiting for `ProjectRemoved`.
-     The classify branch added in commit 7faf89d4 (treating `Modify(Name(_))` on a missing leaf as `Removed`) covers the rename-flagged-unlink case but does not move the test, so the underlying event must be arriving as something else (or not at all).
-     Sister tests that *create* a file inside the watch window and then mutate or remove it pass on macOS, suggesting the file-id cache miss is the common factor.
-- The Linux-equivalent flows work because inotify's `MOVED_FROM`/`MOVED_TO` cookies always arrive together regardless of cache state, and `IN_DELETE` is a first-class event with no FSEvents-style flag coalescing.
-- **Symptoms**: external rename of a tracked file: SPA's editor for the old path may not migrate cleanly to the new path; rename-collision over a tracked destination merges contents instead of dropping both stale Loro states; `ProjectRenamed` is never broadcast on macOS; an external `rm` of a tracked file may leave a phantom registry entry.
-- **Test impact**: three integration tests are gated with `#[cfg_attr(target_os = "macos", ignore = ...)]`:
-  - `external_remove_drops_registry_entry_and_broadcasts_removed`
-  - `external_rename_re_keys_registry_and_emits_project_renamed`
-  - `rename_over_tracked_destination_removes_both_and_rehydrates`
-- **Possible fixes** (need design discussion, not papered over):
-  - **Hydrate the file-id cache at watcher start** by recursively scanning the root and registering each existing file with the debouncer's cache (e.g. via `notify_debouncer_full::FileIdMap::add_path`).
-    Closes both the rename-source-side miss and the unlink miss for pre-existing files at the cost of a one-shot scan.
-  - **Heuristic post-hoc pairing / inference in our actor**: keep a short-lived (<=200ms) "recently disappeared registry entries" buffer; pair `Modify(Name(_))` events with a recent removal whose content hash matches.
-  - **Switch to `notify::PollWatcher` on macOS** for the smoke / CI surface and accept higher latency in exchange for deterministic event delivery.
-  - **Accept the macOS UX gap** as documented and update the SPA client to handle the unpaired event sequence (a removal followed by a separate hydrate of the destination) without losing in-flight Loro edits — likely requires Loro doc state to migrate via content rather than via path-key.
-- **Investigation log (2026-04-26)**: classify-side fix routes missing-leaf `Modify(Name(_))` → `Removed` was insufficient; path-resolution fix using `resolve_canonical_path` (canonicalize the deepest existing ancestor) made the Linux semantics platform-correct but did not move the macOS test 1 either, which strongly suggests the underlying event simply isn't reaching the actor.
-  Without a macOS box to instrument the FSEvents stream directly, the next investigative step is to spawn a debug binary on a macOS runner that subscribes to FSEvents directly and prints the raw flags it receives for the test scenario.
-- **Owner**: unassigned
-- **Last reviewed**: 2026-04-26
-
-### 38. Windows Smoke Save Returns 500 (Atomic-Replace Race)
-
-- **Component**: simlin-serve (`src/handlers.rs::save_project`, `simlin-engine/src/io.rs::atomic_write`, `tests/smoke.rs`)
-- **Severity**: medium
-- **Description**: On windows-latest the smoke test's `POST /api/projects/teacup.xmile` save returns `500 Internal Server Error` with the generic `SaveError::Internal` body.
-  The Linux and macOS smoke jobs both pass through the same end-to-end code path, so the failure is Windows-specific.
-  The most likely root cause is the Windows-only branch in `simlin-engine::io::atomic_write` that calls `fs::remove_file(target)` before `fs::rename(tmp, target)` — std's `rename` does not overwrite on Windows, so the target must be unlinked first, but if the in-process watcher's `notify-debouncer-full` is holding a directory handle (via `ReadDirectoryChangesW`) at the same path, the unlink can be deferred or the rename can lose to a kernel-level open-handle race.
-- **Symptoms**: Linux + macOS smoke pass; Windows smoke fails on the first save assertion at `tests/smoke.rs:316:5`.
-  The save POST receives a 500 within seconds, with the response body `{"error":"internal server error"}`.
-- **Test impact**: `tests/integration/main.rs` compiles `mod smoke` out on Windows, so `ci.yaml`'s `serve-smoke` matrix runs the smoke test on ubuntu and macOS only, and Windows coverage of simlin-serve is the `serve-windows-check` job's `cargo check -p simlin-serve --all-targets`: a regression that breaks the Windows compile still trips CI, a Windows runtime regression does not.
-  Resolving this item means dropping the cfg gate and adding windows-latest back to the `serve-smoke` matrix.
-- **Investigation hints**:
-  - The harness already captures the spawned binary's stdout (where `tracing_subscriber::fmt()` writes by default) and stderr, and `ChildGuard::drop` dumps both on test panic.
-    So the next failing CI run on Windows will surface the underlying `tracing::error!` from `handlers.rs:708` in the job log, naming the specific err value behind `SaveError::Internal`.
-    Read that first.
-  - Once the err is visible, the most likely paths are (a) `commit_write` -> `atomic_write` returning a Windows I/O error from `remove_file` or `rename`; (b) `serialize_project` failing on Windows-style line endings if Git's autocrlf checked out `teacup.xmile` with `\r\n` and the XMILE writer emits something incompatible; (c) registry `ensure_or_get` racing with the watcher.
-  - A fix worth trying as a hypothesis test: switch `atomic_write` on Windows to use `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING` via `windows-sys` instead of the `remove`-then-`rename` two-step.
-    That eliminates the open-handle window the watcher might be sitting in.
-- **Owner**: unassigned
-- **Last reviewed**: 2026-04-27
 
 ### 39. Web deploy uploads the whole monorepo and GAE installs the full dep set
 
@@ -470,7 +420,7 @@ Each entry has a description, component, severity, and measurement command.
 - **Status (2026-06-27): implemented as `pnpm deploy:web:staged`, locally proven, pending a real `gcloud --no-promote` test before it replaces `deploy:web`.** The staged path (`scripts/deploy-web-staged.sh` -> `scripts/build-deploy-staging.mjs` + the pure transforms in `scripts/deploy-staging-manifests.mjs`) assembles a self-contained `deploy-staging/` whose `package.json` is exactly the server's prod closure, and deploys `gcloud app deploy deploy-staging/app.yaml`.
   The workspace-ref blocker is resolved by vendoring `@simlin/core` and `@simlin/engine` into `deploy-staging/vendor/` and rewriting them (and core's transitive `@simlin/engine` ref) to `file:` deps; a `pnpm-lock.yaml` is generated for the minimal manifest.
   Confirmed the buildpack lever from Google's docs: App Engine standard ALWAYS reinstalls from the deployed `package.json` + lockfile and has no vendored-`node_modules` escape hatch, so the only thing that shrinks the install is the deployed manifest.
-  Note the pnpm10 devDep bug is a side issue -- the dominant bloat is installing the *whole workspace* (app/diagram/website/serve-web prod deps: React, slate, radix, rspress), which a `--prod` install at the root would still pull.
+  Note the pnpm10 devDep bug is a side issue -- the dominant bloat is installing the *whole workspace* (app/diagram/website prod deps: React, slate, radix, rspress), which a `--prod` install at the root would still pull.
 - **Locally verified (2026-06-27)**: builder runs; an isolated `pnpm install --frozen-lockfile --prod` OUTSIDE the repo (no workspace/`.npmrc` ancestor, the GAE-faithful case) succeeds from the generated lockfile; the full server-side `libsimlin.wasm` (with `simlin_project_render_png`) materializes at the `__dirname` path; `node lib/index.js` boots ("WASM module initialized"), serves `/`->200, `/api/user`->401, `/static/js/sd-component.js`->200, `/robots.txt`->200.
   Result: **590 MB / 1171 pkgs -> 80 MB / 230 pkgs** (~86% smaller), 28.7 MB upload payload.
   Unit tests in `scripts/tests/deploy-staging-manifests.test.mjs`.

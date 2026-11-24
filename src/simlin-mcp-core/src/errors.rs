@@ -29,8 +29,7 @@ pub(crate) fn engine_error_text(err: &simlin_engine::Error) -> String {
 /// Failure modes for [`crate::access::ProjectAccess`].
 #[derive(Debug)]
 pub enum AccessError {
-    /// The project file at `path` does not exist (or, for a registry-backed
-    /// implementation, has no entry under `path`).
+    /// The backing store holds no project at `path`.
     NotFound { path: PathBuf },
     /// An I/O error occurred while reading the project bytes.
     IoError(io::Error),
@@ -38,8 +37,9 @@ pub enum AccessError {
     /// the underlying engine error types vary by format (XMILE / MDL /
     /// JSON) and the MCP layer only needs a human-readable message.
     ParseError(anyhow::Error),
-    /// `save` was called with `expected_version` that does not match the
-    /// current registry version (registry-backed impls only).
+    /// `save` was called with an `expected_version` that does not match the
+    /// backing store's current one (never raised by a stateless
+    /// implementation).
     VersionMismatch { expected: u64, actual: u64 },
     /// An I/O error occurred while writing the project bytes.
     WriteError(io::Error),

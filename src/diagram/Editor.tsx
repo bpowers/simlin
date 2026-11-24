@@ -315,20 +315,20 @@ interface EditorPropsBase {
   // turns it off for production builds while keeping it on in development).
   moduleCreationEnabled?: boolean;
   // Optional selection callback fired after each selection change. Hosts
-  // (e.g. simlin-serve's EditorHost) use this to forward selection state
-  // to backend listeners; HostedWebEditor in src/app does not subscribe.
+  // (e.g. the notebook widget's WidgetApp) use this to forward selection
+  // state to backend listeners; HostedWebEditor in src/app does not subscribe.
   onSelectionChanged?: (idents: string[]) => void;
   // When provided (and the editor is not read-only), the model-properties
   // drawer offers a destructive "Delete project" action that calls
   // Resolving means the host has navigated away; rejecting surfaces the
   // error in the confirmation dialog. Hosts without a deletable backing
-  // project (the local file-backed viewer, embeds) leave this undefined.
+  // project (the notebook widget, embeds) leave this undefined.
   onDeleteProject?: () => Promise<void>;
   // Whether the model-properties drawer shows its "Exit" link to "/" (the
-  // project list in the app and simlin-serve). Defaults to true. Hosts that
-  // embed the Editor in a page they own (a notebook cell) pass false: there is
-  // no route to go to, and the link would pushState on the host page. No
-  // router is required to mount the Editor either way.
+  // project list in the app). Defaults to true. Hosts that embed the Editor in
+  // a page they own (a notebook cell) pass false: there is no route to go to,
+  // and the link would pushState on the host page. No router is required to
+  // mount the Editor either way.
   showHomeLink?: boolean;
   // Where the Editor's overlay surfaces (the model-properties drawer, dialogs,
   // menus, the autocomplete listbox) render. Default: document.body, where
@@ -350,9 +350,9 @@ interface EditorPropsBase {
   // pan or zoom is never persisted by itself (only the next edit's save
   // carries it), so a remount on the stored bytes would silently reset the
   // user's viewport; the host reads the live one through `onViewportChange`
-  // and hands it back here. Hosts that mount once per project (the app,
-  // simlin-serve) leave it unset. Ignored when the view is absent or the
-  // viewport is unusable (a non-finite coordinate, a non-positive zoom).
+  // and hands it back here. Hosts that mount once per project (the app) leave
+  // it unset. Ignored when the view is absent or the viewport is unusable (a
+  // non-finite coordinate, a non-positive zoom).
   initialViewport?: Viewport;
   // Fires from a post-commit effect with the model name and the COMMITTED
   // viewport of the model being viewed whenever that viewport changes by value:
@@ -643,9 +643,9 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       // disposing, so a final controller notification can't setState on an
       // unmounting component), dispose the controller (releasing the WASM
       // EngineProject handle -- the Editor mounts/unmounts on every wouter
-      // route change in src/app and every EditorHost path swap in
-      // src/simlin-serve; without this every navigation away leaks ~several MB
-      // of WASM linear memory plus salsa caches), and revoke the snapshot URL.
+      // route change in src/app and on kernel-originated remounts in the
+      // notebook widget; without this every unmount leaks ~several MB of WASM
+      // linear memory plus salsa caches), and revoke the snapshot URL.
       // dispose() is best-effort and latches the controller's `disposed` flag
       // so any in-flight open/undo releases its own engine. Symmetric with the
       // setup above so a StrictMode mount/unmount/mount cycle builds a fresh

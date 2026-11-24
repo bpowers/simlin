@@ -4,6 +4,7 @@
 
 This document surveys the Rust CRDT library landscape and analyzes how each
 option maps onto Simlin's data model, architecture, and goals.
+It is research for the hosted app: no CRDT library is a dependency of the tree.
 The objective is
 collaborative editing of system dynamics models by multiple humans and/or AI
 agents simultaneously, with the CRDT layer living in Rust (usable from WASM in

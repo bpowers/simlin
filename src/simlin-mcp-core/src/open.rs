@@ -9,9 +9,7 @@
 //! These helpers operate on bytes already loaded from a backing store:
 //! callers (such as a `ProjectAccess` impl) own the I/O, and pass the
 //! contents in.  This keeps the JSON/XMILE/Vensim parsing logic — and
-//! its substantial test surface — independent of the filesystem so the
-//! same code paths run unchanged when the registry-backed impl in
-//! Phase 6 hands over an in-memory string.
+//! its substantial test surface — independent of the filesystem.
 
 use std::io::BufReader;
 use std::path::Path;
@@ -27,7 +25,7 @@ use crate::types::SourceFormat;
 /// This allows tools to use "main" as a default that works for both
 /// projects with a model named "main" and single-model projects imported
 /// from XMILE or Vensim where the model may have a different name.
-pub fn resolve_model_name<'a>(
+pub(crate) fn resolve_model_name<'a>(
     project: &'a simlin_engine::datamodel::Project,
     requested: &'a str,
 ) -> &'a str {

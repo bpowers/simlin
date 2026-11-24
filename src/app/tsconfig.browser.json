@@ -30,7 +30,6 @@
     "../**/*.test.ts",
     "../**/*.spec.ts",
     "../server/**",
-    "../simlin-serve/**",
     "../**/node_modules/**",
     "../engine/src/internal/wasm.node.ts"
   ],

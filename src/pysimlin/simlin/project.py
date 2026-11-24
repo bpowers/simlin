@@ -227,7 +227,7 @@ def _read_model_file(path: Path) -> bytes:
 
 def _pretty_json(compact: bytes) -> bytes:
     """Re-indent engine JSON for on-disk files: line-oriented output diffs
-    well in git, matching what simlin-serve and simlin-mcp-core write."""
+    well in git, matching what simlin-mcp-core writes."""
     return json.dumps(json.loads(compact), indent=2, ensure_ascii=False).encode("utf-8")
 
 

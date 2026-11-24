@@ -36,11 +36,11 @@ and walk it with these questions in mind:
    ```
    The test for whether you've finished: every consumer should be calling the same primitive, not reimplementing the rule inline.
 
-3. **Threat-model alignment**: If the PR touches auth, transport, path validation, file-creation, or anything described in `docs/threat-model.md`, cross-reference each promise against your code. The threat model is a contract; if your PR's code doesn't match it, either fix the code or update the threat model — but don't ship divergence silently.
+3. **Security-boundary alignment**: If the PR touches auth, transport, path validation, or file creation, cross-reference each promise the docs and comments make about that boundary against your code. Those promises are a contract; if your PR's code doesn't match them, either fix the code or update the text — but don't ship divergence silently.
 
 4. **N≥3 duplication smell**: If the same conditional / helper / rule appears in 3+ places, refactor before merging. This is the source of the "next round of P1s" — every duplicated rule eventually drifts.
 
-5. **Threat model + tests are the diff's contract**: The diff isn't done until (a) every code path is honest about what it does and doesn't enforce, and (b) at least one test exercises each non-trivial branch.
+5. **Documented promises + tests are the diff's contract**: The diff isn't done until (a) every code path is honest about what it does and doesn't enforce, and (b) at least one test exercises each non-trivial branch.
 
 If you find issues during this pass, fix them with TDD before pushing. The review loop below should be addressing things you genuinely missed, not things visible to anyone reading the diff.
 

@@ -5,6 +5,7 @@
 - [architecture.md](architecture.md) -- Component descriptions, dependency graph, project structure
 - [design/2026-02-21-incremental-compilation.md](design/2026-02-21-incremental-compilation.md) -- Historical design record of the salsa pipeline: symbolic bytecode, per-variable tracking, LTM integration (the pipeline as it stands is in `src/simlin-engine/CLAUDE.md` and the compiler-unification plan)
 - [design/conveyors.md](design/conveyors.md) -- XMILE conveyor support: complete specification of syntax, per-DT simulation semantics, leakage/initialization formulas, spread inputs, arrays, and engine integration
+- [design/crdt-collaborative-editing.md](design/crdt-collaborative-editing.md) -- Research for collaborative editing in the hosted app (not implemented): a survey of Rust CRDT libraries against the project data model, and how one would fit the engine, the app, and the server
 - [design/diagram-scene.md](design/diagram-scene.md) -- The diagram scene display list (version 1): the engine's resolution-independent drawing of one stock-and-flow view for native renderers -- elements, shapes, paints, labels, sparklines, and the stability rules that keep it the SVG renderer's twin
 - [design/engine-performance.md](design/engine-performance.md) -- Engine compile/simulate profile (C-LEARN), how to measure a change (the instruction, LTM, artifact, sweep and dump channels), implemented optimizations, and remaining proposals
 - [design/layout-quality.md](design/layout-quality.md) -- Diagram layout quality: the rate-based metric over the drawn scene (terms, weights, defect overlays, calibration against taste checks and visual judgments), the on-demand eval harness (graded corpus, production timing, taste battery, run comparison), and the improvement loop
@@ -40,7 +41,6 @@
   - [design-plans/2026-09-12-editing-core-in-rust.md](design-plans/2026-09-12-editing-core-in-rust.md) -- The editing core moves into the engine for native hosts and tool edits: `simlin_engine::editing` (flow geometry, tiered hit testing, taps, a gesture session per drag, frame previews, delete and rename planning), the `EditView` patch op that derives model ops at apply time, the libsimlin gesture surface, how a host drives it, what stays with each host, and the touch-first differences from the TypeScript planner; 4 phases
   - [design-plans/2026-08-26-compiler-unification-phase7-investigation.md](design-plans/2026-08-26-compiler-unification-phase7-investigation.md) -- Companion to the compiler unification plan: every parse-time decision that reads model state, where each moves under a `(variable, project)` parse key, every text/name identity site of synthesized helpers, the salsa keys, the capture runlist contract
   - [design-plans/2026-08-17-pysimlin-widget.md](design-plans/2026-08-17-pysimlin-widget.md) -- pysimlin file-backed models + anywidget in-notebook editor (file on disk as sync authority)
-  - [design-plans/2026-04-05-server-rewrite.md](design-plans/2026-04-05-server-rewrite.md) -- Local-first `simlin-serve` binary: filesystem-backed editor + in-process MCP
   - [design-plans/2026-04-25-ltm-per-ref-elem-graph.md](design-plans/2026-04-25-ltm-per-ref-elem-graph.md) -- Per-reference element causal graph: classify each AST reference by access shape, emit truthful per-reference element edges (includes a post-Phases-1-5 measurement postscript)
   - [design-plans/2026-05-06-ltm-482-variable-level-loop-enumeration.md](design-plans/2026-05-06-ltm-482-variable-level-loop-enumeration.md) -- Tiered LTM loop enumeration: variable-level Johnson first, expand only the cross-element subgraph
   - [design-plans/2026-05-09-ltm-503-cross-element-agg.md](design-plans/2026-05-09-ltm-503-cross-element-agg.md) -- Cross-element LTM scoring: per-element arrayed-target partials, element-level cross-element loops, array reducers as aggregate nodes
@@ -66,10 +66,6 @@
   - [test-plans/2026-05-22-layout-quality-eval.md](test-plans/2026-05-22-layout-quality-eval.md) -- Manual verification for the layout-quality eval: running the on-demand corpus sweep and inspecting its `target/layout-eval/` artifacts (metrics.json, the worst-first contact-sheet), plus the human-judgment calibration gate (best/median/worst ordering, reference-vs-auto scoring, weight magnitudes)
   - [test-plans/2026-05-26-wasm-ltm.md](test-plans/2026-05-26-wasm-ltm.md) -- Manual verification for LTM on the wasm backend: re-running the automated gates (`simulate_ltm_wasm`, the libsimlin from-wasm analyze FFIs, `wasm-ltm.test.ts`, `worker-wasm.test.ts`), driving the ignored heavy discovery twins (C-LEARN, World3), and the human-judged end-to-end Node-REPL scenarios (`Model.simulate({engine:'wasm', enableLtm:true})`, `sim.getLinks()`/`Run.links` parity, the WorkerBackend round-trip, and the no-silent-fallback contract on an Unsupported LTM model); all 16 ACs already have automated coverage
 - `implementation-plans/` -- Detailed phase-by-phase implementation plans, created during plan execution
-
-## Security
-
-- [threat-model.md](threat-model.md) -- `simlin-serve` V1 threat model: trust boundary, defenses (loopback bind, bearer token, DNS-rebinding mitigation, cross-origin defense, supply chain), and out-of-scope items
 
 ## Domain Knowledge
 

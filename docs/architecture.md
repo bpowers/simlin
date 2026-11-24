@@ -56,20 +56,13 @@ Express.js backend.
 Firebase Auth (`authn.ts`), Firestore persistence (`models/db-firestore.ts`) in protobuf form.
 
 ### `src/simlin-mcp-core` (Rust)
-Transport-agnostic core library shared by every Simlin MCP server.
-Owns the `ProjectAccess` trait (the storage abstraction), the three reused tools (`read_model`, `edit_model`, `create_model`) as async free functions, the rmcp `ServerHandler` impl as `SimlinMcpServer<A: ProjectAccess>`, and the wire-format types (`ErrorOutput`, `LoopDominanceSummary`, `DominantPeriodOutput`).
+Transport-agnostic core library of the Simlin MCP server.
+Owns the `ProjectAccess` trait (the storage abstraction), the three tools (`read_model`, `edit_model`, `create_model`) as async free functions, the rmcp `ServerHandler` impl as `SimlinMcpServer<A: ProjectAccess>`, and the wire-format types (`ErrorOutput`, `LoopDominanceSummary`, `DominantPeriodOutput`).
 
 ### `src/simlin-mcp` (Rust)
 Stdio MCP server for AI assistants.
 Thin binary built on `simlin-mcp-core` plus a stateless `FileSystemAccess` impl that re-reads/writes the file on every call.
 Distributed as `@simlin/mcp` on npm via per-platform optional dependencies.
-
-### `src/simlin-serve` (Rust + TypeScript SPA)
-Local HTTP viewer/editor and in-process MCP server.
-Binds two `127.0.0.1` ports (UI + MCP) and serves a React SPA from any directory containing SD models.
-Saves merge through a per-project Loro CRDT shared by the HTTP, MCP, and watcher paths so concurrent edits converge.
-Distributed as `@simlin/serve` on npm using the same per-platform pattern as `@simlin/mcp`.
-SPA workspace member is `@simlin/serve-web` (not published).
 
 ### `src/simlin-cli` (Rust)
 CLI for simulating and converting models, mostly for testing/debugging.
@@ -93,9 +86,9 @@ simlin-engine (leaf)
   ^       ^             ^
   |       |             |
 simlin    simlin-mcp-core
-  ^         ^      ^
-  |         |      |
-simlin-cli  simlin-mcp  simlin-serve
+  ^         ^
+  |         |
+simlin-cli  simlin-mcp
             (also depends on simlin-engine directly)
 ```
 
@@ -103,7 +96,6 @@ simlin-cli  simlin-mcp  simlin-serve
 - `simlin` (libsimlin) -> `simlin-engine`
 - `simlin-mcp-core` -> `simlin-engine`
 - `simlin-mcp` -> `simlin-mcp-core`, `simlin-engine`
-- `simlin-serve` -> `simlin-mcp-core`, `simlin-engine`
 - `simlin-cli` -> `simlin-engine`, `simlin`
 
 ### TypeScript
@@ -118,7 +110,7 @@ simlin-cli  simlin-mcp  simlin-serve
 @simlin/diagram
   ^       ^         ^
   |       |         |
-@simlin/app   @simlin/server   @simlin/serve-web   simlin-site   @simlin/notebook-widget
+@simlin/app   @simlin/server   simlin-site   @simlin/notebook-widget
 ```
 
 - `@simlin/engine` -> (none)
@@ -126,7 +118,6 @@ simlin-cli  simlin-mcp  simlin-serve
 - `@simlin/diagram` -> `@simlin/core`, `@simlin/engine`
 - `@simlin/app` -> `@simlin/core`, `@simlin/diagram`, `@simlin/engine`
 - `@simlin/server` -> `@simlin/core`, `@simlin/diagram`, `@simlin/engine`
-- `@simlin/serve-web` -> `@simlin/core`, `@simlin/diagram`, `@simlin/engine`
 - `@simlin/notebook-widget` -> `@simlin/diagram`, `@simlin/engine`
 - `simlin-site` -> `@simlin/diagram` (embeds live model diagrams on the website)
 

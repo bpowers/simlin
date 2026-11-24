@@ -50,3 +50,8 @@ $ pnpm start:frontend
 Now to the browser!
 
 You can start local development + iteration on http://localhost:3000/
+
+## Reporting security issues
+
+Open an issue on the [GitHub repository](https://github.com/bpowers/simlin/issues) labelled `security`.
+For sensitive disclosures, email `bobby@simlin.com`.

@@ -22,8 +22,7 @@
 //!
 //! `expected_version` is ignored on `save` because there is no shared
 //! state to lock against; we always return `0` (the same constant
-//! [`ProjectAccess::open`] supplies).  `simlin-serve` provides its own
-//! registry-backed `ProjectAccess` impl that actually honours the token.
+//! [`ProjectAccess::open`] supplies).
 //!
 //! `.mdl` files are written back in place as regenerated Vensim text (the
 //! engine's `to_mdl_with_warnings`), the same way `.stmx` is regenerated

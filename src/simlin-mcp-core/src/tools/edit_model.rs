@@ -420,9 +420,9 @@ pub async fn edit_model<A: ProjectAccess>(
 
     // Pre-flight the on-disk writer before touching the backing store: a
     // project the format structurally cannot hold is rejected here as a
-    // Validation error (the edit never lands, so a registry-backed store is
-    // not left holding a merged doc it cannot persist), and the lossiness
-    // warnings a save would report are known even on a dry run.
+    // Validation error naming the violated invariant (the edit never lands),
+    // and the lossiness warnings a save would report are known even on a dry
+    // run.
     let export_warnings = preflight_export(&project, source_format)?;
 
     if dry_run {
@@ -557,11 +557,7 @@ fn install_synced_view(
 ///
 /// `simSpecs` changes become a project-level operation applied first,
 /// then variable operations are added as model-level operations.
-///
-/// Public so `simulate` can reuse the same translation rules: any rule
-/// drift between `EditModel` and `Simulate` would surface as confusing
-/// "the same operation behaves differently in simulate" bugs.
-pub fn build_patch(
+fn build_patch(
     model_name: &str,
     sim_specs: Option<ejson::SimSpecs>,
     operations: Option<Vec<EditOperation>>,
@@ -694,6 +690,7 @@ fn convert_operation(op: EditOperation) -> simlin_engine::ModelOperation {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{build_empty_project, default_sim_specs};
 
     /// Every arm of installing a sync's result: a synced view replaces a
     /// model's first view (keeping its zoom) and leaves the rest, is added to
@@ -703,7 +700,7 @@ mod tests {
     #[test]
     fn install_synced_view_arms() {
         use simlin_engine::datamodel::View;
-        let mut project = crate::types::build_empty_project();
+        let mut project = build_empty_project(default_sim_specs());
         simlin_engine::apply_patch(
             &mut project,
             build_patch(

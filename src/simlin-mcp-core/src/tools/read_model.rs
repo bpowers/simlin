@@ -8,9 +8,7 @@
 //!
 //! Loads a project via [`ProjectAccess`] and returns a snapshot enriched
 //! with the engine's loop-dominance analysis.  All I/O is delegated to
-//! the access impl so the same body runs against either a stateless
-//! filesystem-backed impl or the registry-backed impl introduced in
-//! Phase 6.
+//! the access impl.
 
 use std::path::Path;
 

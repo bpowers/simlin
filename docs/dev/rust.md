@@ -119,8 +119,6 @@ The rules:
   It builds with the `ext_data` feature on and also runs that feature's own tests (`data_provider::`), which no other run compiles.
   To give another crate gates, add it to `PACKAGES` in that script.
 
-The simlin-serve smoke test is ignored for a different reason (it spawns the built binary with its embedded SPA) and has a CI job of its own, `serve-smoke`.
-
 **`#[ignore]` for runtime is a judgement about today's engine, so re-take it after the engine gets faster.** Time the ignored set on a debug build and un-ignore what now fits the default suite's budget:
 
 ```bash

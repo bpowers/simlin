@@ -10,7 +10,7 @@
  *
  * - **Viewport mode** (`null` / `document.body`, the default): surfaces portal
  *   to `document.body` and are `position: fixed` against the browser viewport.
- *   Right for hosts that own the page (the app, simlin-serve).
+ *   Right for hosts that own the page (the app).
  * - **Contained mode** (any other element): surfaces portal INTO that element
  *   and are `position: absolute` against it -- the drawer slides in from its
  *   left edge, dialogs centre in it, menus and listboxes are placed relative

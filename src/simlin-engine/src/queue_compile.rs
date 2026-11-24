@@ -1661,7 +1661,7 @@ pub struct SimBuild {
 ///
 /// This is the single "compile a simulation" dispatch. Every VM-backed production
 /// caller funnels through it -- libsimlin's `simlin_sim_new` /
-/// `is_simulatable`/`get_errors`/`apply_patch`, the CLI and serve simulators, and
+/// `is_simulatable`/`get_errors`/`apply_patch`, the CLI simulator, and
 /// the LTM analysis pipeline -- so the conveyor/queue expansion is applied uniformly
 /// instead of each caller reproducing (or forgetting) it.
 ///
