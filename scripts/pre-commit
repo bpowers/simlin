@@ -133,6 +133,12 @@ trap cleanup_pipelines EXIT INT TERM
     echo "[rust] Running clippy..."
     cargo clippy --all-targets --all-features -- -D warnings
 
+    # And once more over what ships. The pass above turns on every feature and
+    # every dev-dependency, so an item only a test configuration uses looks
+    # used; CI's Build job compiles the default features with warnings denied
+    # and fails on it.
+    cargo clippy --workspace -- -D warnings
+
     # Compile test binaries untimed, mirroring CI (ci.yaml runs
     # `cargo test --no-run` before its 3-minute-capped test step), so
     # the cap below measures test execution rather than compilation --
