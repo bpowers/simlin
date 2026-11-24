@@ -17,10 +17,10 @@ crate-type = ["rlib"]
 layout_eval = ["simlin-edit/invariants"]
 
 [dependencies]
-simlin-base = { path = "../simlin-base" }
-simlin-diagram = { path = "../simlin-diagram" }
-simlin-edit = { path = "../simlin-edit" }
-simlin-engine = { path = "../simlin-engine", default-features = false }
+simlin-base = { version = "0.1", path = "../simlin-base" }
+simlin-diagram = { version = "0.1", path = "../simlin-diagram" }
+simlin-edit = { version = "0.1", path = "../simlin-edit" }
+simlin-engine = { version = "0.1", path = "../simlin-engine", default-features = false }
 serde = { version = "1", features = ["derive"] }
 rand = { version = "0.9", default-features = false, features = ["std_rng"] }
 

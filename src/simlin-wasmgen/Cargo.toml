@@ -10,8 +10,8 @@ description = "Compiles a system dynamics model to a self-contained WebAssembly 
 crate-type = ["rlib"]
 
 [dependencies]
-simlin-base = { path = "../simlin-base" }
-simlin-engine = { path = "../simlin-engine", default-features = false }
+simlin-base = { version = "0.1", path = "../simlin-base" }
+simlin-engine = { version = "0.1", path = "../simlin-engine", default-features = false }
 smallvec = { version = "1", features = [ "union" ] }
 # The encoder (an alternative to the bytecode VM). no_std + alloc only, single
 # transitive dependency (leb128fmt), and builds cleanly to

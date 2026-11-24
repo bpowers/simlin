@@ -16,7 +16,7 @@ png_render = ["dep:resvg"]
 test-support = []
 
 [dependencies]
-simlin-base = { path = "../simlin-base" }
+simlin-base = { version = "0.1", path = "../simlin-base" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 resvg = { version = "0.47", optional = true, default-features = false, features = ["text"] }

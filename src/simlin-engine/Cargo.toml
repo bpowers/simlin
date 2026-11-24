@@ -26,7 +26,7 @@ ltm_bench = []
 test-support = []
 
 [dependencies]
-simlin-base = { path = "../simlin-base" }
+simlin-base = { version = "0.1", path = "../simlin-base" }
 smallvec = { version = "1", features = [ "union" ] }
 ed25519 = { version = "2", optional = true }
 base64 = { version = "0.22", optional = true }

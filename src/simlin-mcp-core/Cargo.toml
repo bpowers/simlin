@@ -13,10 +13,10 @@ description = "Transport-agnostic core library for the Simlin MCP server"
 test-support = []
 
 [dependencies]
-simlin-base = { path = "../simlin-base" }
-simlin-edit = { path = "../simlin-edit" }
-simlin-formats = { path = "../simlin-formats", features = ["schema"] }
-simlin-layout = { path = "../simlin-layout" }
+simlin-base = { version = "0.1", path = "../simlin-base" }
+simlin-edit = { version = "0.1", path = "../simlin-edit" }
+simlin-formats = { version = "0.1", path = "../simlin-formats", features = ["schema"] }
+simlin-layout = { version = "0.1", path = "../simlin-layout" }
 simlin-engine = { version = "0.1", path = "../simlin-engine" }
 rmcp = { version = "1", features = ["server", "macros", "schemars"] }
 schemars = { version = "1", features = ["preserve_order"] }

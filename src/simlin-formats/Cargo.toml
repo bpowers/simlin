@@ -19,8 +19,8 @@ ext_data = ["dep:calamine"]
 test-support = ["simlin-base/test-support", "dep:proptest"]
 
 [dependencies]
-simlin-base = { path = "../simlin-base" }
-simlin-diagram = { path = "../simlin-diagram" }
+simlin-base = { version = "0.1", path = "../simlin-base" }
+simlin-diagram = { version = "0.1", path = "../simlin-diagram" }
 # Protobuf runtime for the checked-in `src/project_io.gen.rs`. The generator in
 # scripts/gen-rust-protobufs.sh pins buffa-build to the version Cargo.lock
 # resolves this to, so bumping it means regenerating.
