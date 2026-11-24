@@ -418,7 +418,7 @@ pub(crate) const SYNTHETIC_NODE_PREFIX: &str = "$\u{205A}";
 /// user-facing causal view -- not just LTM aggregate nodes -- carries the `$⁚`
 /// prefix. A node name may be a module-output path (`$⁚var⁚0⁚func·output`);
 /// the leading-prefix test still classifies it as synthetic.
-pub(crate) fn is_synthetic_node_name(name: &str) -> bool {
+pub fn is_synthetic_node_name(name: &str) -> bool {
     name.starts_with(SYNTHETIC_NODE_PREFIX)
 }
 

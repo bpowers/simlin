@@ -17,13 +17,13 @@ use simlin_base::{canonicalize, eqn_err};
 /// dimensionless-ness) and dimensionless-ness that comes from computing
 /// on constants.
 #[derive(Debug, PartialEq, Eq, Clone)]
-pub enum Units {
+pub(crate) enum Units {
     Explicit(UnitMap),
     Constant,
 }
 
 impl Units {
-    pub fn equals(&self, rhs: &Units) -> bool {
+    pub(crate) fn equals(&self, rhs: &Units) -> bool {
         match (self, rhs) {
             (Units::Constant, Units::Constant)
             | (Units::Explicit(_), Units::Constant)
@@ -38,7 +38,7 @@ impl Units {
     /// units -- so returning the first argument's verdict unconditionally
     /// (as this code used to) collapsed the result to `Constant` and made
     /// e.g. WORLD3's `MAX(0, land)/time` compute as `1/time`.
-    pub fn first_explicit(self, rhs: Units) -> Units {
+    pub(crate) fn first_explicit(self, rhs: Units) -> Units {
         match self {
             Units::Explicit(_) => self,
             Units::Constant => rhs,
@@ -46,7 +46,7 @@ impl Units {
     }
 
     /// Convert to a UnitMap, treating Constant as dimensionless (empty map)
-    pub fn to_unit_map(&self) -> UnitMap {
+    pub(crate) fn to_unit_map(&self) -> UnitMap {
         match self {
             Units::Explicit(units) => units.clone(),
             Units::Constant => UnitMap::new(),
@@ -637,7 +637,7 @@ impl Context {
     /// string, or a dimensionless clock (`time_units="Unitless"`) makes
     /// `x = TIME ~ Unitless` mismatch against a fictitious `{unitless: 1}`
     /// base unit.
-    pub(crate) fn resolve_name(&self, canonical_name: &str) -> UnitMap {
+    pub fn resolve_name(&self, canonical_name: &str) -> UnitMap {
         let name = self
             .aliases
             .get(canonical_name)

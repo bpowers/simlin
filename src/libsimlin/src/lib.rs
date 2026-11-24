@@ -539,7 +539,7 @@ pub struct SimlinProject {
     /// model's links, its structural loops) is the person's wait itself. So a
     /// reading tool call, which holds the database for its answer, checks
     /// this between units of its work and stops while it is not zero
-    /// (`simlin_engine::tools::Workspace::waiting`).
+    /// (`simlin_tools::Workspace::waiting`).
     waiting_for_db: AtomicUsize,
     pub ref_count: AtomicUsize,
 }

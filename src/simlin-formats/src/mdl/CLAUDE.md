@@ -166,7 +166,7 @@ Tests: `import_loss_tests.rs` (a sketch holding one of each) and [simlin-tests/t
 ## Commands
 
 ```bash
-cargo test -p simlin-engine mdl::                    # MDL-specific tests
+cargo test -p simlin-formats mdl::                   # MDL-specific tests
 scripts/gates.sh mdl::                               # the corpus gates, optimized
-cargo test -p simlin-engine --test integration simulate::  # The corpus against Vensim's output
+cargo test -p simlin-tests --test integration simulate::  # The corpus against Vensim's output
 ```

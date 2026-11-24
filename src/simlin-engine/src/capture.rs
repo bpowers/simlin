@@ -93,8 +93,7 @@ pub(crate) fn synthetic_ident(parent: &str, n: usize, part: &str, suffix: Option
 /// part of its equation the helper is (a call's name, `smth1`, or a hoisted
 /// argument, `arg0`); `None` for any other name. What the agent tools say
 /// in place of a helper's name.
-#[cfg(feature = "agent_tools")]
-pub(crate) fn synthetic_parent(name: &str) -> Option<(&str, &str)> {
+pub fn synthetic_parent(name: &str) -> Option<(&str, &str)> {
     let rest = name.strip_prefix(crate::ltm::SYNTHETIC_NODE_PREFIX)?;
     let mut parts = rest.split('⁚');
     let (parent, n, part) = (parts.next()?, parts.next()?, parts.next()?);

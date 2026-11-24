@@ -477,8 +477,7 @@ fn param_aux_name(stock: &str, option: datamodel::StockOption) -> String {
 /// flow (canonically). `None` for a name the build gives no helper. A build
 /// error names its helpers, which no modeler wrote; this is how a tool
 /// names them instead.
-#[cfg(feature = "agent_tools")]
-pub(crate) fn describe_helper(name: &str) -> Option<String> {
+pub fn describe_helper(name: &str) -> Option<String> {
     if let Some(flow) = name
         .strip_prefix("$conv$leak$")
         .and_then(|rest| rest.strip_suffix("$frac"))

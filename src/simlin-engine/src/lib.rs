@@ -30,7 +30,7 @@ mod builtins_visitor;
 pub mod bytecode;
 #[cfg(test)]
 mod canonical_value_tests;
-mod capture;
+pub mod capture;
 mod compiler;
 pub mod conveyor;
 pub mod conveyor_compile;
@@ -79,14 +79,12 @@ mod subscript_out_of_range_tests;
 pub mod test_common;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testutils;
-#[cfg(feature = "agent_tools")]
-pub mod tools;
 #[cfg(test)]
 mod unfilled_equation_tests;
 #[cfg(test)]
 mod unit_checking_test;
-mod units;
-mod units_check;
+pub mod units;
+pub mod units_check;
 mod units_infer;
 mod variable;
 pub mod vm;

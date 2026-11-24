@@ -3679,7 +3679,6 @@ fn explicit_list_single_entry_with_trailing_comma() {
 /// `StockOption::ALL`, and a leak's fraction and a container access are
 /// described too. A name the build gives no helper is not.
 #[test]
-#[cfg(feature = "agent_tools")]
 fn a_helpers_name_is_described_as_what_it_stands_for() {
     use simlin_base::datamodel::StockOption;
     for option in StockOption::ALL {

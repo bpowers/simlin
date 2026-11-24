@@ -1425,7 +1425,7 @@ pub fn causal_graph_from_edges(result: &CausalEdgesResult) -> crate::ltm::Causal
 /// For each dynamic module referenced by the model, recursively builds
 /// the sub-model's causal graph so that polarity calculation and stock
 /// enrichment can traverse module boundaries.
-pub(crate) fn causal_graph_with_modules(
+pub fn causal_graph_with_modules(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
@@ -2961,7 +2961,7 @@ pub fn model_detected_loops(
 /// stitched cross-agg loop visits its agg twice, which the trim absorbs.
 /// Discovery's `FoundLoop` links (`crate::analysis`) read through here too,
 /// so the two surfaces report one convention.
-pub(crate) fn loop_node_sequence(l: &crate::ltm::Loop) -> Vec<String> {
+pub fn loop_node_sequence(l: &crate::ltm::Loop) -> Vec<String> {
     let is_agg = |n: &str| crate::ltm_agg::is_synthetic_agg_name(crate::ltm::strip_subscript(n));
     let Some(last) = l.links.last() else {
         return Vec::new();

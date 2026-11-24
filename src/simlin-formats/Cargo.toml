@@ -10,6 +10,7 @@ description = "The files a system dynamics model is kept in, read and written"
 crate-type = ["rlib"]
 
 [features]
+default = ["schema"]
 schema = ["dep:schemars"]
 file_io = ["dep:csv"]
 ext_data = ["dep:calamine"]

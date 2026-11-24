@@ -532,7 +532,7 @@ fn time_variable(ctx: &Context) -> Variable {
 /// dependency's units are unknown; callers skip that case, consistent with the
 /// rest of unit checking (a reference's units are `declared OR inferred`, and
 /// unknown ones are not an error).
-pub fn evaluate_expr_units(
+pub(crate) fn evaluate_expr_units(
     ctx: &Context,
     inferred_units: &IdentMap<Ident<Canonical>, UnitMap>,
     model: &UnitModel,
@@ -562,7 +562,7 @@ fn in_element(err: UnitError, element: &simlin_base::common::CanonicalElementNam
 /// the variables that declare none) and return each variable's unit problem:
 /// the list is the analysis' whole outcome, empty when every equation agrees
 /// with its declared units.
-pub fn check(
+pub(crate) fn check(
     ctx: &Context,
     inferred_units: &IdentMap<Ident<Canonical>, UnitMap>,
     model: &UnitModel,

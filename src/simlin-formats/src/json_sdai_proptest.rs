@@ -438,14 +438,14 @@ mod schema_tests {
         let checked_in = fs::read_to_string(&schema_path).unwrap_or_else(|e| {
             panic!(
                 "cannot read {}: {e}; regenerate with \
-                 `UPDATE_SCHEMA=1 cargo test -p simlin-engine sdai_schema_matches_the_checked_in_file`",
+                 `UPDATE_SCHEMA=1 cargo test -p simlin-formats sdai_schema_matches_the_checked_in_file`",
                 schema_path.display()
             )
         });
         assert_eq!(
             generated, checked_in,
             "docs/sdai-model.schema.json is stale; regenerate with \
-             `UPDATE_SCHEMA=1 cargo test -p simlin-engine sdai_schema_matches_the_checked_in_file`"
+             `UPDATE_SCHEMA=1 cargo test -p simlin-formats sdai_schema_matches_the_checked_in_file`"
         );
     }
 

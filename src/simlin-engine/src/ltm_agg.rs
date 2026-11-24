@@ -2493,7 +2493,7 @@ pub(crate) fn rank_output_slot_parts_for_row(
 }
 
 /// `true` when `name` is a synthetic aggregate-node name (`$⁚ltm⁚agg⁚{n}`).
-pub(crate) fn is_synthetic_agg_name(name: &str) -> bool {
+pub fn is_synthetic_agg_name(name: &str) -> bool {
     name.starts_with(AGG_NAME_PREFIX)
 }
 

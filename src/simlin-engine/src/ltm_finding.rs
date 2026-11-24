@@ -163,7 +163,7 @@ const MAX_LOOPS: usize = 200;
 /// Minimum peak relative contribution to keep a loop (0.1%).
 const MIN_CONTRIBUTION: f64 = 0.001;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// Test-only override of [`MAX_LOOPS`], scoped by an active
     /// [`MaxLoopsGuard`]. Lets a test exercise the global cap (and its
@@ -176,10 +176,10 @@ thread_local! {
 }
 
 /// The loop cap for the current `rank_and_filter` call. Returns [`MAX_LOOPS`]
-/// in production builds; in `#[cfg(test)]` builds an active [`MaxLoopsGuard`]
+/// in production builds; in test builds an active [`MaxLoopsGuard`]
 /// override takes precedence.
 fn max_loops() -> usize {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     {
         if let Some(n) = MAX_LOOPS_OVERRIDE.with(|c| c.get()) {
             return n;
@@ -192,20 +192,20 @@ fn max_loops() -> usize {
 /// for the guard's lifetime, restoring the previous value on drop -- so a
 /// panicking test does not leak the override to the next test reusing the
 /// thread.
-#[cfg(test)]
-pub(crate) struct MaxLoopsGuard {
+#[cfg(any(test, feature = "test-support"))]
+pub struct MaxLoopsGuard {
     prev: Option<usize>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl MaxLoopsGuard {
-    pub(crate) fn new(cap: usize) -> Self {
+    pub fn new(cap: usize) -> Self {
         let prev = MAX_LOOPS_OVERRIDE.with(|c| c.replace(Some(cap)));
         Self { prev }
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for MaxLoopsGuard {
     fn drop(&mut self) {
         MAX_LOOPS_OVERRIDE.with(|c| c.set(self.prev));
@@ -224,7 +224,7 @@ impl Drop for MaxLoopsGuard {
 /// 2,979 survivors' series ~29 MB at 401 saved steps); C-LEARN under 10 MB.
 pub(crate) const MAX_DISCOVERY_MEMORY_BYTES: usize = 768 * 1024 * 1024;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// Test-only override of [`MAX_DISCOVERY_MEMORY_BYTES`], scoped by an
     /// active [`MemoryBudgetGuard`], so tiny fixtures can trip every phase's
@@ -235,7 +235,7 @@ thread_local! {
 
 /// The effective discovery memory bound.
 fn max_discovery_memory_bytes() -> usize {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     {
         if let Some(b) = MEMORY_BUDGET_OVERRIDE.with(|c| c.get()) {
             return b;
@@ -246,20 +246,20 @@ fn max_discovery_memory_bytes() -> usize {
 
 /// RAII guard (test-only) overriding [`max_discovery_memory_bytes`] for the
 /// current thread; restores the previous value on drop.
-#[cfg(test)]
-pub(crate) struct MemoryBudgetGuard {
+#[cfg(any(test, feature = "test-support"))]
+pub struct MemoryBudgetGuard {
     prev: Option<usize>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl MemoryBudgetGuard {
-    pub(crate) fn new(bytes: usize) -> Self {
+    pub fn new(bytes: usize) -> Self {
         let prev = MEMORY_BUDGET_OVERRIDE.with(|c| c.replace(Some(bytes)));
         Self { prev }
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for MemoryBudgetGuard {
     fn drop(&mut self) {
         MEMORY_BUDGET_OVERRIDE.with(|c| c.set(self.prev));

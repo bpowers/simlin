@@ -131,7 +131,7 @@ impl PinnedLoopsResult {
 /// the `PartialEq`/`Update` salsa caching requires; callers invoke it directly
 /// off the salsa-tracked `causal_graph_with_modules` / `pinned_loops` inputs,
 /// so the underlying graph build is still incrementally cached.
-pub(crate) fn model_pinned_loops(
+pub fn model_pinned_loops(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,

@@ -530,7 +530,7 @@ pub fn discover_run_loops(
 /// Build a mapping from variable-UID sets to loop names using the model's
 /// persisted `loop_metadata`.  Entries are stored as a sorted Vec of UIDs
 /// because UIDs must be matched as a set.
-pub(crate) fn build_uid_to_loop_name(
+pub fn build_uid_to_loop_name(
     project: &datamodel::Project,
     model_name: &str,
 ) -> Vec<(Vec<i32>, String)> {
@@ -683,7 +683,7 @@ fn resolve_loop_name(
 ///
 /// UID lookup is scoped to `model_name` so that variables with the same
 /// identifier in different models don't produce false matches.
-pub(crate) fn persisted_loop_name(
+pub fn persisted_loop_name(
     loop_var_idents: &std::collections::HashSet<String>,
     uid_to_loop_name: &[(Vec<i32>, String)],
     model_name: &str,

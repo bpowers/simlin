@@ -62,7 +62,7 @@ fn element_subscript(name: &str) -> Option<&str> {
 /// Returns an empty `Vec` when `dimensions` is empty or any named dimension
 /// is missing from `dims` (a mid-edit inconsistency); callers fall back to
 /// the slot suffixes actually present on the loop's stocks in that case.
-pub(crate) fn loop_dimension_element_tuples(
+pub fn loop_dimension_element_tuples(
     dimensions: &[String],
     dims: &[simlin_base::datamodel::Dimension],
 ) -> Vec<String> {

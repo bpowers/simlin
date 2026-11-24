@@ -85,7 +85,7 @@ pub(crate) use loops::{
     stitch_cross_agg_petals, stitched_output_bound,
 };
 pub(crate) use parse::scalarize_ltm_equation;
-pub(crate) use pinned::model_pinned_loops;
+pub use pinned::model_pinned_loops;
 
 // Test-only re-exports. These names are consumed solely by the LTM test
 // modules -- `ltm_tests` (mounted here, reached via `super::`) and the

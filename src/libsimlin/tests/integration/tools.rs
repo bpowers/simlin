@@ -5,7 +5,7 @@
 //! The agent tool FFI, from a model handle to a tool's JSON.
 //!
 //! What each tool answers is the engine's decision, pinned by the tests in
-//! `simlin_engine::tools`. These tests pin the boundary: the catalog a host
+//! `simlin_tools`. These tests pin the boundary: the catalog a host
 //! reads is the engine's, a call carries JSON in and out at the project's
 //! current revision, a refusal is output the agent reads rather than an error,
 //! a host's misuse is an error with a code, a session keeps its model alive,
@@ -134,7 +134,7 @@ fn the_catalog_a_host_reads_is_the_engines() {
         simlin_tools_describe(&mut buf, &mut len, &mut err);
         expect_no_error(err, "describing the tools");
         let bytes = std::slice::from_raw_parts(buf, len);
-        assert_eq!(bytes, simlin_engine::tools::catalog_json().as_bytes());
+        assert_eq!(bytes, simlin_tools::catalog_json().as_bytes());
         simlin_free(buf);
 
         let mut err = ptr::null_mut();

@@ -16,7 +16,7 @@ test-support = []
 simlin-base = { path = "../simlin-base" }
 simlin-edit = { path = "../simlin-edit" }
 simlin-formats = { path = "../simlin-formats", features = ["schema"] }
-simlin-engine = { version = "0.1", path = "../simlin-engine", features = ["schema"] }
+simlin-engine = { version = "0.1", path = "../simlin-engine" }
 rmcp = { version = "1", features = ["server", "macros", "schemars"] }
 schemars = { version = "1", features = ["preserve_order"] }
 serde = { version = "1", features = ["derive"] }

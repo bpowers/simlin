@@ -2254,6 +2254,7 @@ dependencies = [
  "simlin-edit",
  "simlin-engine",
  "simlin-formats",
+ "simlin-tools",
  "simlin-wasmgen",
  "wasm-interpreter",
  "wasmalloc",
@@ -2318,12 +2319,10 @@ dependencies = [
  "base64",
  "ed25519",
  "indexmap",
- "jsonschema",
  "proptest",
  "rand 0.9.5",
  "rayon",
  "salsa",
- "schemars",
  "serde",
  "serde_json",
  "simlin-base",
@@ -2414,6 +2413,23 @@ dependencies = [
  "simlin-wasmgen",
  "tempfile",
  "wasm-interpreter",
+]
+
+[[package]]
+name = "simlin-tools"
+version = "0.1.0"
+dependencies = [
+ "indexmap",
+ "jsonschema",
+ "proptest",
+ "rayon",
+ "schemars",
+ "serde",
+ "serde_json",
+ "simlin-base",
+ "simlin-edit",
+ "simlin-engine",
+ "simlin-formats",
 ]
 
 [[package]]

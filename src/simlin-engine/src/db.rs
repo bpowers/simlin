@@ -137,7 +137,7 @@ pub use dep_graph::{
 };
 
 mod ltm;
-pub(crate) use ltm::model_pinned_loops;
+pub use ltm::model_pinned_loops;
 use ltm::*;
 pub use ltm::{
     LtmArm, LtmEquation, LtmImplicitVarMeta, ShapedLinkScore, compile_ltm_var_fragment,
@@ -178,13 +178,13 @@ mod analysis;
 pub use analysis::RefShape;
 pub use analysis::causal_graph_from_element_edges;
 pub use analysis::causal_graph_from_element_edges_with_modules;
-pub(crate) use analysis::loop_node_sequence;
+pub use analysis::loop_node_sequence;
 pub(crate) use analysis::unique_module_output;
 pub use analysis::{ModuleOutputsRead, causal_graph_from_edges};
 pub(crate) use analysis::{model_lowered_variables, model_written_variables};
 // The variable-level graph with module sub-graphs, for tests outside `db` that
 // pin edge normalization and polarity on the production graph constructor.
-pub(crate) use analysis::causal_graph_with_modules;
+pub use analysis::causal_graph_with_modules;
 // The same-element diagonal/broadcast/mapped projection the element graph
 // emits for a `Bare` A2A reference. Discovery's `expand_a2a_link_offsets`
 // consumes it (via `crate::db::expand_same_element`) so its per-element

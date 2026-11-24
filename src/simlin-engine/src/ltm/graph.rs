@@ -132,7 +132,7 @@ impl std::fmt::Debug for CausalGraph {
 
 pub struct CausalGraph {
     /// Adjacency list representation
-    pub(crate) edges: IdentMap<Ident<Canonical>, Vec<Ident<Canonical>>>,
+    pub edges: IdentMap<Ident<Canonical>, Vec<Ident<Canonical>>>,
     /// Set of stocks in the model
     pub(crate) stocks: IdentSet<Ident<Canonical>>,
     /// Variables in the model for polarity analysis.
