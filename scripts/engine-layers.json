@@ -1,0 +1,97 @@
+{
+  "source": "src/simlin-engine/src",
+  "test_features": ["test-support"],
+  "layers": {
+    "base": {
+      "uses": [],
+      "modules": [
+        "alloc",
+        "ast",
+        "builtins",
+        "common",
+        "datamodel",
+        "dimensions",
+        "float",
+        "lexer",
+        "module_functions",
+        "parser",
+        "project_patch",
+        "rapidhash",
+        "results",
+        "shared_vec",
+        "stdlib"
+      ]
+    },
+    "diagram": {
+      "uses": ["base"],
+      "modules": ["diagram"]
+    },
+    "formats": {
+      "uses": ["base", "diagram"],
+      "modules": [
+        "compat",
+        "data_provider",
+        "element_equations",
+        "import_losses",
+        "io",
+        "json",
+        "json_sdai",
+        "mdl",
+        "project_io",
+        "serde",
+        "systems",
+        "vdf",
+        "xmile"
+      ]
+    },
+    "compiler": {
+      "uses": ["base"],
+      "modules": [
+        "ai_info",
+        "builtins_visitor",
+        "bytecode",
+        "capture",
+        "compiler",
+        "conveyor",
+        "conveyor_compile",
+        "db",
+        "diagnostic",
+        "errors",
+        "ltm",
+        "ltm_agg",
+        "ltm_augment",
+        "ltm_dominance",
+        "ltm_finding",
+        "ltm_post",
+        "model",
+        "queue",
+        "queue_compile",
+        "snapshot_arg",
+        "units",
+        "units_check",
+        "units_infer",
+        "variable",
+        "vm",
+        "vm_profile",
+        "vm_vector_elm_map",
+        "vm_vector_sort_order"
+      ]
+    },
+    "edit": {
+      "uses": ["base", "diagram", "formats"],
+      "modules": ["editing", "equation_view", "patch", "patch_dimensions", "patch_fields"]
+    },
+    "wasmgen": {
+      "uses": ["base", "compiler"],
+      "modules": ["wasmgen"]
+    },
+    "layout": {
+      "uses": ["base", "diagram", "compiler", "edit"],
+      "modules": ["layout"]
+    },
+    "tools": {
+      "uses": ["base", "diagram", "formats", "compiler", "edit", "wasmgen", "layout"],
+      "modules": ["analysis", "save_check", "tools"]
+    }
+  }
+}

@@ -42,7 +42,7 @@
     "deploy:canary": "node scripts/deploy-canary.mjs",
     "build:deploy-staging": "node scripts/build-deploy-staging.mjs",
     "start": "node src/server/lib",
-    "test:scripts": "node --test scripts/tests/*.test.mjs",
+    "test:scripts": "node --test scripts/tests/*.test.mjs && python3 -m unittest discover -s scripts/tests -p '*_test.py'",
     "test": "pnpm test:scripts && pnpm --filter @simlin/core --filter @simlin/diagram --filter @simlin/engine --filter @simlin/app --filter @simlin/server --filter @simlin/notebook-widget --parallel run test",
     "test:ui": "playwright test",
     "test:ui:ui": "playwright test --ui"

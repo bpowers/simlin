@@ -508,6 +508,9 @@ jobs:
       - name: Check dependency policy
         run: python3 scripts/check-deps.py
 
+      - name: Check engine layers
+        run: python3 scripts/check-engine-layers.py
+
       - name: Check documentation links
         run: python3 scripts/check-docs.py
 

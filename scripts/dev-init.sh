@@ -73,7 +73,8 @@ command -v cargo >/dev/null 2>&1 || missing+=("cargo")
 command -v node  >/dev/null 2>&1 || missing+=("node")
 command -v pnpm  >/dev/null 2>&1 || missing+=("pnpm")
 # python3 is not optional and is not only a pysimlin concern: scripts/pre-commit
-# shells to it in phase 1 (check-deps.py / check-docs.py) and
+# shells to it in phase 1 (check-deps.py, check-engine-layers.py,
+# check-docs.py), `pnpm test:scripts` runs the Python script tests, and
 # scripts/cargo-target-dir.sh parses `cargo metadata` with it on every
 # `pnpm build`. Without this line a missing python3 surfaces as a bare
 # "python3: command not found" partway through a commit rather than here.

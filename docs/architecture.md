@@ -98,6 +98,10 @@ simlin-cli  simlin-mcp
 - `simlin-mcp` -> `simlin-mcp-core`, `simlin-engine`
 - `simlin-cli` -> `simlin-engine`, `simlin`
 
+Inside `simlin-engine`, the crate-root modules form layers, bottom up: `base`, `diagram`, `formats`, `compiler`, `edit`, `wasmgen`, `layout`, `tools`.
+`scripts/engine-layers.json` lists each layer's modules and the other layers it may use, and `scripts/check-engine-layers.py` enforces it over production code.
+A test may reach above its module's layer.
+
 ### TypeScript
 
 ```
