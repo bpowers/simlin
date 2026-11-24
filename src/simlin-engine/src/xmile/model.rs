@@ -17,8 +17,7 @@ use crate::xmile::{
 
 /// Vendor extension for persisting named feedback loop metadata.
 /// Serialized as `<simlin:loop-metadata>` within a `<model>` element.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct XmileLoopMetadata {
     #[serde(rename = "@name")]
     pub name: String,
@@ -38,8 +37,7 @@ pub struct XmileLoopMetadata {
 /// One input-port wiring of a multi-output macro invocation:
 /// `<simlin:input from="in1" to="a"/>` -- `from` is the argument's source
 /// ident, `to` is the bare macro formal-parameter name.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct MacroInvocationInput {
     #[serde(rename = "@from")]
     pub from: String,
@@ -50,8 +48,7 @@ pub struct MacroInvocationInput {
 /// One additional-output binding of a multi-output macro invocation:
 /// `<simlin:output binding="the_min" output="minval"/>` -- `binding` is the
 /// caller-side variable ident, `output` is the macro-internal output name.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct MacroInvocationOutput {
     #[serde(rename = "@binding")]
     pub binding: String,
@@ -71,8 +68,7 @@ pub struct MacroInvocationOutput {
 ///
 /// The reader reconstructs *exactly* the materialized datamodel cluster, so
 /// an XMILE->datamodel->XMILE round-trip is byte-stable.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct MacroInvocation {
     /// The materialized module ident (e.g. `total_macro`).
     #[serde(rename = "@module")]
@@ -390,8 +386,7 @@ pub(crate) fn extract_macro_invocations(
     (model, invocations)
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Model {
     #[serde(rename = "@name", default)]
     pub name: Option<String>,
@@ -689,8 +684,7 @@ impl From<datamodel::Model> for Model {
     }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Default, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 pub struct Variables {
     #[serde(rename = "$value", default)]
     pub variables: Vec<Var>,
@@ -699,8 +693,7 @@ pub struct Variables {
 /// Semantic group in <views> section (no geometry, just membership).
 /// Used when there are no actual diagram views.
 /// In Vensim, these are called "sectors".
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct SemanticGroup {
     #[serde(rename = "@name")]
     pub name: String,
@@ -713,8 +706,7 @@ pub struct SemanticGroup {
     pub vars: Vec<String>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Views {
     pub view: Option<Vec<View>>,
     /// Semantic groups appear in views section when there are no diagram views
@@ -737,8 +729,7 @@ impl Model {
     }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Module {
     #[serde(rename = "@name")]
     pub name: String,
@@ -896,8 +887,7 @@ impl From<datamodel::Module> for Module {
     }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Reference {
     // these only differ in the semantics of their contents
@@ -905,8 +895,7 @@ pub enum Reference {
     Connect2(Connect),
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Connect {
     #[serde(rename = "@from")]
     pub src: String,
@@ -914,8 +903,7 @@ pub struct Connect {
     pub dst: String,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct NonNegative {}
 
 #[test]

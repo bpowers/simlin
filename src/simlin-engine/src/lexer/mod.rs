@@ -16,15 +16,13 @@ use crate::common::{EquationError, ErrorCode};
 #[cfg(test)]
 mod test;
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum LexerType {
     Equation,
     Units,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Token<'input> {
     If,
     Then,

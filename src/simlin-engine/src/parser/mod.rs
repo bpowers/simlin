@@ -16,8 +16,7 @@ use crate::lexer::{Lexer, LexerType, Spanned, Token};
 mod tests;
 
 /// TokenKind discriminant for efficient peek comparisons without payload matching
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TokenKind {
     If,
     Then,

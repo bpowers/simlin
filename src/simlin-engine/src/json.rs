@@ -58,8 +58,7 @@ where
 // Type alias matching Go's Ident
 pub type Ident = String;
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ElementEquation {
@@ -79,8 +78,7 @@ pub struct ElementEquation {
     pub graphical_function: Option<GraphicalFunction>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Compat {
@@ -130,8 +128,7 @@ impl Compat {
 /// expression strings, and `None`/`false` means the option was absent (the
 /// documented default applies). New optional fields are additive to the Go `sd`
 /// package schema.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Conveyor {
@@ -164,8 +161,7 @@ pub struct Conveyor {
 }
 
 /// Marks a flow as a conveyor leakage outflow. Mirrors [`datamodel::Leakage`].
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Leakage {
@@ -183,8 +179,7 @@ pub struct Leakage {
 /// Adjacently tagged (`{"type": "...", "distribution": "..."}`) because the
 /// `Dist` variant carries a payload the internally-tagged style this file uses
 /// for its other enums cannot represent.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(tag = "type", content = "distribution", rename_all = "snake_case")]
 pub enum SpreadFlow {
@@ -198,14 +193,12 @@ pub enum SpreadFlow {
 /// A queue stock. Mirrors [`datamodel::Queue`]: a bare marker with no options
 /// (XMILE §4.2). Kept a struct rather than a bool so a future vendor attribute
 /// does not churn every construction site.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Queue {}
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ArrayedEquation {
@@ -220,8 +213,7 @@ pub struct ArrayedEquation {
     pub has_except_default: Option<bool>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct GraphicalFunctionScale {
@@ -229,8 +221,7 @@ pub struct GraphicalFunctionScale {
     pub max: f64,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct GraphicalFunction {
@@ -248,8 +239,7 @@ pub struct GraphicalFunction {
 
 /// Who made a variable and who edited it, as ISEE's AI information records
 /// it: the letters of [`datamodel::AiState`].
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub enum AiState {
     A,
@@ -292,8 +282,7 @@ impl From<datamodel::AiState> for AiState {
     }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Stock {
@@ -324,8 +313,7 @@ pub struct Stock {
     pub is_public: bool,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Flow {
@@ -356,8 +344,7 @@ pub struct Flow {
     pub is_public: bool,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Auxiliary {
@@ -386,8 +373,7 @@ pub struct Auxiliary {
     pub is_public: bool,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ModuleReference {
@@ -395,8 +381,7 @@ pub struct ModuleReference {
     pub dst: String,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Module {
@@ -422,8 +407,7 @@ pub struct Module {
     pub is_public: bool,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct SimSpecs {
@@ -441,8 +425,7 @@ pub struct SimSpecs {
 
 // View element types
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct FlowPoint {
@@ -452,8 +435,7 @@ pub struct FlowPoint {
     pub attached_to_uid: i32,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct LinkPoint {
@@ -461,8 +443,7 @@ pub struct LinkPoint {
     pub y: f64,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Rect {
@@ -472,8 +453,7 @@ pub struct Rect {
     pub height: f64,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct StockViewElement {
@@ -485,8 +465,7 @@ pub struct StockViewElement {
     pub label_side: String,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct FlowViewElement {
@@ -499,8 +478,7 @@ pub struct FlowViewElement {
     pub points: Vec<FlowPoint>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct AuxiliaryViewElement {
@@ -512,8 +490,7 @@ pub struct AuxiliaryViewElement {
     pub label_side: String,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct CloudViewElement {
@@ -523,8 +500,7 @@ pub struct CloudViewElement {
     pub y: f64,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct LinkViewElement {
@@ -539,8 +515,7 @@ pub struct LinkViewElement {
     pub polarity: Option<String>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ModuleViewElement {
@@ -552,8 +527,7 @@ pub struct ModuleViewElement {
     pub label_side: String,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct AliasViewElement {
@@ -567,8 +541,7 @@ pub struct AliasViewElement {
 
 /// Visual container for grouping related model elements.
 /// In JSON (matching XMILE spec), x/y are top-left coordinates.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct GroupViewElement {
@@ -582,8 +555,7 @@ pub struct GroupViewElement {
     pub is_mdl_view_marker: bool,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ViewElement {
@@ -598,8 +570,7 @@ pub enum ViewElement {
     Group(GroupViewElement),
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct View {
@@ -618,8 +589,7 @@ pub struct View {
     pub use_lettered_polarity: bool,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Model {
@@ -648,8 +618,7 @@ pub struct Model {
     pub macro_spec: Option<MacroSpec>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct JsonElementMapEntry {
@@ -657,8 +626,7 @@ pub struct JsonElementMapEntry {
     pub target: String,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct JsonDimensionMapping {
@@ -667,8 +635,7 @@ pub struct JsonDimensionMapping {
     pub element_map: Vec<JsonElementMapEntry>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Dimension {
@@ -690,8 +657,7 @@ pub struct Dimension {
     pub parent: Option<String>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct JsonDataSource {
@@ -702,8 +668,7 @@ pub struct JsonDataSource {
     pub cell: String,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Unit {
@@ -720,8 +685,7 @@ pub struct Unit {
 /// convention. `Some` on `json::Model.macro_spec` (mirrored from
 /// [`datamodel::MacroSpec`]) means the model's variables are the macro body;
 /// this names which body variables are the formal parameters and outputs.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct MacroSpec {
@@ -731,8 +695,7 @@ pub struct MacroSpec {
     pub additional_outputs: Vec<String>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct LoopMetadata {
@@ -746,8 +709,7 @@ pub struct LoopMetadata {
 
 /// Semantic/organizational group for categorizing model variables.
 /// This is distinct from visual diagram groups (ViewElement::Group).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ModelGroup {
@@ -762,8 +724,7 @@ pub struct ModelGroup {
     pub run_enabled: bool,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Source {
@@ -773,8 +734,7 @@ pub struct Source {
     pub content: String,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Project {
@@ -806,8 +766,7 @@ pub fn generate_schema_json() -> String {
 ///
 /// Serializes with `#[serde(tag = "type")]` so the JSON output includes
 /// e.g. `{"type": "stock", "name": "population", ...}`.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TaggedVariable {
@@ -2326,8 +2285,7 @@ impl From<&datamodel::Project> for Project {
 /// A patch to a project as JSON: what `simlin_project_apply_patch` takes, and
 /// the form an edit plan's patch travels in to the host that lands it. The
 /// engine's own [`crate::ProjectPatch`] converts to and from it.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectPatch {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2336,8 +2294,7 @@ pub struct ProjectPatch {
     pub models: Vec<ModelPatch>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "camelCase")]
 pub enum ProjectOperation {
     SetSimSpecs {
@@ -2372,16 +2329,14 @@ pub enum ProjectOperation {
     },
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelPatch {
     pub name: String,
     #[serde(default)]
     pub ops: Vec<ModelOperation>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "camelCase")]
 pub enum ModelOperation {
     UpsertAux {

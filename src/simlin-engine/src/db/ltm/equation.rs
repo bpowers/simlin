@@ -48,8 +48,7 @@ use crate::lexer::LexerType;
 /// an `Arrayed` equation still produced bytecode, so the "no bytecode ⇒
 /// `model_ltm_fragment_diagnostics` warns" path never fired and that element's
 /// score read a constant 0 with no diagnostic at all.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LtmArm {
     /// The generator's exact source-form spelling. Retained ONLY for
     /// diagnostics; never re-parsed to compile.
@@ -147,8 +146,7 @@ impl LtmArm {
 /// [`LtmEquation::retarget_dims`]) and layout sizing read them without a
 /// `DimensionsContext`; they are resolved to `Dimension`s only when lowering
 /// to an `Ast<Expr0>` for compilation ([`LtmEquation::to_flow_ast`]).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum LtmEquation {
     Scalar(LtmArm),
     ApplyToAll(Vec<String>, LtmArm),

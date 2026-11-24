@@ -111,11 +111,7 @@ fn macro_body_variable(db: &dyn Db, var: SourceVariable) -> datamodel::Variable 
 /// Decoupled from `crate::common::Error`: the (typed `ErrorCode`, message)
 /// pair is everything the compile entry and the project-level diagnostic need
 /// (`sim_err!(NotSimulatable, msg)` plus the diagnostic's `ErrorCode`).
-// `Debug` is feature-gated to match `module_functions::MacroRegistry`,
-// whose `Debug` is only derived under `debug-derive`; an unconditional
-// `Debug` here would fail the default (non-`debug-derive`) build.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MacroRegistryResult {
     pub registry: crate::module_functions::MacroRegistry,
     /// `Some((code, message))` when `MacroRegistry::build` rejected the macro

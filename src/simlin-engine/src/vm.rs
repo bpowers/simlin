@@ -36,8 +36,7 @@ pub fn make_module_key(
 // ============================================================================
 
 /// State for array iteration within the VM.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct IterState {
     /// Index into view_stack for the source view
     view_stack_idx: usize,
@@ -86,8 +85,7 @@ pub(crate) fn eval_op2(op: Op2, l: f64, r: f64) -> f64 {
 
 /// Identifies a literal in a specific bytecode object that must be mutated
 /// when a constant's value is overridden via `set_value`.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 enum BytecodeLocation {
     /// A literal in a flows or stocks module's shared bytecode.
     FlowOrStock {
@@ -103,8 +101,7 @@ enum BytecodeLocation {
     },
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CompiledSimulation {
     pub(crate) modules: IdentMap<ModuleKey, CompiledModule>,
     pub(crate) specs: Specs,
@@ -249,8 +246,7 @@ impl CompiledSimulation {
 /// once at `Vm::new` lets the `EvalModule` opcode do a plain array index in the
 /// hot loop instead of cloning a `(String, BTreeSet<String>)` key and SipHashing
 /// it for a `HashMap` lookup on every module evaluation, every timestep.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct ResolvedModule {
     #[allow(dead_code)]
     ident: Ident<Canonical>,
@@ -261,8 +257,7 @@ struct ResolvedModule {
     child_targets: Vec<u32>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct CompiledSlicedSimulation {
     /// All unique compiled modules, indexed by the integer ids stored in
     /// `child_targets` (and `root_idx`).
@@ -274,8 +269,7 @@ struct CompiledSlicedSimulation {
     key_to_idx: IdentMap<ModuleKey, u32>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum StepPart {
     Initials,
     Flows,
@@ -292,8 +286,7 @@ fn borrow_two(buf: &mut [f64], n_slots: usize, a: usize, b: usize) -> (&mut [f64
     if !flip { (left, right) } else { (right, left) }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Vm {
     /// The program this Vm runs, shared with whoever compiled it: the FFI
     /// keeps the same `Arc` to rebuild the Vm on reset, and the salsa memo
@@ -387,7 +380,6 @@ struct Stack {
     top: usize,
 }
 
-#[cfg(feature = "debug-derive")]
 impl std::fmt::Debug for Stack {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Stack")
@@ -543,7 +535,7 @@ impl<'a> ChunkRegions<'a> {
 /// for recursive `EvalModule` calls they must be re-packed into a temporary
 /// `EvalState` because the borrow checker cannot split the struct across the
 /// call boundary.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Debug)]
 struct EvalState<'a> {
     stack: &'a mut Stack,
     temp_storage: &'a mut [f64],

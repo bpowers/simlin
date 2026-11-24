@@ -269,8 +269,7 @@ const NUMBER_WORDS: [(&str, f64); 6] = [
 const SHARE_WORDS: [&str; 5] = ["share", "fraction", "proportion", "percent", "percentage"];
 
 /// A test of the battery.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum TestName {
@@ -294,8 +293,7 @@ impl TestName {
 }
 
 /// How a check came out.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
@@ -322,8 +320,7 @@ impl Outcome {
 }
 
 /// What a check changed.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Condition {
@@ -362,8 +359,7 @@ impl Condition {
 }
 
 /// The rule that chose an extreme conditions check's value.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ExtremeRule {
@@ -407,8 +403,7 @@ impl ExtremeRule {
 
 /// Why the battery took a constant for a time constant, whose low extreme is
 /// a short time rather than zero.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum TimeConstantEvidence {
@@ -425,8 +420,7 @@ pub enum TimeConstantEvidence {
     ReciprocalInARate,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct RunTestsInput {
@@ -458,8 +452,7 @@ pub struct RunTestsInput {
 
 /// The extremes a call gives one constant; the one it leaves out is the
 /// battery's.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ExtremeInput {
@@ -472,8 +465,7 @@ pub struct ExtremeInput {
     pub high: Option<f64>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RunTestsOutput {
@@ -499,8 +491,7 @@ pub struct RunTestsOutput {
     pub not_found: Vec<NotFound>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TestSummary {
@@ -527,8 +518,7 @@ pub struct TestSummary {
 }
 
 /// One check: what it changed, how it came out, and what it found.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct TestResult {
@@ -608,8 +598,7 @@ pub struct TestResult {
 }
 
 /// A sensitivity check folded into another that flags the same change.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct SameChange {
@@ -617,8 +606,7 @@ pub struct SameChange {
     pub condition: Condition,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ProblemKind {
@@ -628,8 +616,7 @@ pub enum ProblemKind {
     GoesNegative,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Problem {
@@ -648,8 +635,7 @@ pub struct Problem {
     pub non_negative: bool,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Difference {
@@ -661,8 +647,7 @@ pub struct Difference {
     pub difference: f64,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Response {
@@ -1831,8 +1816,7 @@ fn number(expr: &Expr0) -> Option<f64> {
 
 /// A time constant: why the battery takes it for one, how many stages it is
 /// spread over, and its unit of time against the model's.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct TimeConstant {
     evidence: TimeConstantEvidence,
     /// The order of the delay it is the time of: each stage takes that share
@@ -3757,8 +3741,7 @@ fn scale(series: &[f64]) -> f64 {
 /// label does not. Which of linear, exponential, goal seeking or S-shaped
 /// growth a series reads as depends on the horizon as much as on the
 /// structure: they are one family, which a change of pace does not leave.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum BehaviorFamily {

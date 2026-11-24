@@ -9,8 +9,7 @@ use smallvec::SmallVec;
 use crate::common::{Canonical, CanonicalDimensionName, CanonicalElementName, Ident, IdentMap};
 use crate::datamodel;
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamedDimension {
     pub elements: Vec<CanonicalElementName>,
     pub indexed_elements: IdentMap<CanonicalElementName, usize>,
@@ -24,8 +23,7 @@ pub struct NamedDimension {
 }
 
 /// Element-level dimension mapping info.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DimensionMappingInfo {
     pub target: CanonicalDimensionName,
     /// Source element -> target element pairs. When empty, positional mapping is assumed.
@@ -61,8 +59,7 @@ impl NamedDimension {
 
 /// Relationship between a subdimension and parent dimension.
 /// Maps each subdim element index to its offset in the parent.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubdimensionRelation {
     /// Maps subdim element index -> parent offset (0-based).
     /// For SubA=[A2,A3] from DimA=[A1,A2,A3]: parent_offsets=[1,2]
@@ -92,8 +89,7 @@ impl SubdimensionRelation {
 /// Cache for subdimension relationships. Uses Mutex for thread-safe O(1) lookup after first computation.
 /// The cache key is (child_name, parent_name), and the value is the relation if child is
 /// a subdimension of parent, or None if we've determined it's not a subdimension.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct RelationshipCache {
     cache: Mutex<
         IdentMap<(CanonicalDimensionName, CanonicalDimensionName), Option<SubdimensionRelation>>,
@@ -108,8 +104,7 @@ impl Clone for RelationshipCache {
     }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Dimension {
     Indexed(CanonicalDimensionName, u32),
     Named(CanonicalDimensionName, NamedDimension),
@@ -117,8 +112,7 @@ pub enum Dimension {
 
 /// How a bare-identifier subscript index resolves against ONE axis of the
 /// variable being subscripted -- see [`resolve_axis_index_name`].
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AxisIndexName {
     /// The axis's own dimension declares this name as an ELEMENT. Carries the
     /// element's canonical name.
@@ -391,8 +385,7 @@ impl From<datamodel::Dimension> for Dimension {
     }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct DimensionsContext {
     /// The dimension and parent maps are `Arc`-shared so cloning a context is
     /// a refcount bump rather than a deep copy of every dimension's element
@@ -1322,8 +1315,7 @@ impl DimensionsContext {
 /// How one source axis was paired with one target axis, strongest rule first.
 ///
 /// The order of the variants IS the precedence [`match_axes`] applies.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AxisMatch {
     /// The two axes name the same dimension.
     Exact,
@@ -1347,8 +1339,7 @@ pub enum AxisMatch {
 /// An `ArrayView`'s axes are names and lengths rather than [`Dimension`]s, and
 /// a temp's axis has no name at all, so the matcher takes this rather than
 /// `&[Dimension]` and every caller projects onto it.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Axis<'a> {
     /// Canonical dimension name, or `""` for an axis that has none. An unnamed
     /// axis never matches by name: there is no name to compare, and two temps'

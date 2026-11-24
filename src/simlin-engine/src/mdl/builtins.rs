@@ -363,8 +363,7 @@ pub(in crate::mdl) static BUILTINS: LazyLock<HashSet<&'static str>> = LazyLock::
 ///
 /// Used by the normalizer to classify a symbol in a single `to_lower_space`
 /// call rather than checking each category separately.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SymbolClass {
     /// "WITH LOOKUP" keyword
     WithLookup,

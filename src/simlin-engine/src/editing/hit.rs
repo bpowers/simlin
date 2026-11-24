@@ -65,8 +65,7 @@ use crate::diagram::scene::{
 use super::geometry::Point;
 
 /// Which part of an element a hit lands on.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HitPart {
     /// The element itself: a shape, a flow's pipe or valve, a link's line.
     Body,
@@ -87,16 +86,14 @@ impl HitPart {
     ];
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Hit {
     pub uid: i32,
     pub part: HitPart,
 }
 
 /// The rule of the tiers that decided a hit.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Rule {
     /// A body firmly holding the point, with nothing drawn above it taking it.
     FirmBody,

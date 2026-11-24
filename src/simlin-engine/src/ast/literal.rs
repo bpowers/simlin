@@ -137,11 +137,6 @@ impl Literal {
 
 /// Forwards to the inner `f64` so that a `Const` prints as `Const("NaN", NaN,
 /// ..)` rather than gaining a wrapper layer in every AST debug dump.
-///
-/// Unconditional rather than gated on `debug-derive` (the crate's rule for new
-/// types) under that gate's documented exception for types appearing in
-/// `assert_eq!` -- `literal_tests` compares `Literal`s directly, and a
-/// one-field forwarding impl costs nothing.
 impl std::fmt::Debug for Literal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Debug::fmt(&self.0, f)

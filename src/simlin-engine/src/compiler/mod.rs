@@ -71,8 +71,7 @@ pub(crate) use self::expr::{BuiltinFn, Expr, SubscriptIndex, Table, VarRef};
 /// not the rule.)
 pub(crate) type VarSizes = IdentMap<VarRef, usize>;
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Var {
     pub(crate) ident: Ident<Canonical>,
     pub(crate) ast: Vec<Expr>,
@@ -86,8 +85,7 @@ pub struct Var {
 
 /// A read paired with its reader's element by position alone ([`Var`]): the
 /// read, where it is written, and the reader's element that makes it.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PositionalRead {
     pub(crate) read: crate::common::MismatchedRead,
     pub(crate) loc: Loc,

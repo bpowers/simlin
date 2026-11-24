@@ -12,8 +12,7 @@ use crate::eqn_err;
 
 /// IndexExpr1 represents a parsed equation, after calls to
 /// builtin functions have been checked/resolved.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum IndexExpr1 {
     Wildcard(Loc),
     // *:dimension_name
@@ -59,8 +58,7 @@ impl IndexExpr1 {
 /// `Eq` is derived for the reason spelled out on [`Expr0`]: it makes
 /// "reflexive, therefore backdateable" a compile-checked property, which is what
 /// keeps a future float-bearing field from being a bare `f64`.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum Expr1 {
     Const(String, Literal, Loc),
     Var(Ident<Canonical>, Loc),

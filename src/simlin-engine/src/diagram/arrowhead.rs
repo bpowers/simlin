@@ -20,8 +20,7 @@ pub(crate) const ARROWHEAD_BACK_SWEEP: bool = true;
 /// `back_radius`, drawn with [`ARROWHEAD_BACK_LARGE_ARC`] and
 /// [`ARROWHEAD_BACK_SWEEP`]. The drawing turns the whole outline
 /// `rotation_deg` degrees about the tip, as SVG `rotate(deg, tip)` does.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct ArrowheadGeometry {
     pub tip: Point,
     pub back_start: Point,

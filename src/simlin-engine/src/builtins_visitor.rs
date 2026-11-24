@@ -98,8 +98,6 @@ pub enum SnapshotIndexFacts<'a> {
 
 /// What an apply-to-all body asks of the expansion, from the calls it
 /// contains. Ordered, so a body's requirement is the maximum over its calls.
-// `Debug` is unconditional, as the crate keeps it for every type an
-// `assert_eq!` compares (the routing-arm table in `macro_expansion_tests`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum PerElement {
     /// Nothing that synthesizes a helper.

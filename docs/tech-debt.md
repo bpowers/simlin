@@ -643,7 +643,7 @@ Each entry has a description, component, severity, and measurement command.
 
 - **Component**: build / CI (`scripts/pre-commit`, `.github/workflows/`, `src/simlin-engine/Cargo.toml`)
 - **Severity**: low (was medium; the dev-target half of this is now structurally impossible — see below)
-- **Description**: Neither the pre-commit hook nor CI exercises a Cargo **feature matrix** for `simlin-engine`, so feature-gating bugs in the **library** are invisible to the canonical gate. simlin-engine features: `file_io`, `schema`, `ai_info`, `debug-derive` (default = `schema, ai_info, debug-derive`), plus `ext_data`, `png_render`, `ltm_bench`.
+- **Description**: Neither the pre-commit hook nor CI exercises a Cargo **feature matrix** for `simlin-engine`, so feature-gating bugs in the **library** are invisible to the canonical gate. simlin-engine features: `file_io`, `schema`, `ai_info`, `agent_tools` (default = `schema, ai_info, agent_tools`), plus `ext_data`, `png_render`, `ltm_bench`.
 
   **Historical failure (no longer reachable).** During Phase 7c of the Vensim macro epic a subagent added `src/simlin-engine/tests/metasd_macros.rs` (which calls the `file_io`-gated `load_dat`/`load_csv`) WITHOUT the mirroring `required-features = ["file_io"]` entry.
   That broke `cargo build -p simlin-engine --all-targets` whenever `file_io` was *not* enabled (`error[E0425]`, `load_dat`/`load_csv` configured out), and survived multiple commits because the workspace build pulls `file_io` into scope via cross-crate feature unification (`simlin-cli` requests `simlin-engine/file_io`).
@@ -656,7 +656,7 @@ Each entry has a description, component, severity, and measurement command.
   Note also that the self dev-dep means `--all-targets` no longer type-checks the lib with `file_io` off — so a matrix step must be `--lib`-scoped to test anything.
 - **Suspected fix**: Add a lib-scoped feature-matrix check to the pre-commit hook and/or CI: at minimum `cargo check -p simlin-engine --lib --no-default-features` and `cargo check -p simlin-engine --lib --all-features`.
   Optionally `cargo hack --feature-powerset --lib` (bounded).
-  Do **not** use `--all-targets --no-default-features`: the crate's own unit tests require `debug-derive` (thousands of `assert_eq!`/`{:?}` sites) and have never compiled without it, so that invocation fails for reasons unrelated to feature-gating hygiene.
+  Do **not** use `--all-targets --no-default-features`: the integration tests require `ai_info`, so that invocation fails for reasons unrelated to feature-gating hygiene.
   Keep within the documented test-time budget ([docs/dev/rust.md#test-time-budgets](dev/rust.md)) — a couple of representative lib configurations, not the full powerset, is the pragmatic choice given the 3-minute workspace cap.
 - **Secondary note** (workflow, not a separate item): the original break propagated because multi-agent plan execution structurally trusts the inherited baseline — each subagent verified only its own delta, and several built *with* `file_io` and concluded the base was clean.
   Subagents should verify the exact configuration they will later claim green BEFORE starting, and STOP if the inherited baseline is already broken.

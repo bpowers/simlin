@@ -510,11 +510,8 @@ impl Db for SimlinDb {}
 /// scores already route directly via name checks; setting it for them is harmless.)
 //
 // `equation: LtmEquation` blocks deriving `Eq` (the embedded `Expr0` carries
-// `f64` constants) and unconditional `Debug` (its sub-types only derive `Debug`
-// under `debug-derive`, off in WASM / pysimlin). Salsa only needs `PartialEq`
-// for incrementality.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+// `f64` constants). Salsa only needs `PartialEq` for incrementality.
+#[derive(Debug, Clone, PartialEq)]
 pub struct LtmSyntheticVar {
     pub name: String,
     pub equation: LtmEquation,
@@ -643,8 +640,7 @@ impl From<bool> for LtmOverlay {
 /// `db::ltm::LtmWarnings`).
 /// (`Debug`/`Eq` are conditional/absent for the same reasons as
 /// `LtmSyntheticVar`.)
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LtmVariablesResult {
     pub vars: Vec<LtmSyntheticVar>,
     pub loop_partitions: indexmap::IndexMap<String, Vec<Option<usize>>>,

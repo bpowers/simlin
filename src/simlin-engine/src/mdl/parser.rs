@@ -121,8 +121,7 @@ fn make_equation<'input>(
 // ============================================================================
 
 /// Discriminant-only token kind for peek comparisons.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TokenKind {
     Plus,
     Minus,

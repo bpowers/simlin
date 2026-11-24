@@ -6,8 +6,7 @@ use std::f64::consts::PI;
 
 use crate::diagram::constants::ARRAYED_OFFSET;
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
     pub top: f64,
     pub left: f64,
@@ -15,15 +14,13 @@ pub struct Rect {
     pub bottom: f64,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Point {
     pub x: f64,
     pub y: f64,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Circle {
     pub x: f64,
     pub y: f64,
@@ -32,8 +29,7 @@ pub struct Circle {
 
 /// A positioned axis-aligned box: a drawn rectangle, or the slot a sparkline
 /// is drawn into.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Frame {
     pub x: f64,
     pub y: f64,

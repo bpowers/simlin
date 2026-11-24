@@ -4524,8 +4524,7 @@ pub(crate) fn qualify_element_csv(
 /// per-element link-score generators need to build a correct partial.
 /// `Eq` is deliberately absent: [`Expr0`] carries an `f64` on `Const`, so it is
 /// `PartialEq` only. No consumer needs total equality here.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ClassifiedReducer {
     pub kind: ReducerKind,
     /// Uppercase function name (e.g. "SUM", "MIN").

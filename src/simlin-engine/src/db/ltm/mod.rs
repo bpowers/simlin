@@ -722,8 +722,7 @@ fn compute_module_link_overrides(
 /// that `compute_layout` can allocate slots and `assemble_module` can compile
 /// them; the module-instance universe is the source models' alone
 /// (`db::assemble::enumerate_module_instances`).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LtmImplicitVarMeta {
     /// Canonical name of the LTM variable that created this implicit var
     pub ltm_parent_name: String,

@@ -70,8 +70,7 @@ impl From<crate::common::Error> for ConvertError {
 }
 
 /// Type of variable determined during conversion.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VariableType {
     Stock,
     Flow,
@@ -79,7 +78,7 @@ pub enum VariableType {
 }
 
 /// Information about a symbol collected during the first pass.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Debug)]
 pub struct SymbolInfo<'input> {
     /// The parsed equation(s) for this symbol
     pub equations: Vec<FullEquation<'input>>,

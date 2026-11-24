@@ -648,8 +648,7 @@ fn spell_bare_sources(expr: Expr2, sources: &[AggSource]) -> Expr2 {
 }
 
 /// One aggregate node: the stand-in for a maximal reducer subexpression.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AggNode {
     /// The aggregate node's name. For a synthetic agg this is
     /// `$⁚ltm⁚agg⁚{n}`; for a variable-backed agg this is the owning
@@ -890,8 +889,7 @@ impl AggNode {
 /// text (which would otherwise be filtered out by the `is_synthetic` checks
 /// downstream, leaving the inline reducer on the conservative direct-scoring
 /// path -- a name-ordering bug).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AggNodesResult {
     /// Aggregate nodes in first-encounter (deterministic) order.
     pub aggs: Vec<AggNode>,

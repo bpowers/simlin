@@ -23,7 +23,7 @@ const PIPE_FINAL_ADJUST: f64 = 7.5;
 
 /// Everything a drawn flow is made of. `render_flow` prints it and the scene
 /// display list reads it, so the two cannot place a flow differently.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Debug)]
 pub(crate) struct FlowGeometry {
     /// The pipe's vertices: the view's points with a cloud sink's retraction
     /// and the arrowhead adjustment applied to the last one.

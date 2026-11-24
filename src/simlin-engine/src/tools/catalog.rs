@@ -21,8 +21,7 @@
 use serde::Serialize;
 
 /// Every tool, in catalog order.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ToolName {
     ReadModel,
     ReadVariables,
@@ -37,8 +36,7 @@ pub enum ToolName {
 }
 
 /// What calling a tool does to the project.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolEffect {
     /// Reads the project and changes nothing.

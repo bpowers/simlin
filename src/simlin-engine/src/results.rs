@@ -10,8 +10,7 @@ use crate::datamodel::{Dt, SimMethod, SimSpecs};
 /// The slot of a results row that holds its time: the VM's own.
 pub(crate) const TIME_OFF: usize = crate::vm::TIME_OFF;
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Eq, Hash, Copy, Clone)]
+#[derive(Debug, PartialEq, Eq, Hash, Copy, Clone)]
 pub enum Method {
     Euler,
     RungeKutta2,
@@ -58,8 +57,7 @@ pub(crate) const STEP_TOLERANCE: f64 = 1e-6;
 /// project's position on float equality in cache keys (GH #642). A NaN here is
 /// not reachable from a valid `SimSpecs`, so only the signed-zero direction
 /// applies, and it is inert for a start/stop/dt.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Specs {
     pub start: f64,
     pub stop: f64,
@@ -252,8 +250,7 @@ pub(crate) fn written_rows(rows: usize) -> String {
     }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Results {
     pub offsets: IdentMap<Ident<Canonical>, usize>,
     /// The rows, step-major, in one allocation. It may be longer than the

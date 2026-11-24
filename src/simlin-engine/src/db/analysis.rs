@@ -626,8 +626,7 @@ fn cartesian_element_names(var_name: &str, dims: &[crate::dimensions::Dimension]
 /// How one source axis of a `Bare` read pairs with the target's axes, and
 /// which source element each target element reads through the pair -- one
 /// entry per source axis, from [`bare_axis_pairing`].
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BareAxis {
     /// Paired with target axis `pos` by name, or as two indexed axes of one
     /// size: the target's i-th element reads the source's i-th.
@@ -655,8 +654,7 @@ impl BareAxis {
 
 /// Which of the compiler's two executed rules a `Bare` read follows: the
 /// relations its axis pairing consults.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BareSpelling {
     /// A read in an equation body -- a bare arrayed name, or an
     /// iterated-dimension subscript. Pass 0 (`compiler::context::lower_pass0`)

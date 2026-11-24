@@ -742,8 +742,7 @@ impl VariableLayout {
 /// mapping, which the run-invariant flow prefix
 /// (`SymbolicCompiledModule::flows_invariant_opcode_len`) and the SCC
 /// per-element segmentation both depend on.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct SymbolicByteCodeBuilder {
     bytecode: SymbolicByteCode,
     // keyed on the literal's bit pattern: interning only needs Eq + Hash, and

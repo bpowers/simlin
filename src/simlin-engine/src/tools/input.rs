@@ -127,8 +127,7 @@ pub(crate) fn equation_too_deep(text: &str) -> Option<String> {
 }
 
 /// Why input is not what a tool takes.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Mismatch {
     /// The text is not JSON: the parser's reason, with its position in the
     /// text, which is all there is to point at.

@@ -245,10 +245,8 @@ impl Drop for Interned {
 #[derive(Clone)]
 pub(crate) struct CanonicalStorage(std::sync::Arc<Interned>);
 
-// `Debug` is unconditional (not gated on the `debug-derive` feature) because
-// `Ident<State>` derives `Debug` unconditionally (it predates the feature),
-// and a field type must be `Debug` for that derive to hold with the feature
-// off. Printing the canonical string is the useful representation anyway.
+// By hand so an identifier prints as its canonical string rather than as the
+// interned payload.
 impl fmt::Debug for CanonicalStorage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(self.as_str(), f)
@@ -390,8 +388,7 @@ impl std::hash::BuildHasher for IdentBuildHasher {
 /// - Properly handles quoted sections
 ///
 /// A raw, non-canonicalized identifier as it appears in source.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RawIdent(String);
 
 /// A canonicalized dimension name
@@ -401,13 +398,11 @@ pub struct RawIdent(String);
 /// handle's manual impls (value equality + value hash + lexicographic order),
 /// so the observable behavior is identical to the old `String` backing while
 /// construction and clone avoid allocation.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CanonicalDimensionName(CanonicalStorage);
 
 /// A raw dimension name as it appears in source
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RawDimensionName(String);
 
 /// A canonicalized element name (dimension element)
@@ -415,13 +410,11 @@ pub struct RawDimensionName(String);
 /// Backed by interned, de-duplicated storage (see [`CanonicalStorage`]); the
 /// derived trait impls delegate to that handle, matching the old `String`
 /// backing's behavior without per-construction allocation.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CanonicalElementName(CanonicalStorage);
 
 /// A raw element name as it appears in source
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RawElementName(String);
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -3066,8 +3059,7 @@ pub struct Ident<State = Canonical> {
 
 /// A borrowed canonical string slice wrapper
 /// This type guarantees the string is in canonical form
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Eq, Hash)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct CanonicalStr<'a> {
     inner: &'a str,
 }

@@ -51,8 +51,7 @@ const PRODUCT_VERSION: &str = "0.1.0";
 const PRODUCT_NAME: &str = "Simlin";
 const PRODUCT_LANG: &str = "en";
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename = "xmile")]
 pub struct File {
     #[serde(default)]
@@ -358,8 +357,7 @@ impl From<datamodel::Project> for File {
     }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct AiInformation {
     pub status: AiStatus,
     pub testing: Option<AiTesting>,
@@ -367,8 +365,7 @@ pub struct AiInformation {
     // TODO: settings
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AiStatus {
     pub key_url: String,
     pub algorithm: String,
@@ -430,23 +427,20 @@ impl<'de> Deserialize<'de> for AiStatus {
     }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct AiTesting {
     #[serde(rename = "@signed_message_body")]
     pub signed_message_body: String,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Data {
     // TODO
 }
 
 /// A formal parameter of a `<macro>`: the parameter name is the element
 /// text; an optional `default` attribute supplies a default value.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Parm {
     #[serde(rename = "$text")]
     pub name: String,
@@ -465,8 +459,7 @@ pub struct Parm {
 /// so a macro body's views are inert. `quick_xml::de` silently ignores the
 /// unknown `<views>` on read and the writer never emits one (a documented
 /// intentional non-round-trip).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Macro {
     #[serde(rename = "@name")]
     pub name: String,
@@ -497,8 +490,7 @@ pub struct Macro {
 /// `names` attribute in declaration order (mirrors `XmileLoopMetadata`'s
 /// comma-joined `uids_text`). Emitted only when a macro has additional
 /// outputs (single-output macros stay standards-clean -- AC4.5).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct MacroAdditionalOutputs {
     #[serde(rename = "@names", default)]
     pub names: String,
@@ -630,15 +622,13 @@ impl From<datamodel::Model> for Macro {
     }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct VarDimensions {
     #[serde(rename = "dim")]
     pub dimensions: Option<Vec<VarDimension>>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct VarDimension {
     #[serde(rename = "@name")]
     pub name: String,
@@ -651,15 +641,13 @@ impl ToXml<XmlWriter> for VarDimension {
     }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Dimensions {
     #[serde(rename = "dim")]
     pub dimensions: Option<Vec<Dimension>>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Header {
     pub vendor: String,
     pub product: Product,
@@ -946,23 +934,19 @@ impl ToXml<XmlWriter> for Feature {
     }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Caption {}
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Includes {}
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Image {
     #[serde(default)]
     pub resource: String, // "JPG, GIF, TIF, or PNG" path, URL, or image embedded in base64 data URI
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Product {
     #[serde(rename = "$value")]
     pub name: Option<String>,
@@ -981,8 +965,7 @@ pub struct Product {
 /// `Serialize` derive here is unused for output (the writer is the manual
 /// `ToXml` impl above, which re-derives the header from the per-stock
 /// markers).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Serialize, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum Feature {
     UsesArrays {
@@ -1220,8 +1203,7 @@ impl<'de> Deserialize<'de> for Feature {
     }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Options {
     // namespace is an XML ATTRIBUTE on <options> (XMILE 2.2.1, e.g.
     // <options namespace="std, isee">); without the @ rename it only matched
@@ -1232,8 +1214,7 @@ pub struct Options {
     pub features: Option<Vec<Feature>>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct SimSpecs {
     pub start: f64,
     pub stop: f64,
@@ -1328,8 +1309,7 @@ impl From<datamodel::SimSpecs> for SimSpecs {
     }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Dt {
     #[serde(rename = "$value")]
     pub value: f64,
@@ -1362,25 +1342,21 @@ impl From<datamodel::Dt> for Dt {
     }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Behavior {
     // TODO
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Style {
     // TODO
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Units {
     pub unit: Option<Vec<Unit>>,
 }
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Unit {
     #[serde(rename = "@name")]
     pub name: String,

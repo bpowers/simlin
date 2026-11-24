@@ -16,7 +16,7 @@ use super::types::Loop;
 /// through the causal graph (i.e., they form a strongly connected component
 /// in the stock-to-stock reachability graph). Relative loop scores should
 /// only be compared within the same partition.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Debug)]
 pub struct CyclePartitions {
     /// Partitions as sorted Vecs of stock idents.
     /// Outer Vec is sorted by the lexicographically smallest stock in each partition.

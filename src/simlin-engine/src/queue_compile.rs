@@ -111,10 +111,6 @@ pub enum QueueOutflowKind {
 /// its target kind. [`expand_queues`] always records `Unconstrained` here; a
 /// coupling is detected and stamped onto the resolved [`QueueOutflowPlan`] later
 /// (by [`apply_couplings`]), since it needs the compiled conveyor plan indices.
-///
-/// `Debug` is derived UNCONDITIONALLY (like [`crate::conveyor_compile::InflowMeta`]):
-/// these metas are pure compile-time data (never in the VM's `debug-derive`-gated
-/// side tables), so there is no no-default-features WASM-build hazard.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QueueOutflowMeta {
     /// Canonical name of the driven outflow (its slot receives the served rate).

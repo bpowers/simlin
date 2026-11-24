@@ -79,8 +79,7 @@ fn no_such_position(ident: &str, position: usize, len: usize) -> String {
     format!("@{position} is out of range for '{ident}', whose dimension has {len} elements")
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub(crate) struct Context<'a> {
     pub(crate) core: ContextCore<'a>,
     pub(crate) active_dimension: Option<Arc<[Dimension]>>,
@@ -108,8 +107,7 @@ pub(crate) struct Context<'a> {
     pub(crate) positional_reads: Rc<std::cell::RefCell<Vec<super::PositionalRead>>>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct ContextCore<'a> {
     pub(crate) dimensions: &'a [Dimension],
     pub(crate) dimensions_ctx: &'a DimensionsContext,

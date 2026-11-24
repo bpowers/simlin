@@ -17,8 +17,7 @@ use crate::mdl::lexer::{LexError, LexErrorCode, RawLexer, RawToken, Spanned};
 /// Normalized tokens ready for parsing.
 ///
 /// These tokens have been transformed based on context (equation/units/comment section).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Token<'input> {
     // Pass-through from RawToken
     Plus,
@@ -146,8 +145,7 @@ impl From<LexError> for NormalizerError {
 }
 
 /// Tracks which section of an equation we're in.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Section {
     /// Before first ~ (the equation itself)
     Equation,

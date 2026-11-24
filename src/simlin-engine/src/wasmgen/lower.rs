@@ -3098,8 +3098,7 @@ fn emit_eval_module(
     Ok(())
 }
 
-/// Name an unsupported opcode without depending on `Debug` (feature-gated via
-/// `debug-derive`).
+/// Name an unsupported opcode by its kind, without its operands.
 fn unsupported_opcode(op: &Opcode) -> String {
     let name = match op {
         Opcode::PushSubscriptIndex { .. } => "PushSubscriptIndex",

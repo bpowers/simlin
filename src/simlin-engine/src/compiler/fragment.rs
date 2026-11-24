@@ -39,8 +39,7 @@ use super::{Table, Var, VarRef, VarSizes};
 
 /// What lowering needs to know about one name a fragment can reference: its
 /// dimensions and whether it is a plain variable or a module instance.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct DepShape {
     /// The declared dimensions; empty for a scalar and for a module instance.
     pub dims: Vec<Dimension>,
@@ -48,8 +47,7 @@ pub(crate) struct DepShape {
 }
 
 /// The storage a dependency's name denotes.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum DepKind {
     /// An aux, flow, stock, lookup table or synthesized helper: one slot per
     /// element of `dims` (one slot when scalar).
@@ -108,8 +106,7 @@ impl DepShape {
 /// A sub-model's fixed layout together with each variable's shape: what a
 /// cross-module reference resolves through (`db::model_shape` derives it from
 /// `compute_layout` and the per-variable dimension queries).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct ModelShape {
     pub vars: IdentMap<Ident<Canonical>, ShapeEntry>,
     pub n_slots: usize,
@@ -117,8 +114,7 @@ pub(crate) struct ModelShape {
 
 /// One sub-model variable: where its block starts inside the instance, and its
 /// shape (a nested module instance carries the nested model's shape).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ShapeEntry {
     pub offset: usize,
     pub shape: DepShape,

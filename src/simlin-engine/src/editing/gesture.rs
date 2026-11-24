@@ -66,8 +66,7 @@ use super::terminal::{
 use super::validity::{Fault, flow_fault};
 
 /// The tool a host's toolbar arms.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tool {
     Stock,
     Flow,
@@ -80,8 +79,7 @@ impl Tool {
     pub const ALL: [Tool; 5] = [Tool::Stock, Tool::Flow, Tool::Aux, Tool::Link, Tool::Module];
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PointerKind {
     Touch,
     Pencil,
@@ -89,8 +87,7 @@ pub enum PointerKind {
 }
 
 /// A press, resolved by the host.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Press {
     /// Model coordinates.
     pub point: Point,
@@ -109,8 +106,7 @@ pub struct Press {
 }
 
 /// What a plan asks the host to do once the gesture ends.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CommitKind {
     /// Nothing: an idle frame, an invalid drop, or an edit holding a number the
     /// scene cannot draw.
@@ -126,8 +122,7 @@ pub enum CommitKind {
 /// changes nothing (an end dropped back where it was) is allowed and commits
 /// nothing, and a drop whose result holds a number the scene cannot draw is
 /// not.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Target {
     pub uid: i32,
     pub valid: bool,
@@ -136,8 +131,7 @@ pub struct Target {
 /// A link being drawn or reattached while its end is over no valid target: the
 /// preview draws it straight from `from` to the pointer, under `uid` (the
 /// reattached link's own, or the uid a created link would take).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DanglingLink {
     pub uid: i32,
     pub from: i32,
@@ -147,8 +141,7 @@ pub struct DanglingLink {
 /// An edit of one view: elements to upsert by uid (substituting or adding), and
 /// uids to remove. `ModelOperation::EditView` derives the model operations the
 /// edit implies when it applies.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct ViewEdit {
     pub upsert: Vec<ViewElement>,
     pub remove: Vec<i32>,
@@ -161,8 +154,7 @@ impl ViewEdit {
 }
 
 /// One frame of a gesture, or a tap.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Plan {
     /// Elements the frame draws in place of the base elements with the same uid,
     /// or adds, each differing from what the base holds: substitutions in view
@@ -565,8 +557,7 @@ pub fn plan_tap(base: &BaseView, press: &Press) -> Plan {
     }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum Gesture {
     MoveSelection,
     /// A press on a sole selected flow's pipe or valve, latched by the first
@@ -609,8 +600,7 @@ enum Gesture {
 }
 
 /// What a drag started on, for a host that draws affordances per gesture.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GestureKind {
     MoveSelection,
     SlideValve,

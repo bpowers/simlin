@@ -100,8 +100,7 @@ pub(crate) fn clamp_to_face_span(v: f64, center: f64, half_extent: f64) -> f64 {
 /// as its point and an unattached end as no terminal at all -- and
 /// `CROWDED_MIN_SEGMENT` otherwise. `room` records which: only with room does
 /// the checker hold a segment to a minimum.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct Minima {
     stub: f64,
     riser: f64,
@@ -179,8 +178,7 @@ fn terminals_clear(
 }
 
 /// The orientation of an axis-aligned segment.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Axis {
     Horizontal,
     Vertical,
@@ -289,8 +287,7 @@ fn stock_ends_valid(points: &[FlowPoint], stocks: &HashMap<i32, (f64, f64)>) -> 
 }
 
 /// How an end segment's stock endpoint is brought onto the stock.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum EndFix {
     /// Already valid: the endpoint pins the segment's line where it is. Only
     /// when neither a shared line nor a jog can bring the segment's other end
@@ -349,7 +346,7 @@ fn shared_line_span(
     (lo, hi)
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Debug)]
 struct StockEnd {
     idx: usize,
     adj: usize,

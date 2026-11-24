@@ -422,8 +422,7 @@ pub fn flow_valve<'a>(
 }
 
 /// What a flow's pipe end is drawn into.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PipeTarget {
     /// A stock, by canonical (`to_lower_space`) name.
     Stock(String),
@@ -437,8 +436,7 @@ pub enum PipeTarget {
 /// The attachments follow the model: a side the model links to a stock ends
 /// on that stock, and every other side ends in a cloud. The sketch supplies
 /// where an end is drawn when it can; `convert` places the ends it cannot.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FlowEnd {
     /// The pipe ends at what this side attaches to: the stock the model links
     /// on this side, or a cloud. `x`/`y` is the pipe end.
@@ -456,7 +454,7 @@ pub enum FlowEnd {
 }
 
 /// Both ends of an imported flow.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Debug)]
 pub struct FlowEnds {
     pub source: FlowEnd,
     pub sink: FlowEnd,
@@ -745,8 +743,7 @@ fn flow_copy_rank(
 /// copy is the one with the shortest route. `thyroid-2008-d.mdl` draws
 /// `T3 absorption` with a valve twice, each copy's pipe reaching one of the
 /// two stocks the model links: rank alone ties them.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct CopyScore {
     rank: u8,
     unreached: usize,

@@ -160,8 +160,7 @@ pub(crate) fn shaped_link_score_executions() -> usize {
 /// caller re-reads this memoized value -- and so re-records the edge and its
 /// warning in the freshly-built `LtmWarnings` -- on every
 /// `model_ltm_variables` evaluation, whether the query body re-ran or not.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ShapedLinkScore {
     /// The link-score variable was generated. `helpers` carries the
     /// companion synthetic variables the score reads at their current-step

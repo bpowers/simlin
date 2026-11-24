@@ -22,7 +22,7 @@ use crate::diagram::elements::{
 use crate::diagram::flow::flow_bounds;
 
 /// One element a diagram draws, with the neighbours its drawing needs.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Debug)]
 pub(crate) enum ResolvedElement<'a> {
     Group(&'a view_element::Group),
     /// A connector whose endpoints are both in the view.

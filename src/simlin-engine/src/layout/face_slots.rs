@@ -32,8 +32,7 @@ const EPS: f64 = 1e-6;
 const MAX_CLOUD_PUSHES: usize = 8;
 
 /// A face of a stock.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Side {
     Left,
     Right,
@@ -195,7 +194,7 @@ fn slot_on_face(span: (f64, f64), occupied: &[f64], preferred: f64, spacings: &[
 }
 
 /// A stock end of a created flow, with its face.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Debug)]
 struct FaceEnd {
     end: usize,
     stock_uid: i32,

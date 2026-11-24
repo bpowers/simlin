@@ -15,8 +15,7 @@ use crate::xmile::variables::Var;
 use crate::xmile::view_element::LinkEnd;
 use crate::xmile::{ToXml, XmlWriter, write_tag_end, write_tag_start_with_attrs};
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Copy, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ViewType {
     StockFlow,
@@ -190,8 +189,7 @@ pub mod view_element {
         }
     }
 
-    #[cfg_attr(feature = "debug-derive", derive(Debug))]
-    #[derive(Copy, Clone, PartialEq, Eq, Deserialize, Serialize)]
+    #[derive(Debug, Copy, Clone, PartialEq, Eq, Deserialize, Serialize)]
     #[serde(rename_all = "snake_case")]
     pub enum LabelSide {
         Top,
@@ -253,8 +251,7 @@ pub mod view_element {
         }
     }
 
-    #[cfg_attr(feature = "debug-derive", derive(Debug))]
-    #[derive(Clone, PartialEq, Deserialize, Serialize)]
+    #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
     pub struct Aux {
         #[serde(rename = "@name")]
         pub name: String,
@@ -339,8 +336,7 @@ pub mod view_element {
         }
     }
 
-    #[cfg_attr(feature = "debug-derive", derive(Debug))]
-    #[derive(Clone, PartialEq, Deserialize, Serialize)]
+    #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
     pub struct Stock {
         #[serde(rename = "@name")]
         pub name: String,
@@ -434,8 +430,7 @@ pub mod view_element {
         }
     }
 
-    #[cfg_attr(feature = "debug-derive", derive(Debug))]
-    #[derive(Clone, PartialEq, Deserialize, Serialize)]
+    #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
     pub struct Point {
         #[serde(rename = "@x")]
         pub x: f64,
@@ -465,15 +460,13 @@ pub mod view_element {
         }
     }
 
-    #[cfg_attr(feature = "debug-derive", derive(Debug))]
-    #[derive(Clone, PartialEq, Default, Deserialize, Serialize)]
+    #[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
     pub struct Points {
         #[serde(rename = "pt")]
         pub points: Vec<Point>,
     }
 
-    #[cfg_attr(feature = "debug-derive", derive(Debug))]
-    #[derive(Clone, PartialEq, Deserialize, Serialize)]
+    #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
     pub struct Flow {
         #[serde(rename = "@name")]
         pub name: String,
@@ -604,15 +597,13 @@ pub mod view_element {
         }
     }
 
-    #[cfg_attr(feature = "debug-derive", derive(Debug))]
-    #[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+    #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
     pub struct AliasLinkEnd {
         #[serde(rename = "@uid")]
         pub uid: i32,
     }
 
-    #[cfg_attr(feature = "debug-derive", derive(Debug))]
-    #[derive(Clone, PartialEq, Eq, Serialize)]
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
     pub enum LinkEnd {
         #[serde(rename = "$value")]
         Named(String),
@@ -620,8 +611,7 @@ pub mod view_element {
         Alias(AliasLinkEnd),
     }
 
-    #[cfg_attr(feature = "debug-derive", derive(Debug))]
-    #[derive(Clone, PartialEq, Deserialize, Serialize)]
+    #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
     pub struct Link {
         #[serde(rename = "@uid")]
         pub uid: Option<i32>,
@@ -1233,8 +1223,7 @@ pub mod view_element {
         }
     }
 
-    #[cfg_attr(feature = "debug-derive", derive(Debug))]
-    #[derive(Clone, PartialEq, Deserialize, Serialize)]
+    #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
     pub struct Module {
         #[serde(rename = "@name")]
         pub name: String,
@@ -1308,8 +1297,7 @@ pub mod view_element {
         }
     }
 
-    #[cfg_attr(feature = "debug-derive", derive(Debug))]
-    #[derive(Clone, PartialEq, Deserialize, Serialize)]
+    #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
     pub struct Alias {
         pub of: String,
         #[serde(rename = "@of_uid")]
@@ -1404,8 +1392,7 @@ pub mod view_element {
         }
     }
 
-    #[cfg_attr(feature = "debug-derive", derive(Debug))]
-    #[derive(Clone, PartialEq, Deserialize, Serialize)]
+    #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
     pub struct Cloud {
         pub uid: i32,
         pub flow_uid: i32,
@@ -1454,8 +1441,7 @@ pub mod view_element {
 
     /// Visual container for grouping related model elements.
     /// In XMILE, x/y are top-left coordinates.
-    #[cfg_attr(feature = "debug-derive", derive(Debug))]
-    #[derive(Clone, PartialEq, Deserialize, Serialize)]
+    #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
     pub struct Group {
         #[serde(rename = "@name")]
         pub name: String,
@@ -1537,8 +1523,7 @@ pub mod view_element {
     }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ViewObject {
     Aux(view_element::Aux),
@@ -1689,8 +1674,7 @@ impl ViewObject {
     }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct View {
     #[serde(rename = "@next_uid")]
     pub next_uid: Option<i32>, // used internally

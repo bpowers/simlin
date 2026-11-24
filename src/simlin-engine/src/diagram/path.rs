@@ -35,8 +35,7 @@ pub(crate) const OP_CLOSE: f64 = 3.0;
 const MAX_ARC_SEGMENT_RADIANS: f64 = PI / 6.0;
 
 /// Builds a flat scene path.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct PathBuilder {
     d: Vec<f64>,
     current: Option<Point>,

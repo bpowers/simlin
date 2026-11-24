@@ -73,8 +73,7 @@ pub(super) fn axis_reordering(
 }
 
 // simplified/lowered from ast::UnaryOp version
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Eq, Hash, Copy, Clone)]
+#[derive(Debug, PartialEq, Eq, Hash, Copy, Clone)]
 pub enum UnaryOp {
     Not,
     Transpose,

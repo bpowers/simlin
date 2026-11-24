@@ -8,16 +8,14 @@
 //! to `datamodel::View` structures.
 
 /// Version of the Vensim sketch format.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewVersion {
     V300,
     V364,
 }
 
 /// Header information for a view.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ViewHeader {
     pub version: ViewVersion,
     pub title: String,
@@ -28,8 +26,7 @@ pub struct ViewHeader {
 
 /// A variable element in the view (type 10).
 /// Represents stocks, flows, and auxiliaries.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct VensimVariable {
     pub uid: i32,
     pub name: String,
@@ -53,8 +50,7 @@ pub struct VensimVariable {
 /// A valve element in the view (type 11).
 /// Valves represent the flow control point and always precede their
 /// associated flow variable in the element list.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct VensimValve {
     pub uid: i32,
     pub name: String,
@@ -75,8 +71,7 @@ pub struct VensimValve {
 /// Comments include text annotations and clouds (flow boundaries). Vensim
 /// stores an input/output object (a slider, a graph) as a comment too; see
 /// [`VensimComment::io_object`].
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct VensimComment {
     pub uid: i32,
     pub text: String,
@@ -95,8 +90,7 @@ pub struct VensimComment {
 }
 
 /// What an input/output object shows, from the `tpos` field of its record.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IoObject {
     /// An input that sets a variable (`tpos` 0).
     Slider,
@@ -144,8 +138,7 @@ impl VensimComment {
 
 /// A connector element in the view (type 1).
 /// Connectors represent causal links between variables.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct VensimConnector {
     pub uid: i32,
     pub from_uid: i32,
@@ -165,8 +158,7 @@ pub struct VensimConnector {
 }
 
 /// A parsed view element.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub enum VensimElement {
     Variable(VensimVariable),
     Valve(VensimValve),
@@ -267,8 +259,7 @@ impl VensimElement {
 }
 
 /// A parsed Vensim view with all its elements.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct VensimView {
     pub header: ViewHeader,
     /// Elements by UID. A map, never a vector sized by a UID: a UID is a
@@ -287,8 +278,7 @@ pub struct VensimView {
 
 /// A sketch record the parser does not read: its type number and its third
 /// field, which for an image is the file it shows.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct SkippedRecord {
     pub kind: i32,
     pub name: String,

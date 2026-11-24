@@ -25,8 +25,7 @@ use crate::datamodel::{self, Variable};
 pub(crate) const MAX_CHANGED_NAMES: usize = 30;
 
 /// A variable's fields, as a change report names them.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ChangedField {
@@ -67,8 +66,7 @@ impl ChangedField {
 }
 
 /// One variable whose record changed, and which of its fields did.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChangedVariable {
@@ -80,8 +78,7 @@ pub struct ChangedVariable {
 /// and an outline cuts the lists further to fit its budget
 /// ([`Changes::fitted`]), with the total counted beside a list when either
 /// binds.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Default, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Changes {

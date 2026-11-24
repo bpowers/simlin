@@ -167,8 +167,7 @@ impl Workspace<'_> {
 /// A tool's answer: JSON, whether it is a refusal for the agent to read and
 /// repair rather than a result, and for an edit that was made, the project
 /// as it leaves it.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ToolOutput {
     pub json: String,
     pub is_error: bool,
@@ -529,8 +528,7 @@ impl From<ToolError> for RunUnavailable {
 /// A refusal: what rule the call broke and how to repair it. Every tool
 /// refuses in this one shape, which the catalog publishes beside the tools'
 /// own schemas (`refusalSchema`).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schema", schemars(rename = "Refusal", deny_unknown_fields))]
 pub(crate) struct ToolError {

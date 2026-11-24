@@ -748,8 +748,7 @@ fn build_time_array(results: &crate::results::Results) -> Vec<f64> {
 /// One causal link of a model, as [`model_links`] reports it: its endpoints,
 /// its statically analyzed polarity, and, for a run under the LTM overlay, its
 /// link-score series.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ModelLink {
     pub from: String,
     pub to: String,
@@ -929,8 +928,7 @@ fn attach_relative_scores(links: Vec<ModelLink>) -> Vec<ModelLink> {
 }
 
 /// One read of a model, as [`model_reads`] reports it: `to` reads `from`.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelRead {
     pub from: String,
     pub to: String,

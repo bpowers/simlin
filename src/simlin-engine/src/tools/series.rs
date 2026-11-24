@@ -62,8 +62,7 @@ pub(crate) fn round(x: f64) -> f64 {
 }
 
 /// A value at a time.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Point {
@@ -83,8 +82,7 @@ pub struct Point {
 /// negative exactly when a number reported of it is negative. A series that
 /// is the residue of quantities that cancel (`behavior::classify_at`) is at
 /// rest, and reports the residue it holds.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct SeriesCore {
@@ -336,8 +334,7 @@ fn scale_of_a_sum(
 }
 
 /// A variable's (or one element's) behavior in a run.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct SeriesSummary {
@@ -567,8 +564,7 @@ pub(crate) fn element_key(element: &str) -> String {
         .join(",")
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ReadBehaviorInput {
@@ -583,8 +579,7 @@ pub struct ReadBehaviorInput {
     pub runs: Vec<String>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ReadBehaviorOutput {
@@ -614,8 +609,7 @@ pub struct ReadBehaviorOutput {
 
 /// What a `read_behavior` answer left out to fit its budget, in the order it
 /// leaves things out.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct LeftOut {
@@ -635,8 +629,7 @@ pub struct LeftOut {
     pub variables_count: Option<usize>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct OmittedElements {
@@ -644,8 +637,7 @@ pub struct OmittedElements {
     pub count: usize,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct StaleRun {

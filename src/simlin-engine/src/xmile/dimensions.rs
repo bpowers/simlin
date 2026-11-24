@@ -18,8 +18,7 @@ use quick_xml::events::{BytesStart, Event};
 /// e.g., `<simlin:elem from="A1" to="B2"/>`
 /// Note: serde rename uses local name without prefix because quick-xml strips
 /// namespace prefixes during deserialization (same behavior as isee:maps_to).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct MappingElem {
     #[serde(rename = "@from")]
     pub from: String,
@@ -31,8 +30,7 @@ pub struct MappingElem {
 /// e.g., `<simlin:mapping target="DimB"><simlin:elem from="A1" to="B2"/></simlin:mapping>`
 /// Note: serde rename uses local name without prefix because quick-xml strips
 /// namespace prefixes during deserialization (same behavior as isee:maps_to).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct MappingElement {
     #[serde(rename = "@target")]
     pub target: String,
@@ -40,8 +38,7 @@ pub struct MappingElement {
     pub entries: Option<Vec<MappingElem>>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Dimension {
     #[serde(rename = "@name")]
     pub name: String,
@@ -230,15 +227,13 @@ impl From<datamodel::Dimension> for Dimension {
     }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Index {
     #[serde(rename = "@name")]
     pub name: String,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct GraphicalFunctionScale {
     #[serde(rename = "@min")]
     pub min: f64,
@@ -264,8 +259,7 @@ impl From<datamodel::GraphicalFunctionScale> for GraphicalFunctionScale {
     }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GraphicalFunctionKind {
     Continuous,
@@ -328,8 +322,7 @@ impl From<datamodel::GraphicalFunctionKind> for GraphicalFunctionKind {
     }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Gf {
     // `name` and `type` are attributes (XMILE 1.0 section 4.1.3: `name="..."`,
     // `type="..."`), which is how `write_xml` writes them; the `@` is what

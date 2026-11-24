@@ -42,7 +42,7 @@ const VALVE_MARGIN: f64 = 10.0;
 const BEND_STEP: f64 = 2.0 * VALVE_MARGIN;
 
 /// One end of a flow whose route is placed after the views are merged.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Debug)]
 pub(super) enum RouteEnd {
     /// Placed by the sketch: the pipe end, attached to its stock or cloud.
     Point(FlowPoint),
@@ -56,15 +56,14 @@ pub(super) enum RouteEnd {
 }
 
 /// A flow whose ends are not all placed by the sketch.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Debug)]
 pub(super) struct PendingFlowRoute {
     pub(super) flow_uid: i32,
     pub(super) source: RouteEnd,
     pub(super) sink: RouteEnd,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 enum Axis {
     Horizontal,
     Vertical,
@@ -166,7 +165,7 @@ pub(super) fn route_pending_flows(elements: &mut Vec<ViewElement>, pending: &[Pe
 /// A route end with its stock's position resolved. A stock uid with no stock
 /// element (not produced by the importer, but not assumed away) is an end with
 /// no stock.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Debug)]
 enum End<'a> {
     Point(&'a FlowPoint),
     CloudNearStock { end: (f64, f64), stock: (f64, f64) },

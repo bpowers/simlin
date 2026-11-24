@@ -73,8 +73,7 @@ use super::{
 /// The most operations one edit takes.
 pub(crate) const MAX_OPERATIONS: usize = 24;
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct EditModelInput {
@@ -90,8 +89,7 @@ pub struct EditModelInput {
 /// One operation of an edit. An equation names a variable as the equation
 /// language spells it: `room_heat`, or `"Room Heat"` in quotes, for a
 /// variable shown as Room Heat.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EditOperation {
@@ -308,8 +306,7 @@ impl EditOperation {
 }
 
 /// How a lookup reads between and past its points.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum LookupShape {
@@ -318,8 +315,7 @@ pub enum LookupShape {
     Discrete,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct EditModelOutput {
@@ -373,8 +369,7 @@ pub struct EditModelOutput {
 /// (`refusedEdit` in the one refusal shape): the rule that refused it and
 /// what the edit would have done, for the agent to repair its operations.
 /// Nothing changed.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RefusedEdit {
@@ -405,8 +400,7 @@ fn is_zero(n: &usize) -> bool {
 }
 
 /// A rule of the gate, as a refusal names the one that refused an edit.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum GateRule {
@@ -436,8 +430,7 @@ impl GateRule {
     ];
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChangeLine {
@@ -455,8 +448,7 @@ pub struct ChangeLine {
     pub to: Option<String>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeAction {
@@ -470,8 +462,7 @@ pub enum ChangeAction {
 }
 
 /// A diagnostic the edit adds or leaves, or would.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct EditDiagnostic {
@@ -493,8 +484,7 @@ pub struct EditDiagnostic {
 }
 
 /// A loop's name, as a model's loop metadata gives it.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 struct LoopName {
     name: String,
     description: String,
@@ -1267,8 +1257,7 @@ fn after_ai_edit(state: Option<AiState>) -> AiState {
 }
 
 /// Which of a variable's equations an edit wrote.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 enum Authored {
     /// Its equation whole: every element's, or its lookup.
     Whole,
@@ -2226,8 +2215,7 @@ fn lookup(
 /// entry point passes says what it refuses, and nothing is refused by a rule
 /// it did not ask for. A run that would cost more than a run may is refused
 /// under every policy: that is the session's limit, not the edit's.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct GatePolicy {
     /// Refuse an error the project did not have, in any of its models, and
     /// an error in an equation the edit writes.
@@ -2265,8 +2253,7 @@ impl GatePolicy {
 }
 
 /// Why the gate lists an error.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Listed {
     /// Its variable has more errors of its code than it had: an error the
     /// project did not have.

@@ -111,8 +111,7 @@ pub(crate) const MAX_PARTITIONS: usize = 6;
 /// The most stocks a partition names.
 pub(crate) const MAX_STOCKS: usize = 12;
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AnalyzeLoopsInput {
@@ -133,8 +132,7 @@ pub struct AnalyzeLoopsInput {
 }
 
 /// Where an answer's loops come from.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum LoopBasis {
@@ -151,8 +149,7 @@ pub enum LoopBasis {
 /// one it showed at least 99% of the time, weighted by its score, and
 /// undetermined otherwise; from structure, a loop with a link whose sign the
 /// engine cannot tell is undetermined.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum LoopPolarityName {
@@ -185,8 +182,7 @@ impl From<LoopPolarity> for LoopPolarityName {
     }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct AnalyzeLoopsOutput {
@@ -240,8 +236,7 @@ pub struct AnalyzeLoopsOutput {
 
 /// A cycle partition: stocks connected by feedback, and the loops among them,
 /// which compete for dominance with each other and no others.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct PartitionReport {
@@ -276,8 +271,7 @@ pub struct PartitionReport {
 /// together (SIR's balancing loops after the epidemic's peak) the span
 /// changes a few steps after the turn, when one of them alone passes the
 /// loop that led before.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct DominanceSpan {
@@ -286,8 +280,7 @@ pub struct DominanceSpan {
     pub leaders: Vec<LoopShare>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct LoopShare {
@@ -300,8 +293,7 @@ pub struct LoopShare {
     pub share: f64,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct LoopReport {
@@ -332,8 +324,7 @@ pub struct LoopReport {
     pub share: Option<f64>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ChainLink {
@@ -353,8 +344,7 @@ pub struct ChainLink {
 }
 
 /// Loops the analysis has and the answer does not list.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct OmittedLoops {
@@ -366,8 +356,7 @@ pub struct OmittedLoops {
 }
 
 /// The model's loops that are not among a run's.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct InactiveLoops {
@@ -377,8 +366,7 @@ pub struct InactiveLoops {
     pub other_loops: usize,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct CutReport {
@@ -392,8 +380,7 @@ pub struct CutReport {
     pub other_loops: usize,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct CutLink {

@@ -294,8 +294,7 @@ pub(crate) fn arc_circle(
 /// A straight connector's drawn geometry: the segment between the two
 /// elements' boundaries along the bearing of their centers, and that bearing
 /// in degrees for the arrowhead.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct StraightGeometry {
     pub start: Point,
     pub end: Point,
@@ -366,8 +365,7 @@ fn render_straight_line(g: &StraightGeometry, dashed: bool) -> String {
 /// raw f64 (no pre-rounding): rounding happens only at the `js_format_number`
 /// boundary in `render_arc`, so the SVG string stays byte-for-byte identical
 /// to the pre-factor-out code (and to the TypeScript renderer).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct ArcGeometry {
     /// SVG path start (= `from_visual`, the source element center).
     pub start: Point,
@@ -536,7 +534,7 @@ pub(crate) fn connector_polyline(
 /// `MultiPoint` link, or an arc whose circle cannot be constructed). This is
 /// the one statement of that choice; `render_connector`, the scene, and
 /// `connector_polyline` all read it.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Debug)]
 pub(crate) enum ConnectorGeometry {
     Straight(StraightGeometry),
     Arc(ArcGeometry),

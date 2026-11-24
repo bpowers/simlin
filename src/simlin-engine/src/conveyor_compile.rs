@@ -756,8 +756,7 @@ pub(crate) fn const_scalar_expr(expr: &str) -> Option<f64> {
 
 /// The outcome of probing a conveyor stock's initial `<eqn>` for the §7.2
 /// explicit comma-separated init-list form (docs/design/conveyors.md §7.2).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum InitListProbe {
     /// Not list-shaped: no top-level comma structure. A comma inside a call or
     /// subscript (`MAX(a, b)`, `arr[a, b]`) splits into fragments that do not
@@ -837,8 +836,7 @@ pub(crate) fn probe_init_list(eqn: &str) -> InitListProbe {
 /// The parsed §7.2 explicit init list(s) of a conveyor stock's `<eqn>`,
 /// resolved from the equation's array shape: which belts get a direct list
 /// fill, and from which list.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum InitListSpec {
     /// One list shared by every element belt: a scalar stock's list, or an
     /// apply-to-all arrayed list (one equation for the whole array, so every
@@ -2349,12 +2347,8 @@ fn param_equation(expr: &str, dims: &[DimensionName]) -> Equation {
 }
 
 /// The resolved source of a leak flow's fraction: §3.3's two encodings, in
-/// the order [`leak_fraction_source`] applies them. `Debug` is
-/// `debug-derive`-gated because the `FlowEquation` variant borrows a
-/// [`datamodel::Equation`], whose own `Debug` is gated the same way (and
-/// libsimlin builds the engine with `default-features = false`).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+/// the order [`leak_fraction_source`] applies them.
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum LeakFractionSource<'a> {
     /// A non-empty value-bearing `<leak>expr</leak>` fraction (one shared
     /// expression; for an arrayed conveyor it is applied to all elements).

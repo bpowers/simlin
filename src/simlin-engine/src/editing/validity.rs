@@ -16,8 +16,7 @@ use super::terminal::{Terminal, Terminals, face_attachment, face_of_endpoint};
 /// How a path violates G2-G6, least severe first. When nothing is valid the
 /// fallback keeps the least severe fault: G6 (crossing) is given up before the
 /// G3 minima (short), and those before G2/G4/G5 (structure).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum Fault {
     None,
     Crossing,
@@ -45,8 +44,7 @@ pub(crate) fn bodies_apart(terminals: &Terminals) -> bool {
         .overlaps(terminals.sink.body().inflate(MIN_SEGMENT))
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct PathQuality {
     /// `Fault::None` when the path holds G2-G6.
     pub fault: Fault,

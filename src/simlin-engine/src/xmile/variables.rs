@@ -18,8 +18,7 @@ use super::model::{Module, NonNegative, access_from, can_be_module_input, visibi
 
 /// Vendor extension element for external data source metadata.
 /// Serialized as `<simlin:data_source kind="..." file="..." .../>`.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct DataSourceElement {
     #[serde(rename = "@kind")]
     pub kind: String,
@@ -107,8 +106,7 @@ impl ToXml<XmlWriter> for DataSourceElement {
 /// `eqn` is optional (GH #907). An absent eqn converts to an empty element
 /// equation in the datamodel -- the same "no functional input" encoding a
 /// whole lookup-only variable uses (`variable::is_lookup_only`).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct VarElement {
     #[serde(rename = "@subscript")]
     pub subscript: String,
@@ -139,8 +137,7 @@ impl ToXml<XmlWriter> for VarElement {
 /// The `<len>` transit time is required; the rest are optional. Boolean sub-feature
 /// attributes are `Option<bool>` so an absent attribute maps to the documented
 /// default (not blindly `false`) during datamodel conversion.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Conveyor {
     pub len: String,
     pub capacity: Option<String>,
@@ -194,22 +191,19 @@ impl ToXml<XmlWriter> for Conveyor {
 
 /// The `<queue/>` marker on a queue stock. A bare marker with no options
 /// (XMILE §4.2; docs/design/queues.md §3.2). Present iff the stock is a queue.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Queue {}
 
 /// A `<leak>` element on a conveyor outflow. A bare `<leak/>` marker deserializes
 /// to `value: None` (the fraction is then carried by the flow's `<eqn>`); a
 /// value-bearing `<leak>expr</leak>` deserializes to `value: Some(expr)`.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Leak {
     #[serde(rename = "$text")]
     pub value: Option<String>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Stock {
     #[serde(rename = "@name")]
     pub name: String,
@@ -544,8 +538,7 @@ impl From<datamodel::Stock> for Stock {
     }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Flow {
     #[serde(rename = "@name")]
     pub name: String,
@@ -841,8 +834,7 @@ impl From<datamodel::Flow> for Flow {
     }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Aux {
     #[serde(rename = "@name")]
     pub name: String,
@@ -1019,8 +1011,7 @@ impl From<datamodel::Aux> for Aux {
     }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Var {
     Stock(Stock),

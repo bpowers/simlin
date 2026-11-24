@@ -22,7 +22,6 @@ crate-type = ["staticlib", "rlib", "cdylib"]
 # stack plus an embedded font is ~17% of the optimized wasm binary, and no
 # browser code calls simlin_project_render_png.
 default = ["png_render", "agent_tools"]
-debug-derive = ["simlin-engine/debug-derive"]
 file_io = ["simlin-engine/file_io"]
 ext_data = ["simlin-engine/ext_data"]
 png_render = ["simlin-engine/png_render"]

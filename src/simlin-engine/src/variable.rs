@@ -38,8 +38,7 @@ use crate::{ErrorCode, eqn_err, units};
 /// `f64::from_str` accepts `"NaN"` in a `<ypts>` list unvalidated. Accepted
 /// knowingly, on the same terms as the bytecode types: see the "Float equality
 /// in this crate" section on [`crate::ast::Literal`].
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Table {
     pub x: Vec<f64>,
     pub y: Vec<f64>,
@@ -109,8 +108,7 @@ pub struct ModuleInput {
 /// reads. Nothing rewrites the body to get there: a rewrite is a second
 /// resolution rule, and the two drift exactly where the rules are non-trivial
 /// (GH #1035).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ElementScope {
     pub dims: Vec<CanonicalDimensionName>,
     pub element: Vec<CanonicalElementName>,
@@ -126,8 +124,7 @@ pub struct ElementScope {
 /// `Aux` covers both auxiliaries and flows (`is_flow` says which) because they
 /// lower identically: one slot per element holding the value of one equation.
 /// A flow is distinguished only by where a stock's integration reads it.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum VarKind<MI = ModuleInput, E = Expr2> {
     Stock {
         init_ast: Option<Ast<E>>,
@@ -154,8 +151,7 @@ pub enum VarKind<MI = ModuleInput, E = Expr2> {
     },
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Variable<MI = ModuleInput, E = Expr2> {
     pub ident: Ident<Canonical>,
     pub units: Option<datamodel::UnitMap>,

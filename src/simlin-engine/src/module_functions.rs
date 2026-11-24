@@ -35,8 +35,7 @@ use crate::{datamodel, model_err};
 /// The unified answer for "what does this module-function expand into,"
 /// serving both stdlib functions and project macros.
 //
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ModuleFunctionDescriptor {
     /// The `datamodel::Model.name` of the target model -- `"stdlib⁚smth1"`
     /// for a stdlib function, or the macro's canonical model name.
@@ -270,8 +269,7 @@ pub(crate) enum MacroCallResolution<'a> {
 /// A per-project macro registry, built once per compile from all of the
 /// project's models. Answers "is this call name a project macro, and if so
 /// what is its [`ModuleFunctionDescriptor`]?".
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct MacroRegistry {
     /// canonical macro name -> descriptor
     macros: HashMap<String, ModuleFunctionDescriptor>,

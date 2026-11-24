@@ -47,15 +47,7 @@ use std::collections::VecDeque;
 /// module invariant is `Σ batches == the queue's reported value`, which
 /// [`QueueState::total`] computes directly, so no separate running total is
 /// stored (there is nothing to keep in sync).
-///
-/// `Debug` is gated on the `debug-derive` feature, exactly like the sibling
-/// runtime side-table type [`crate::conveyor::ConveyorState`]: both live in the
-/// VM's per-instance side tables, and the VM does not derive `Debug`
-/// unconditionally (if it did, `ConveyorState`'s gated `Debug` would already
-/// break the no-default-features WASM build), so gating keeps `Debug` out of
-/// that build for binary size without any transitivity hazard.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct QueueState {
     /// The FIFO of batch volumes: front = index 0 = oldest, back = newest.
     /// Invariant: every entry is `> 0` (admit never appends a non-positive

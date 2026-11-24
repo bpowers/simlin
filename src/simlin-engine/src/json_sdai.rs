@@ -30,23 +30,20 @@ fn is_none<T>(val: &Option<T>) -> bool {
     val.is_none()
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct Point {
     pub x: f64,
     pub y: f64,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct GraphicalFunction {
     pub points: Vec<Point>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct StockFields {
     pub name: String,
@@ -69,8 +66,7 @@ pub struct StockFields {
     pub uid: Option<i32>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct FlowFields {
     pub name: String,
@@ -89,8 +85,7 @@ pub struct FlowFields {
     pub uid: Option<i32>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct AuxiliaryFields {
     pub name: String,
@@ -109,8 +104,7 @@ pub struct AuxiliaryFields {
     pub uid: Option<i32>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(tag = "type", rename_all = "lowercase")]
 #[cfg_attr(feature = "schema", schemars(tag = "type", rename_all = "lowercase"))]
@@ -123,8 +117,7 @@ pub enum Variable {
 /// Polarity of a causal relationship in a system dynamics model.
 /// Indicates whether an increase in the source variable causes an
 /// increase (+), decrease (-), or unknown effect (?) on the target.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub enum Polarity {
     /// Positive polarity: increase in source causes increase in target
@@ -148,8 +141,7 @@ impl std::fmt::Display for Polarity {
     }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct Relationship {
     #[serde(skip_serializing_if = "is_none")]
@@ -162,8 +154,7 @@ pub struct Relationship {
     pub polarity_reasoning: Option<String>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct SimSpecs {
     #[serde(rename = "startTime")]
@@ -184,8 +175,7 @@ pub struct SimSpecs {
     pub method: Option<String>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct SdaiModel {
     pub variables: Vec<Variable>,

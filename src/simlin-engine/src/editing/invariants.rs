@@ -39,8 +39,7 @@ const HALF_WIDTH: f64 = STOCK_WIDTH / 2.0;
 const HALF_HEIGHT: f64 = STOCK_HEIGHT / 2.0;
 
 /// One arm of the flow invariants.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FlowArm {
     MinPoints,
     NonFinite,
@@ -158,8 +157,7 @@ pub enum Mode<'a> {
     Tolerant,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FlowViolation {
     pub arm: FlowArm,
     /// The flow's uid; for `NonPositiveUid`, the offending element's.

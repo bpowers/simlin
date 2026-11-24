@@ -237,8 +237,7 @@ pub fn is_view_only_patch(project: &datamodel::Project, patch: &ProjectPatch) ->
 
 /// A variable a patch renamed: in `model`, the variable whose canonical
 /// identifier was `from` is now `to`.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Renamed {
     pub model: String,
@@ -247,8 +246,7 @@ pub struct Renamed {
 }
 
 /// A variable of `model`, by canonical identifier.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct VariableRef {
     pub model: String,
@@ -276,8 +274,7 @@ pub struct VariableRef {
 /// listed; a variable created and deleted within the patch is not listed.
 /// No `from`, `to`, deleted or created name repeats within a model, and each
 /// list is sorted by model and name.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PatchReport {
     pub renamed: Vec<Renamed>,
     pub deleted: Vec<VariableRef>,
@@ -285,8 +282,7 @@ pub struct PatchReport {
 }
 
 /// What the variable holding a name partway through a patch was before it.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Origin {
     /// The variable that had this name before the patch.
     Was(String),
@@ -299,8 +295,7 @@ enum Origin {
 /// The identities a patch, or an edit made as several patches, has moved so
 /// far, by `(model, canonical name)` as they stand: a name not held here is
 /// held by the variable that had it before.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct Identities {
     names: HashMap<(String, String), Origin>,
     deleted: Vec<VariableRef>,

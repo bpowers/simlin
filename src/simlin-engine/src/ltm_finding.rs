@@ -342,7 +342,7 @@ const LTM_LINK_SEP: char = '→';
 // --- Public types ---
 
 /// A loop found by discovery, with its scores over time.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Debug)]
 pub struct FoundLoop {
     /// The loop structure (reuses existing Loop type from ltm.rs)
     pub loop_info: Loop,
@@ -421,7 +421,7 @@ pub struct DiscoveredPartition {
 /// wall-clock time and report partial results rather than hang. See
 /// `enumeration_complete` below for the completeness statement of an
 /// un-truncated run.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Debug)]
 pub struct DiscoveryResult {
     /// Loops discovered (ranked, filtered, and ID-assigned).
     pub loops: Vec<FoundLoop>,
@@ -1097,8 +1097,7 @@ fn trim_synthetic_aggs_from_loop_links(links: &[Link]) -> Option<Vec<Link>> {
 /// owns whatever string/score representation it ultimately serializes.
 /// `score` is `None` for a structural-only caller (no simulation results) and
 /// `Some(series)` for an LTM run; the collapse preserves the distinction.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct CollapsibleLink {
     pub from: Ident<Canonical>,
     pub to: Ident<Canonical>,
@@ -1819,7 +1818,7 @@ fn tarjan_scc_ids_into(
 /// Per-sampled-timestep statistics about the discovery runtime graph.
 ///
 /// See [`DiscoveryGraphStats`].
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Debug)]
 pub struct DiscoveryStepStats {
     /// The sampled timestep index.
     pub step: usize,
@@ -1854,7 +1853,7 @@ pub struct DiscoveryStepStats {
 /// what makes it usable to explain a discovery cost or a completeness verdict
 /// after the fact, and it is the diagnostics surface behind
 /// `examples/clearn_discover.rs`.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Debug)]
 pub struct DiscoveryGraphStats {
     /// Total nodes in the runtime graph (link-score edge endpoints + stocks).
     pub n_nodes: usize,

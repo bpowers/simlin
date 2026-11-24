@@ -12,8 +12,7 @@ use crate::{Error, sim_err};
 /// Represents a subscript operation after parsing but before view construction.
 /// Used to normalize different subscript syntaxes into a uniform representation
 /// that can be processed by build_view_from_ops.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum IndexOp {
     /// Range subscript with start and end (0-based, end exclusive).
     /// Example: `arr[2:5]` becomes `Range { start: 1, end: 5, .. }`.

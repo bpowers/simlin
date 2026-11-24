@@ -69,8 +69,7 @@ fn test_loc_basics() {
     assert_eq!(Loc::new(1, 7), a.union(&c));
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Eq, Hash, Clone)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
 /// An unresolved builtin call: the function's lowercased name and its
 /// arguments. The arguments are a `Box<[Expr]>` rather than a `Vec` so a
 /// node holds exactly the arguments it has: an argument list is fixed once
@@ -79,8 +78,7 @@ fn test_loc_basics() {
 /// (`docs/design/engine-performance.md`, C7).
 pub struct UntypedBuiltinFn<Expr>(pub String, pub Box<[Expr]>);
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum BuiltinFn<Expr> {
     Lookup(Box<Expr>, Box<Expr>, Loc),
     LookupForward(Box<Expr>, Box<Expr>, Loc),
@@ -171,8 +169,7 @@ pub enum BuiltinFn<Expr> {
 }
 
 /// How one argument position takes part in array lowering.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArgKind {
     /// A scalar value, evaluated once per element of the enclosing equation.
     Scalar,
@@ -226,8 +223,7 @@ pub enum ArgKind {
 
 /// The shape of a builtin's result, as the apply-to-all hoister and the array
 /// materializer read it.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResultKind {
     /// One number: the reducers, `VECTOR SELECT`, the lookups, the nullaries.
     Scalar,
@@ -245,8 +241,7 @@ pub enum ResultKind {
 /// run-invariance classifier (`compiler::invariance`); `Snapshot` and
 /// `Lagged` are the two forms whose arguments the dependency walk records
 /// under a lag (`variable::DepLag`).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Invariance {
     /// A pure function of its arguments -- invariant iff every argument is.
     /// The fixed time globals `DT`/`INITIAL TIME`/`FINAL TIME` are here too:
@@ -268,7 +263,7 @@ pub enum Invariance {
 /// argument expressions themselves. One `static` per [`BuiltinFn`] variant,
 /// reached through [`BuiltinFn::signature`] and listed in
 /// [`BuiltinSig::ALL`].
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Debug)]
 pub struct BuiltinSig {
     /// The canonical lowercase name, as the lexer produces it and as
     /// [`BuiltinFn::name`] reports it.

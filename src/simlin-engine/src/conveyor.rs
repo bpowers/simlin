@@ -113,8 +113,7 @@ pub fn slat_count(transit: f64, dt: f64) -> usize {
 /// Static per-leak-flow configuration. The leak *fraction* is dynamic (re-read
 /// every DT, §5.1) and passed in per step; only the zone and the integer-unit
 /// flag are fixed here.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LeakConfig {
     /// Fractional belt position where the leak zone starts, from the entry side
     /// (§5.3). Default 0 (entry).
@@ -136,8 +135,7 @@ impl Default for LeakConfig {
 }
 
 /// One slat of the belt. Index 0 is the exit (front); the back is the entry.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 struct Slat {
     /// Material in this slat.
     content: f64,
@@ -160,8 +158,7 @@ impl Slat {
 
 /// Per-conveyor runtime state (§4.2). One instance per scalar conveyor (per
 /// array element for arrayed conveyors).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ConveyorState {
     dt: f64,
     exponential_leak: bool,
@@ -211,8 +208,7 @@ pub struct PhaseAInputs<'a> {
 }
 
 /// Phase A result: the volumes leaving the belt this DT.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct PhaseAResult {
     /// Primary-outflow volume this DT (0 when arrested or the exit is held).
     pub out_vol: f64,
@@ -238,8 +234,6 @@ pub struct PhaseAResult {
 /// weights `w_i` (i = 0..d-1, exit-first) the caller pre-evaluated from the
 /// `<isee:distrib_eq>` graphical function or array; a caller that cannot resolve
 /// them passes an empty vector, which falls back to `Beginning`.
-// Debug is unconditional (not gated on debug-derive): ConveyorPlan/InflowPlan
-// and their metas derive Debug unconditionally and embed a Placement.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Placement {
     /// All of `A` at the entry slat (depth `d`). The XMILE default.
@@ -282,8 +276,7 @@ pub struct PhaseBInputs<'a> {
 }
 
 /// Phase B result: the admitted inflow rates this DT.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct PhaseBResult {
     /// Total admitted inflow *volume* this DT (conveyor-driven + equation).
     pub admitted: f64,

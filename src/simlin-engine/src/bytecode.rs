@@ -222,8 +222,7 @@ impl DimensionInfo {
 /// This replaces an `is_temp: bool`, so that adding the snapshot regions
 /// (GH #995) made every dereference site a compile error until it said which
 /// region it meant, rather than silently keeping the old two-way split.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ViewStorage {
     /// `curr[base_off + ..]` -- this timestep's values.
     Curr,
@@ -253,8 +252,7 @@ pub struct RuntimeSparseMapping {
 
 /// A runtime array view used during VM execution.
 /// More dynamic than compile-time ArrayView - supports incremental building.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeView {
     /// Base offset: a slot offset for the three chunk-shaped regions
     /// (`Curr`/`Prev`/`Initial`), a temp id for `Temp`
@@ -1318,8 +1316,7 @@ macro_rules! declare_opcodes {
         ///
         /// Declared by [`opcode_table!`], which also states each variant's effect
         /// on the arithmetic stack.
-        #[cfg_attr(feature = "debug-derive", derive(Debug))]
-        #[derive(Clone, Copy, PartialEq)]
+        #[derive(Debug, Clone, Copy, PartialEq)]
         pub(crate) enum Opcode {
             $( $(#[$meta])* $name $({ $( $(#[$fmeta])* $field: $ty ),* })?, )*
         }
@@ -1339,8 +1336,7 @@ macro_rules! declare_opcodes {
             }
 
             /// Static variant name, independent of payload. Used for bytecode-composition
-            /// profiling (opcode histograms) and human-readable diagnostics without
-            /// depending on the optional `debug-derive` Debug impl.
+            /// profiling (opcode histograms) and human-readable diagnostics.
             pub(crate) fn name(&self) -> &'static str {
                 match self {
                     $( Opcode::$name { .. } => stringify!($name), )*
@@ -1378,8 +1374,7 @@ opcode_table!(declare_opcodes);
 // Module and Array Declarations
 // ============================================================================
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ModuleDeclaration {
     pub(crate) model_name: Ident<Canonical>,
     /// The set of input names for this module instantiation.
@@ -1391,8 +1386,7 @@ pub struct ModuleDeclaration {
 
 /// A static array view for compile-time known subscripts.
 /// Stored in ByteCodeContext and referenced by ViewId.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StaticArrayView {
     /// Base variable offset within the region named by `storage` (a temp id
     /// when that is `ViewStorage::Temp`)
@@ -1470,8 +1464,7 @@ impl StaticArrayView {
 /// "Float equality in this crate" section on [`crate::ast::Literal`] for the
 /// position, the corrected premise behind GH #642, and what would change the
 /// decision.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ByteCodeContext {
     // === Existing fields ===
     /// Graphical function lookup tables
@@ -1590,8 +1583,7 @@ impl ByteCodeContext {
 /// equal. Both are accepted, knowingly -- see the "Float equality in this
 /// crate" section on [`crate::ast::Literal`] for the position, the corrected
 /// premise behind GH #642, and what would change the decision.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ByteCode {
     pub(crate) literals: Vec<f64>,
     pub(crate) code: Vec<Opcode>,
@@ -2358,15 +2350,12 @@ pub(crate) mod tests {
     fn every_row_names_itself_and_reports_its_jump() {
         let mut names: HashSet<&'static str> = HashSet::new();
         for row in rows() {
-            #[cfg(feature = "debug-derive")]
-            {
-                let debug = format!("{:?}", row.input);
-                let spelled: String = debug
-                    .chars()
-                    .take_while(|c| c.is_ascii_alphanumeric())
-                    .collect();
-                assert_eq!(row.input.name(), spelled, "{}: name", row.name);
-            }
+            let debug = format!("{:?}", row.input);
+            let spelled: String = debug
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric())
+                .collect();
+            assert_eq!(row.input.name(), spelled, "{}: name", row.name);
             assert!(
                 names.insert(row.input.name()),
                 "{}: duplicate variant name",
@@ -4442,8 +4431,7 @@ pub(crate) mod tests {
 
 /// A single variable's compiled initial-value bytecode, along with the
 /// data-buffer offsets it writes to (from AssignCurr nodes).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CompiledInitial {
     // Used for `set_value` error messages.
     #[allow(dead_code)]
@@ -4457,8 +4445,7 @@ pub struct CompiledInitial {
     pub(crate) bytecode: ByteCode,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CompiledModule {
     pub(crate) ident: Ident<Canonical>,
     pub(crate) n_slots: usize,

@@ -607,7 +607,7 @@ It is behind the `agent_tools` feature (default on; libsimlin's browser bundle l
 
 ## Cargo features and generated files
 
-Features: `debug-derive` (gates `derive(Debug)`; new types use `#[cfg_attr(feature = "debug-derive", derive(Debug))]`, and libsimlin builds the engine with `default-features = false`, so an unconditional derive on a type holding a gated one passes `cargo check -p simlin-engine` and fails the hook's wasm and pysimlin builds -- check with `cargo check -p simlin-engine --no-default-features`), `schema`, `ai_info`, `file_io` (CSV/filesystem providers; a production dependency kept out of wasm, always on for test targets via the self dev-dependency), `ext_data`, `png_render`, `ltm_bench`, `test-support`, `layout_eval`.
+Features: `schema`, `ai_info`, `file_io` (CSV/filesystem providers; a production dependency kept out of wasm, always on for test targets via the self dev-dependency), `ext_data`, `png_render`, `ltm_bench`, `test-support`, `layout_eval`.
 
 Generated, do not edit: `src/project_io.gen.rs` from `project_io.proto` (`pnpm build:gen-protobufs`) and `src/stdlib.gen.rs` from the repo-root `stdlib/*.stmx` (`pnpm rebuild-stdlib`).
 Both carry a hash that a test checks.

@@ -18,8 +18,7 @@ use std::cell::Cell;
 /// Unlike IndexExpr2, this type does NOT have a Wildcard variant.
 /// During the expr2 → expr3 lowering pass, all wildcards are resolved
 /// to explicit StarRange expressions based on the variable's dimensions.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum IndexExpr3 {
     /// Star range (*:dim or dim.*) - preserves dimension for iteration.
     /// This includes both user-specified star ranges AND wildcards that
@@ -98,8 +97,7 @@ impl IndexExpr3 {
 /// one rule, so a float-bearing variant added here cannot be a bare `f64` and
 /// then be copied down to a layer where it would matter. The bounds slot is
 /// `Expr2`'s [`NodeBounds`], which [`Self::from_expr2`] copies as it stands.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum Expr3 {
     // Core variants (similar to Expr2)
     Const(String, Literal, Loc),
@@ -437,8 +435,7 @@ impl Expr3 {
 ///
 /// `count()` is the number of distinct ids the fragment has issued, which is
 /// the length of its `temp_sizes` table.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct TempAllocator {
     /// The id the next `alloc` returns.
     next: Cell<u32>,

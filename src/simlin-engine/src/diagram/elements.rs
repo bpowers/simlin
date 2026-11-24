@@ -22,7 +22,7 @@ const UNKNOWN_ALIAS_LABEL: &str = "unknown alias";
 
 /// Everything a drawn auxiliary is made of: the SVG prints it and the scene
 /// display list reads it.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Debug)]
 pub(crate) struct AuxGeometry {
     /// The circles, back to front.
     pub circles: Vec<Circle>,
@@ -98,7 +98,7 @@ pub fn aux_bounds(element: &view_element::Aux) -> Rect {
 // --- Stock ---
 
 /// Everything a drawn stock is made of.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Debug)]
 pub(crate) struct StockGeometry {
     /// The rectangles, back to front.
     pub rects: Vec<Frame>,
@@ -188,7 +188,7 @@ pub fn stock_bounds(element: &view_element::Stock) -> Rect {
 // --- Module ---
 
 /// Everything a drawn module is made of.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Debug)]
 pub(crate) struct ModuleGeometry {
     pub rect: Frame,
     pub corner_radius: f64,
@@ -263,8 +263,7 @@ pub fn module_bounds(element: &view_element::Module) -> Rect {
 /// Where [`CLOUD_PATH`] is drawn for a cloud: the SVG
 /// `matrix(scale, 0, 0, scale, tx, ty)` that maps the outline's design box
 /// onto a circle of `CLOUD_RADIUS` around the cloud's center.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct CloudTransform {
     pub scale: f64,
     pub tx: f64,
@@ -323,7 +322,7 @@ pub fn cloud_bounds(element: &view_element::Cloud) -> Rect {
 // --- Alias ---
 
 /// Everything a drawn alias is made of.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Debug)]
 pub(crate) struct AliasGeometry {
     pub circle: Circle,
     pub label: LabelProps,
@@ -383,7 +382,7 @@ pub fn render_alias(element: &view_element::Alias, alias_of_name: Option<&str>) 
 // --- Group ---
 
 /// Everything a drawn group (sector box) is made of.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Debug)]
 pub(crate) struct GroupGeometry {
     pub rect: Frame,
     pub corner_radius: f64,

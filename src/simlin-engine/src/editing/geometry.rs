@@ -52,8 +52,7 @@ pub(crate) const HALF_WIDTH: f64 = STOCK_WIDTH / 2.0;
 pub(crate) const HALF_HEIGHT: f64 = STOCK_HEIGHT / 2.0;
 
 /// A point in model coordinates.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Point {
     pub x: f64,
     pub y: f64,
@@ -113,8 +112,7 @@ impl Positioned for FlowPoint {
 
 /// The axis a segment runs along: `X` for a horizontal segment, `Y` for a
 /// vertical one.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Axis {
     X,
     Y,
@@ -151,8 +149,7 @@ impl Axis {
 }
 
 /// A face of a stock.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Face {
     Left,
     Right,
@@ -165,8 +162,7 @@ impl Face {
 }
 
 /// One end of a flow.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FlowEnd {
     Source,
     Sink,
@@ -184,8 +180,7 @@ impl FlowEnd {
 }
 
 /// An axis-aligned box.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Bounds {
     pub min_x: f64,
     pub max_x: f64,

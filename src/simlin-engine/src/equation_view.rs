@@ -34,8 +34,7 @@ use crate::datamodel::{self, Equation};
 use crate::lexer::LexerType;
 
 /// One variable's equations.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VariableEquation {
     /// `stock`, `flow`, `aux` or `module`.
@@ -59,8 +58,7 @@ pub struct VariableEquation {
 }
 
 /// A dimension as a variable's cells are laid out over it.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DimensionView {
     pub name: String,
@@ -70,8 +68,7 @@ pub struct DimensionView {
 }
 
 /// What a cell holds.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum CellState {
     /// The element has an equation of its own.
@@ -84,8 +81,7 @@ pub enum CellState {
 }
 
 /// One element of an arrayed variable.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Cell {
     /// The element on each dimension, as the model spells it.
@@ -103,8 +99,7 @@ pub struct Cell {
 }
 
 /// An element equation whose subscript names no element of the variable.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UnmatchedArm {
     pub subscript: String,
@@ -112,8 +107,7 @@ pub struct UnmatchedArm {
 }
 
 /// One equation's text and its tree.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EquationText {
     pub text: String,
@@ -124,8 +118,7 @@ pub struct EquationText {
     pub error: Option<TextError>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextError {
     pub span: [u16; 2],
@@ -133,8 +126,7 @@ pub struct TextError {
 }
 
 /// A node of an equation's tree.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Node {
     /// A number, as written.
@@ -187,8 +179,7 @@ pub enum Node {
 }
 
 /// What one index inside a reference's brackets names.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum Index {
     /// One element of the axis, as the model spells it, and the dimension it

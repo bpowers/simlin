@@ -45,8 +45,7 @@ use crate::errors::format_diagnostic_with_datamodel;
 use super::{ResolvedModel, Workspace};
 
 /// Whether a diagnostic stops the model from simulating or only warns.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Severity {
@@ -65,8 +64,7 @@ impl From<DiagnosticSeverity> for Severity {
 
 /// Where a diagnostic was raised, named for a reader: one per category of
 /// the engine's (`DiagnosticCategory`).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum DiagnosticCategoryName {
@@ -103,8 +101,7 @@ impl From<DiagnosticCategory> for DiagnosticCategoryName {
 }
 
 /// A diagnostic as a tool reports it.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct DiagnosticReport {

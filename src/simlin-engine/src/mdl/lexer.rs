@@ -14,8 +14,7 @@ use self::RawToken::*;
 /// These tokens are produced by RawLexer without any context-sensitive
 /// transformations. The TokenNormalizer will transform these into the
 /// final Token enum based on section state (equation/units/comment).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum RawToken<'input> {
     // Arithmetic operators
     Plus,

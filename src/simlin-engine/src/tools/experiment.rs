@@ -48,8 +48,7 @@ pub(crate) const MAX_RECORD: usize = 12;
 /// The longest name a run can have.
 pub(crate) const MAX_RUN_NAME: usize = 64;
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct RunExperimentInput {
@@ -84,8 +83,7 @@ pub struct RunExperimentInput {
 /// `equation`. Its schema says so with a `oneOf`, while the type reads all
 /// three, so a call that gives two is refused with the rule rather than with
 /// a parser's "no variant matched".
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChangeInput {
     pub variable: String,
@@ -140,8 +138,7 @@ impl JsonSchema for ChangeInput {
     }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SpecsInput {
@@ -155,8 +152,7 @@ pub struct SpecsInput {
     pub method: Option<IntegrationMethod>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RunExperimentOutput {
@@ -190,8 +186,7 @@ pub struct RunExperimentOutput {
 }
 
 /// One change as applied.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct AppliedChange {
@@ -218,8 +213,7 @@ pub struct AppliedChange {
     pub from_time: Option<f64>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ElementValue {
@@ -229,8 +223,7 @@ pub struct ElementValue {
 }
 
 /// A variable's behavior in the new run and in the run it started from.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct Comparison {

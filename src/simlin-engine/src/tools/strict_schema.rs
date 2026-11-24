@@ -99,8 +99,7 @@ pub fn strict_input_schema(tool: ToolName) -> &'static Value {
 
 /// What a tool's strict schema adds to the request limits strict tool use
 /// sets across every strict tool in a request.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct StrictCost {
     /// Properties an object leaves out of `required`, at every depth.
     pub optional: usize,

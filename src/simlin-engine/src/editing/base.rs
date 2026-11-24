@@ -25,8 +25,7 @@ use crate::diagram::constants::{
 use super::geometry::Point;
 
 /// The kind of a model variable a named element stands for.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VariableKind {
     Stock,
     Flow,

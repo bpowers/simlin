@@ -90,8 +90,7 @@ use super::quote_ident;
 /// `(element-subscript CSV, arm equation text)` per slice row, in row-major
 /// slice order -- which is what makes the helper's whole-array view line up
 /// element-for-element with the co-argument slices it sits beside.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ArrayFreezeHelper {
     pub(crate) name: String,
     pub(crate) dims: Vec<String>,

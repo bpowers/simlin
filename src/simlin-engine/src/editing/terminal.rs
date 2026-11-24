@@ -20,8 +20,7 @@ use super::geometry::{
 };
 
 /// Where a pipe may attach to one face of a stock.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct FaceAttachment {
     pub face: Face,
     /// The axis a segment leaving this face runs along.
@@ -135,16 +134,14 @@ pub(crate) fn nearest_face_attachment(
 
 /// A cloud as a free terminal carries it: its uid and its center as the view
 /// holds it, which an operation moving the endpoint moves onto the endpoint.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct CloudRef {
     pub uid: i32,
     pub at: Point,
 }
 
 /// One end of a flow as routing sees it.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum Terminal {
     /// A stock. `face` and `offset` describe the BASE flow's attachment
     /// (`offset` is the endpoint's along-face distance from the face center),
@@ -204,8 +201,7 @@ impl Terminal {
 }
 
 /// A flow's two terminals.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Terminals {
     pub source: Terminal,
     pub sink: Terminal,
@@ -292,8 +288,7 @@ pub(crate) fn flow_terminals<'a>(
 }
 
 /// A cloud whose center an operation moved onto its endpoint.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct CloudMove {
     pub uid: i32,
     pub at: Point,
@@ -305,8 +300,7 @@ pub(crate) type CloudMoves = SmallVec<[CloudMove; 2]>;
 /// The geometry an operation produced: the new flow, plus every cloud whose
 /// center changed because its endpoint moved (a cloud endpoint always equals
 /// its cloud's center, G7).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct FlowGeometry {
     pub flow: Flow,
     pub clouds: CloudMoves,

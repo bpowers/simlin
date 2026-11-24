@@ -144,8 +144,7 @@ pub(crate) type ElementValues = Vec<(Ident<Canonical>, f64)>;
 
 /// A constant's value from a time on (or from the start), for each of its
 /// element keys.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ValueChange {
     /// The variable's canonical name.
     pub variable: String,
@@ -156,8 +155,7 @@ pub(crate) struct ValueChange {
 
 /// A variable's equation replaced, from the start (for a stock, its initial
 /// value).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct EquationChange {
     /// The variable's canonical name.
     pub variable: String,
@@ -165,8 +163,7 @@ pub(crate) struct EquationChange {
 }
 
 /// What a replaced equation becomes.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Replacement {
     /// One equation, every element's for an arrayed variable.
     Equation(String),
@@ -202,8 +199,7 @@ impl Replacement {
 
 /// The specs a run ran under where they are not the model's; one left out
 /// is the model's.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Default, Serialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct SpecsChange {
@@ -267,8 +263,7 @@ impl SpecsChange {
 }
 
 /// What a run changed from the model.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct RunPlan {
     pub values: Vec<ValueChange>,
     pub equations: Vec<EquationChange>,
@@ -415,8 +410,7 @@ enum Kept {
 }
 
 /// What a session tells a host, or an agent, of one of its runs.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct RunListing {
@@ -439,8 +433,7 @@ pub struct RunListing {
 
 /// One change a run makes to one variable, as it was made: exactly the value
 /// the run set, where the experiment's answer rounds it.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ListedChange {
@@ -468,8 +461,7 @@ pub struct ListedChange {
 }
 
 /// One element's value, or its replacement equation, in a listed change.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct ListedElement {
     /// The element's subscript, as a results key spells it (`north`, `a,b`).
@@ -568,14 +560,12 @@ impl RunPlan {
     }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ListRunsInput {}
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct ListRunsOutput {

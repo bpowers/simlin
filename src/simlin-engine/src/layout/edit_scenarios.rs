@@ -23,8 +23,7 @@ use super::metadata::ComputedMetadata;
 use super::{compute_dependency_metadata, generate_best_layout, incremental_layout};
 
 /// One kind of edit.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScenarioKind {
     /// Upsert a variable exactly as it is, as an agent restating a definition

@@ -10,8 +10,7 @@ use crate::diagram::constants::{
     AUX_RADIUS, LABEL_FONT_SIZE, LABEL_FONT_WEIGHT, LABEL_PADDING, LINE_SPACING,
 };
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TextAnchor {
     Start,
     Middle,
@@ -28,7 +27,7 @@ impl TextAnchor {
     }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Debug)]
 pub struct LabelProps {
     pub cx: f64,
     pub cy: f64,
@@ -59,8 +58,7 @@ impl LabelProps {
 
 /// How far one label line's anchor sits below the previous line's: the SVG
 /// `dy` of its `<tspan>`, where `1em` is the label font size.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LineAdvance {
     OneEm,
     Px(i64),
@@ -155,8 +153,7 @@ fn label_layout(props: &LabelProps) -> LabelLayout {
 }
 
 /// One label line placed in canvas units.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LabelLine {
     pub text: String,
     pub x: f64,

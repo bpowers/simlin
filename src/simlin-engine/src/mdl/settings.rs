@@ -22,8 +22,7 @@ use crate::datamodel::{SimMethod, Unit};
 use crate::import_losses::{ImportWarning, not_kept};
 
 /// Parsed settings from an MDL file's settings section.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct MdlSettings {
     /// Integration method extracted from type 15 line
     pub integration_method: SimMethod,
@@ -37,15 +36,13 @@ pub struct MdlSettings {
 /// `:TABLE name`, `:REPORT name`). Vensim shows one from its control panel,
 /// or on the sketch through a graph object that names it. The datamodel has
 /// no place for one.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CustomOutput {
     pub kind: CustomOutputKind,
     pub name: String,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CustomOutputKind {
     Graph,
     Table,

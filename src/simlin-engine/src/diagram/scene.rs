@@ -50,8 +50,7 @@ pub const SCENE_VERSION: u32 = 1;
 const STROKE_MARGIN: f64 = 2.0;
 
 /// A model's diagram as a display list.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Scene {
     /// The contract version, [`SCENE_VERSION`].
@@ -74,8 +73,7 @@ impl Scene {
 }
 
 /// An axis-aligned box in canvas units.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct SceneBounds {
     pub left: f64,
     pub top: f64,
@@ -95,8 +93,7 @@ impl From<Rect> for SceneBounds {
 }
 
 /// One drawn element: its shapes, then its sparkline, then its label.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SceneElement {
     pub uid: i32,
@@ -113,8 +110,7 @@ pub struct SceneElement {
     pub label: Option<SceneLabel>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SceneElementKind {
     Group,
@@ -127,8 +123,7 @@ pub enum SceneElementKind {
     Alias,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum SceneShape {
     Rect(SceneRectangle),
@@ -151,8 +146,7 @@ impl SceneShape {
     }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SceneRectangle {
     pub x: f64,
@@ -163,8 +157,7 @@ pub struct SceneRectangle {
     pub paint: ScenePaint,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SceneCircle {
     pub cx: f64,
@@ -174,8 +167,7 @@ pub struct SceneCircle {
 }
 
 /// A path as a flat array of opcodes and operands (`diagram::path`).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScenePath {
     pub d: Vec<f64>,
@@ -184,8 +176,7 @@ pub struct ScenePath {
 
 /// The semantic style of a shape; consumers resolve it through their theme.
 /// Each paint is one CSS class of the SVG renderer's stylesheet.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ScenePaint {
     Stock,
@@ -204,8 +195,7 @@ pub enum ScenePaint {
 }
 
 /// The box a sparkline is drawn into.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct SparklineSlot {
     pub x: f64,
     pub y: f64,
@@ -224,8 +214,7 @@ impl From<Frame> for SparklineSlot {
     }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SceneLabel {
     pub paint: LabelPaint,
@@ -248,16 +237,14 @@ impl SceneLabel {
     }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum LabelPaint {
     Label,
     GroupLabel,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SceneTextAnchor {
     Start,
@@ -277,16 +264,14 @@ impl From<TextAnchor> for SceneTextAnchor {
 
 /// What a label line's `y` names: the alphabetic baseline, or the top of the
 /// line (`dominant-baseline="hanging"`).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TextBaseline {
     Alphabetic,
     Hanging,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SceneLabelLine {
     pub text: String,

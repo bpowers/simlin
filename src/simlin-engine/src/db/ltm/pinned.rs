@@ -35,8 +35,7 @@ use super::loops::{
 
 /// A pinned loop the LTM pipeline must always score, paired with the user's
 /// chosen name so a caller can map the synthetic `pin{n}` id back to a label.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct PinnedLoop {
     /// The fully-annotated scored loop(s) this pin resolves to, with stable
     /// pin-derived ids assigned in declaration order:
@@ -61,8 +60,7 @@ pub struct PinnedLoop {
 /// One model's resolved pinned loops, plus the names of pins that failed
 /// validation so the caller can surface a diagnostic without re-deriving the
 /// failure.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct PinnedLoopsResult {
     pub loops: Vec<PinnedLoop>,
     /// `(name, reason)` for each pinned loop whose variable set did not form a

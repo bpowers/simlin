@@ -24,8 +24,7 @@ use crate::diagram::scene::{SceneElement, dangling_link_scene_element, scene_ele
 use super::base::BaseView;
 use super::gesture::Plan;
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Preview {
     /// Base elements the frame does not draw as they were: substituted,
     /// removed, and links redrawn because an endpoint moved.

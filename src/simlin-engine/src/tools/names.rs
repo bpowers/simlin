@@ -48,8 +48,7 @@ pub(crate) fn resolve<'a>(model: &'a Model, query: &str) -> Result<&'a Variable,
 /// Why a reference names nothing to read: the closest names when no variable
 /// has the name, or the reason when the variable exists and the element asked
 /// of it does not.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct Unresolved {
     pub suggestions: Vec<String>,
     pub reason: Option<String>,

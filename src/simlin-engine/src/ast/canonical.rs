@@ -59,8 +59,7 @@ pub enum Aliases<'a> {
 ///
 /// Two equations are the same exactly when their canonical forms are equal.
 /// `Display` prints the form through [`print_eqn`], for a person to read.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CanonicalEqn(Expr0);
 
 impl CanonicalEqn {

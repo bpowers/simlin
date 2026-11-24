@@ -17,8 +17,7 @@ use crate::common::{Canonical, Ident};
 pub struct TruncatedByBudget;
 
 /// Polarity of a causal link
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LinkPolarity {
     Positive, // Increase in 'from' causes increase in 'to'
     Negative, // Increase in 'from' causes decrease in 'to'
@@ -82,8 +81,7 @@ impl LinkPolarity {
 /// traverses `from[d] → $⁚ltm⁚agg⁚{n} → to[e]` (the agg name has no
 /// subscript). All other edges use variable-level names. See
 /// `db::ltm::build_element_level_loops` for the normalization rule.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Link {
     pub from: Ident<Canonical>,
     pub to: Ident<Canonical>,
@@ -135,8 +133,7 @@ pub struct Link {
 /// `assign_loop_ids` derives loop IDs from `links` (sorted distinct
 /// variable names), not `stocks`, so the element-level `stocks` granularity
 /// does not perturb `r{n}`/`b{n}`/`u{n}` numbering.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Loop {
     pub id: String,
     pub links: Vec<Link>,

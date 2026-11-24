@@ -127,8 +127,6 @@ pub(crate) fn element_suffix(scope: &ElementScope) -> String {
 /// they can mint the same positional storage for different consumers; one
 /// capture then serves both and its demand is the union
 /// ([`Capture::merge_same_definition`]).
-// `Debug` is unconditional: `db::ImplicitVarDeps` derives it in every build
-// and carries a `CaptureKind`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CaptureKind {
     Previous,
@@ -138,8 +136,8 @@ pub enum CaptureKind {
 
 impl CaptureKind {
     /// The consumer, spelled as a model writes it; a shared capture names
-    /// both. No production caller: `Debug` is feature-gated crate-wide, so
-    /// the tests that pin each capture shape's kind need a printable spelling.
+    /// both. For the tests that pin each capture shape's kind; production code
+    /// has no caller.
     pub fn as_str(self) -> &'static str {
         match self {
             CaptureKind::Previous => "PREVIOUS",
@@ -171,8 +169,7 @@ impl CaptureKind {
 
 /// The storage a capture occupies and the context its body is resolved in --
 /// decided by where the `PREVIOUS`/`INIT` call was written.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum CaptureShape {
     /// A scalar equation's argument: one slot, a scalar body.
     Scalar,
@@ -191,8 +188,7 @@ pub enum CaptureShape {
 }
 
 /// One `PREVIOUS`/`INIT` argument, hoisted into its own unit of evaluation.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Capture {
     /// The name every name-keyed stage files this capture under, derived by
     /// [`synthetic_ident`] from the positional identity. Stored rather than
@@ -387,8 +383,7 @@ fn subtree_parsed_variable(
 /// scalar port cannot read directly: an arrayed variable and a dimension name,
 /// which under a per-element expansion mean one element's value, and are
 /// hoisted into a helper scoped to that element so lowering reads it.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct HoistedArg {
     /// The name every name-keyed stage files this argument under, derived by
     /// [`synthetic_ident`] from the call's `(parent, id)`, the argument's
@@ -461,8 +456,7 @@ impl HoistedArg {
 /// keep the names of `datamodel::Module`'s, which is what those readers were
 /// written against, so one reader serves an explicit instance and an implicit
 /// one alike.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ImplicitModule {
     /// The name every name-keyed stage files this instance under, derived by
     /// [`synthetic_ident`] from `(parent, id)`, the call name and the active
@@ -552,8 +546,7 @@ impl ImplicitModule {
 /// (`ParsedVariableResult::implicit_vars` and `VariableDeps::implicit_vars`),
 /// so an unstable order defeats backdating and makes the compiled artifact
 /// irreproducible (GH #1002).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ImplicitVar {
     /// A `PREVIOUS`/`INIT` argument hoisted out of its call.
     Capture(Capture),

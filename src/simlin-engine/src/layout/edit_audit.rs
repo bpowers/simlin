@@ -70,8 +70,7 @@ const MIN_OVERLAP_AREA: f64 = 1.0;
 const STOCK_INTERIOR_INSET: f64 = 0.5;
 
 /// Which part of the contract a finding concerns.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Layer {
     Scope,
@@ -81,8 +80,7 @@ pub enum Layer {
 }
 
 /// One kind of finding.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FindingKind {
     /// An element of a variable the edit deleted is still drawn: its own
@@ -234,8 +232,7 @@ impl FindingKind {
 }
 
 /// One thing a sync got wrong.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Finding {
     pub kind: FindingKind,
     /// What the finding is about, in the model's idents after the edit
@@ -266,16 +263,14 @@ impl Finding {
 }
 
 /// How far an element the edit rebuilt moved.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Displacement {
     pub subject: String,
     pub distance: f64,
 }
 
 /// The audit of one edit.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct EditAudit {
     pub findings: Vec<Finding>,
     /// Elements the edit rebuilt (kind changes, re-attached flows), and how far
@@ -1253,8 +1248,7 @@ fn consistency_findings(
 }
 
 /// What happened to one element across an edit.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeKind {
     Created,
@@ -1264,8 +1258,7 @@ pub enum ChangeKind {
 
 /// One element that differs across an edit, with where it is drawn (on the
 /// view after the edit, or before it for a removed element).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ViewChange {
     pub uid: i32,
     pub kind: ChangeKind,

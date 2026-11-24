@@ -47,7 +47,6 @@ impl<T> Default for SharedVec<T> {
     }
 }
 
-#[cfg(feature = "debug-derive")]
 impl<T: std::fmt::Debug + Clone> std::fmt::Debug for SharedVec<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_list().entries(self.iter()).finish()

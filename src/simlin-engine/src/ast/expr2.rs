@@ -18,8 +18,7 @@ use crate::eqn_err;
 ///
 /// All complex view calculations (strides, offsets, etc.) are deferred
 /// to the compiler phase where we have more context.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum ArrayBounds {
     /// Array bounds for a named variable (from the model)
     Named {
@@ -86,8 +85,7 @@ pub type NodeBounds = Option<Box<ArrayBounds>>;
 
 /// IndexExpr represents a parsed equation, after calls to
 /// builtin functions have been checked/resolved.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum IndexExpr2 {
     Wildcard(Loc),
     // *:dimension_name
@@ -245,8 +243,7 @@ fn bounded_references<'e>(
 /// field that is not equal to itself defeats it. `Eq` makes that a compile-time
 /// property rather than a convention.
 #[allow(dead_code)]
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum Expr2 {
     Const(String, Literal, Loc),
     Var(Ident<Canonical>, NodeBounds, Loc),
