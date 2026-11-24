@@ -4,7 +4,8 @@
 
 use crate::common::ErrorCode;
 use crate::datamodel::{self, Equation};
-use crate::patch::{ModelOperation, ModelPatch, ProjectPatch, apply_patch};
+use crate::patch::apply_patch;
+use crate::project_patch::{ModelOperation, ModelPatch, ProjectPatch};
 use crate::test_common::TestProject;
 
 type Arm = (

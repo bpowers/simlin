@@ -59,7 +59,7 @@ use schemars::JsonSchema;
 use crate::common::CanonicalElementName;
 use crate::datamodel::{self, AiState, Equation, Variable};
 use crate::db::{LtmOverlay, SourceProject, collect_all_diagnostics};
-use crate::patch::{ModelOperation, ModelPatch, ProjectOperation, ProjectPatch};
+use crate::project_patch::{ModelOperation, ModelPatch, ProjectOperation, ProjectPatch};
 
 use super::changes::{ChangedField, ReadSnapshot, changed_fields, effective_specs, same_record};
 use super::evidence::{Described, DiagnosticIdentity, describe, display_name};

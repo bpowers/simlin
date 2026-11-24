@@ -51,7 +51,7 @@ use crate::datamodel::view_element::{Flow, FlowPoint, LinkShape};
 use crate::datamodel::{self, StockFlow, Variable, ViewElement};
 use crate::diagram::common::Rect;
 use crate::editing::invariants::{Mode, check_flow_invariants};
-use crate::patch::{ModelOperation, ModelPatch};
+use crate::project_patch::{ModelOperation, ModelPatch};
 
 use super::compute_dependency_metadata;
 use super::config::LayoutConfig;

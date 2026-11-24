@@ -18,7 +18,8 @@ use crate::datamodel::view_element::{self, LabelSide};
 use crate::layout::edit_scenarios::{
     Scenario, ScenarioKind, build_scenario, first_difference, run_scenario, sync_view,
 };
-use crate::patch::{ProjectPatch, apply_patch};
+use crate::patch::apply_patch;
+use crate::project_patch::ProjectPatch;
 
 const MODEL: &str = "main";
 const POPULATION: &str = "default_projects/population/model.xmile";

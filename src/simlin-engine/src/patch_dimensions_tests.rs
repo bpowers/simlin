@@ -11,7 +11,8 @@ use std::collections::HashMap;
 
 use crate::common::ErrorCode;
 use crate::datamodel::{self, Dimension, Equation, Project};
-use crate::patch::{ProjectOperation, ProjectPatch, apply_patch};
+use crate::patch::apply_patch;
+use crate::project_patch::{ProjectOperation, ProjectPatch};
 use crate::test_common::TestProject;
 
 fn apply(project: &Project, ops: Vec<ProjectOperation>) -> Result<Project, (ErrorCode, String)> {

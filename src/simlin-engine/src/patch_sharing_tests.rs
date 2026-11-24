@@ -23,9 +23,8 @@ use std::path::{Path, PathBuf};
 
 use crate::canonicalize;
 use crate::datamodel::{self, Equation, Project, SharedVec, Variable, View, ViewElement};
-use crate::patch::{
-    ModelOperation, ModelPatch, ProjectOperation, ProjectPatch, apply_patch, apply_patch_in_place,
-};
+use crate::patch::{apply_patch, apply_patch_in_place};
+use crate::project_patch::{ModelOperation, ModelPatch, ProjectOperation, ProjectPatch};
 
 fn world3() -> Project {
     crate::compat::open_vensim(include_str!("../../../test/metasd/WRLD3-03/wrld3-03.mdl"))

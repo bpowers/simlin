@@ -22,7 +22,8 @@
 use std::io::BufReader;
 
 use super::*;
-use crate::patch::{ModelOperation, ModelPatch, ProjectPatch, apply_patch};
+use crate::patch::apply_patch;
+use crate::project_patch::{ModelOperation, ModelPatch, ProjectPatch};
 use crate::test_common::TestProject;
 
 /// What one input holds, read back field by field. The struct literal names

@@ -13,6 +13,7 @@ use std::io::BufReader;
 
 use super::*;
 use crate::datamodel::{Compat, Equation, view_element};
+use crate::project_patch::ModelPatch;
 use crate::test_common::TestProject;
 
 fn rename_in(model: &str, from: &str, to: &str) -> ProjectPatch {

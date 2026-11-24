@@ -2431,43 +2431,43 @@ pub enum ModelOperation {
     },
 }
 
-impl From<ProjectPatch> for crate::patch::ProjectPatch {
+impl From<ProjectPatch> for crate::project_patch::ProjectPatch {
     fn from(patch: ProjectPatch) -> Self {
-        crate::patch::ProjectPatch {
+        crate::project_patch::ProjectPatch {
             project_ops: patch
                 .project_ops
                 .into_iter()
                 .map(|op| match op {
                     ProjectOperation::SetSimSpecs { sim_specs } => {
-                        crate::patch::ProjectOperation::SetSimSpecs(sim_specs.into())
+                        crate::project_patch::ProjectOperation::SetSimSpecs(sim_specs.into())
                     }
                     ProjectOperation::AddModel { name } => {
-                        crate::patch::ProjectOperation::AddModel { name }
+                        crate::project_patch::ProjectOperation::AddModel { name }
                     }
                     ProjectOperation::UpsertDimension { dimension } => {
-                        crate::patch::ProjectOperation::UpsertDimension(dimension.into())
+                        crate::project_patch::ProjectOperation::UpsertDimension(dimension.into())
                     }
                     ProjectOperation::RenameDimension { from, to } => {
-                        crate::patch::ProjectOperation::RenameDimension { from, to }
+                        crate::project_patch::ProjectOperation::RenameDimension { from, to }
                     }
                     ProjectOperation::RenameElement {
                         dimension,
                         from,
                         to,
-                    } => crate::patch::ProjectOperation::RenameElement {
+                    } => crate::project_patch::ProjectOperation::RenameElement {
                         dimension,
                         from,
                         to,
                     },
                     ProjectOperation::DeleteDimension { name } => {
-                        crate::patch::ProjectOperation::DeleteDimension { name }
+                        crate::project_patch::ProjectOperation::DeleteDimension { name }
                     }
                 })
                 .collect(),
             models: patch
                 .models
                 .into_iter()
-                .map(|model| crate::patch::ModelPatch {
+                .map(|model| crate::project_patch::ModelPatch {
                     name: model.name,
                     ops: model.ops.into_iter().map(Into::into).collect(),
                 })
@@ -2476,9 +2476,9 @@ impl From<ProjectPatch> for crate::patch::ProjectPatch {
     }
 }
 
-impl From<ModelOperation> for crate::patch::ModelOperation {
+impl From<ModelOperation> for crate::project_patch::ModelOperation {
     fn from(op: ModelOperation) -> Self {
-        use crate::patch::ModelOperation as Op;
+        use crate::project_patch::ModelOperation as Op;
         match op {
             ModelOperation::UpsertAux { aux } => Op::UpsertAux(aux.into()),
             ModelOperation::UpsertStock { stock } => Op::UpsertStock(stock.into()),
@@ -2554,34 +2554,34 @@ impl From<ModelOperation> for crate::patch::ModelOperation {
 
 /// The JSON form of an engine patch. A source change, which a host never
 /// sends and a plan never makes, has none.
-impl TryFrom<crate::patch::ProjectPatch> for ProjectPatch {
+impl TryFrom<crate::project_patch::ProjectPatch> for ProjectPatch {
     type Error = String;
 
-    fn try_from(patch: crate::patch::ProjectPatch) -> Result<Self, String> {
+    fn try_from(patch: crate::project_patch::ProjectPatch) -> Result<Self, String> {
         let project_ops = patch
             .project_ops
             .into_iter()
             .map(|op| match op {
-                crate::patch::ProjectOperation::SetSimSpecs(sim_specs) => {
+                crate::project_patch::ProjectOperation::SetSimSpecs(sim_specs) => {
                     Ok(ProjectOperation::SetSimSpecs {
                         sim_specs: sim_specs.into(),
                     })
                 }
-                crate::patch::ProjectOperation::AddModel { name } => {
+                crate::project_patch::ProjectOperation::AddModel { name } => {
                     Ok(ProjectOperation::AddModel { name })
                 }
-                crate::patch::ProjectOperation::SetSource(_) => {
+                crate::project_patch::ProjectOperation::SetSource(_) => {
                     Err("a change of the project's source has no JSON form".to_string())
                 }
-                crate::patch::ProjectOperation::UpsertDimension(dimension) => {
+                crate::project_patch::ProjectOperation::UpsertDimension(dimension) => {
                     Ok(ProjectOperation::UpsertDimension {
                         dimension: dimension.into(),
                     })
                 }
-                crate::patch::ProjectOperation::RenameDimension { from, to } => {
+                crate::project_patch::ProjectOperation::RenameDimension { from, to } => {
                     Ok(ProjectOperation::RenameDimension { from, to })
                 }
-                crate::patch::ProjectOperation::RenameElement {
+                crate::project_patch::ProjectOperation::RenameElement {
                     dimension,
                     from,
                     to,
@@ -2590,7 +2590,7 @@ impl TryFrom<crate::patch::ProjectPatch> for ProjectPatch {
                     from,
                     to,
                 }),
-                crate::patch::ProjectOperation::DeleteDimension { name } => {
+                crate::project_patch::ProjectOperation::DeleteDimension { name } => {
                     Ok(ProjectOperation::DeleteDimension { name })
                 }
             })
@@ -2610,9 +2610,9 @@ impl TryFrom<crate::patch::ProjectPatch> for ProjectPatch {
     }
 }
 
-impl From<crate::patch::ModelOperation> for ModelOperation {
-    fn from(op: crate::patch::ModelOperation) -> Self {
-        use crate::patch::ModelOperation as Op;
+impl From<crate::project_patch::ModelOperation> for ModelOperation {
+    fn from(op: crate::project_patch::ModelOperation) -> Self {
+        use crate::project_patch::ModelOperation as Op;
         match op {
             Op::UpsertAux(aux) => ModelOperation::UpsertAux { aux: aux.into() },
             Op::UpsertStock(stock) => ModelOperation::UpsertStock {
@@ -2699,7 +2699,9 @@ mod tests {
     /// the JSON is the shape `simlin_project_apply_patch` has always taken.
     #[test]
     fn a_patch_round_trips_through_json_with_every_operation() {
-        use crate::patch::{ModelOperation as Op, ModelPatch as MP, ProjectOperation as PO};
+        use crate::project_patch::{
+            ModelOperation as Op, ModelPatch as MP, ProjectOperation as PO,
+        };
         let base = crate::test_common::TestProject::new("roundtrip")
             .with_sim_time(0.0, 10.0, 1.0)
             .stock("level", "10", &["inflow"], &[], None)
@@ -2721,7 +2723,7 @@ mod tests {
         };
         let mut specs = base.sim_specs.clone();
         specs.stop = 20.0;
-        let patch = crate::patch::ProjectPatch {
+        let patch = crate::project_patch::ProjectPatch {
             project_ops: vec![
                 PO::SetSimSpecs(specs),
                 PO::UpsertDimension(datamodel::Dimension::named(

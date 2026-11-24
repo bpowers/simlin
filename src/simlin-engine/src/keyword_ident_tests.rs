@@ -32,7 +32,8 @@ use crate::datamodel;
 use crate::db::{
     SimlinDb, collect_all_diagnostics, compile_project_incremental, sync_from_datamodel_incremental,
 };
-use crate::patch::{ModelOperation, ModelPatch, ProjectPatch, apply_patch};
+use crate::patch::apply_patch;
+use crate::project_patch::{ModelOperation, ModelPatch, ProjectPatch};
 use crate::test_common::TestProject;
 
 /// The equation-language keywords in their `name=` spelling.

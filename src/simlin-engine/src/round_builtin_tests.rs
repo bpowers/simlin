@@ -172,7 +172,8 @@ fn round_survives_print_and_reparse() {
     // The patch path re-prints equations (expr2 -> expr0 -> text); a builtin
     // missing from that printer would corrupt any model edited through it.
     use crate::datamodel::Equation;
-    use crate::patch::{ModelOperation, ModelPatch, ProjectPatch, apply_patch};
+    use crate::patch::apply_patch;
+    use crate::project_patch::{ModelOperation, ModelPatch, ProjectPatch};
 
     let mut project = TestProject::new("round_reprint")
         .with_sim_time(0.0, 1.0, 1.0)

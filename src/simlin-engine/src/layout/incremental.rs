@@ -2264,7 +2264,7 @@ pub fn incremental_layout(
     old_view: &datamodel::StockFlow,
     project: &datamodel::Project,
     model_name: &str,
-    patch: &crate::patch::ModelPatch,
+    patch: &crate::project_patch::ModelPatch,
     db_state: Option<(&crate::db::SimlinDb, crate::db::SourceProject)>,
 ) -> Result<datamodel::StockFlow, String> {
     if old_view.elements.is_empty() {
@@ -2278,8 +2278,8 @@ pub fn incremental_layout(
     let has_variable_ops = patch.ops.iter().any(|op| {
         !matches!(
             op,
-            crate::patch::ModelOperation::UpsertView { .. }
-                | crate::patch::ModelOperation::DeleteView { .. }
+            crate::project_patch::ModelOperation::UpsertView { .. }
+                | crate::project_patch::ModelOperation::DeleteView { .. }
         )
     });
     if !has_variable_ops {
@@ -2298,10 +2298,10 @@ pub fn incremental_layout(
     // Step 3: Process deletions and renames
     for op in &patch.ops {
         match op {
-            crate::patch::ModelOperation::DeleteVariable { ident } => {
+            crate::project_patch::ModelOperation::DeleteVariable { ident } => {
                 state.apply_deletion(ident);
             }
-            crate::patch::ModelOperation::RenameVariable { from, to } => {
+            crate::project_patch::ModelOperation::RenameVariable { from, to } => {
                 let new_display = state
                     .display_names
                     .get(&canonicalize(to).into_owned())
@@ -2323,25 +2323,25 @@ pub fn incremental_layout(
         .iter()
         .filter_map(|op| {
             let ident = match op {
-                crate::patch::ModelOperation::UpsertStock(s) => &s.ident,
-                crate::patch::ModelOperation::UpsertFlow(f) => &f.ident,
-                crate::patch::ModelOperation::UpsertAux(a) => &a.ident,
-                crate::patch::ModelOperation::UpsertModule(m) => &m.ident,
-                crate::patch::ModelOperation::RenameVariable { to, .. } => to,
-                crate::patch::ModelOperation::UpdateStockFlows { ident, .. } => ident,
+                crate::project_patch::ModelOperation::UpsertStock(s) => &s.ident,
+                crate::project_patch::ModelOperation::UpsertFlow(f) => &f.ident,
+                crate::project_patch::ModelOperation::UpsertAux(a) => &a.ident,
+                crate::project_patch::ModelOperation::UpsertModule(m) => &m.ident,
+                crate::project_patch::ModelOperation::RenameVariable { to, .. } => to,
+                crate::project_patch::ModelOperation::UpdateStockFlows { ident, .. } => ident,
                 // A field edit that can change what the variable reads names it,
                 // as an upsert does; units and notes change no reads.
-                crate::patch::ModelOperation::SetEquation { ident, .. }
-                | crate::patch::ModelOperation::SetElementEquation { ident, .. }
-                | crate::patch::ModelOperation::SetLookup { ident, .. }
-                | crate::patch::ModelOperation::SetDimensions { ident, .. } => ident,
-                crate::patch::ModelOperation::SetUnits { .. }
-                | crate::patch::ModelOperation::SetNotes { .. }
-                | crate::patch::ModelOperation::DeleteVariable { .. }
-                | crate::patch::ModelOperation::UpsertView { .. }
-                | crate::patch::ModelOperation::DeleteView { .. }
-                | crate::patch::ModelOperation::SetLoopName { .. }
-                | crate::patch::ModelOperation::EditView { .. } => return None,
+                crate::project_patch::ModelOperation::SetEquation { ident, .. }
+                | crate::project_patch::ModelOperation::SetElementEquation { ident, .. }
+                | crate::project_patch::ModelOperation::SetLookup { ident, .. }
+                | crate::project_patch::ModelOperation::SetDimensions { ident, .. } => ident,
+                crate::project_patch::ModelOperation::SetUnits { .. }
+                | crate::project_patch::ModelOperation::SetNotes { .. }
+                | crate::project_patch::ModelOperation::DeleteVariable { .. }
+                | crate::project_patch::ModelOperation::UpsertView { .. }
+                | crate::project_patch::ModelOperation::DeleteView { .. }
+                | crate::project_patch::ModelOperation::SetLoopName { .. }
+                | crate::project_patch::ModelOperation::EditView { .. } => return None,
             };
             Some(canonicalize(ident).into_owned())
         })

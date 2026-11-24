@@ -105,6 +105,7 @@ mod per_element_gf_tests;
 )]
 #[path = "project_io.gen.rs"]
 pub mod project_io;
+mod project_patch;
 pub mod queue;
 pub mod queue_compile;
 #[doc(hidden)]
@@ -162,9 +163,9 @@ pub mod xmile;
 pub use self::common::{Error, ErrorCode, ErrorKind, Result, canonicalize};
 pub use self::import_losses::ImportWarning;
 pub use self::patch::{
-    ModelOperation, ModelPatch, PatchReport, ProjectOperation, ProjectPatch, Renamed, VariableRef,
-    apply_patch, apply_patch_reporting, is_view_only_patch,
+    PatchReport, Renamed, VariableRef, apply_patch, apply_patch_reporting, is_view_only_patch,
 };
+pub use self::project_patch::{ModelOperation, ModelPatch, ProjectOperation, ProjectPatch};
 pub use self::queue_compile::build_sim;
 pub use self::results::{Method, Results, Specs as SimSpecs};
 pub use self::variable::{DepClassification, DepLag, DepOccurrence, Variable};

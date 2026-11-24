@@ -16,7 +16,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::common::canonicalize;
 use crate::datamodel::{self, Equation, StockFlow, Variable, ViewElement};
-use crate::patch::{ModelOperation, ModelPatch, ProjectPatch, apply_patch};
+use crate::patch::apply_patch;
+use crate::project_patch::{ModelOperation, ModelPatch, ProjectPatch};
 
 use super::edit_audit::{Displacement, EditAudit, EditInput, Finding, FindingKind, audit_edit};
 use super::metadata::ComputedMetadata;

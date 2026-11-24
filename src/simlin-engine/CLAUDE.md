@@ -359,7 +359,7 @@ Integration is Euler-only.
   A stock's equation is its initial value.
   An element given a lookup takes the equation every element follows as its input, written out so every format keeps it.
   `tools::edit`'s operations are translations into these, so an agent's edit and a host's mean the same.
-- `patch.rs` -- `ProjectPatch`/`ModelPatch` operations (upsert, delete, rename, views, stock flows, loop names, the field edits, and `EditView`, a view edit whose model operations `editing::derived_operations` derives from the edited view when the patch applies; `is_view_only_patch` derives them to decide whether a patch needs recompiling).
+- `patch.rs` -- the `ProjectPatch`/`ModelPatch` operations of `project_patch.rs` (upsert, delete, rename, views, stock flows, loop names, the field edits, and `EditView`, a view edit whose model operations `editing::derived_operations` derives from the edited view when the patch applies; `is_view_only_patch` derives them to decide whether a patch needs recompiling).
   - A rename is syntactic: each expression text (`Variable::expression_texts`) is parsed as written (`Expr0::new`) to find its references, and each renamed reference is spliced into the text at its span, so everything else the modeler wrote comes back byte for byte.
     A text longer than a span addresses (`u16::MAX` bytes: `builtins::Loc` is a pair of `u16`s, and a position past them wraps) is respelled by `print_eqn` instead, decided on the text's length before any span is read.
     Neither compiler tier can serve a rename: the parse memo's tree is the expanded one (a `SMTH1(x, 3)` is already an instance read, a `PREVIOUS(x + 1)` a capture), and the lowered tree is absent for an equation the compiler refuses, which must still be renamed.
