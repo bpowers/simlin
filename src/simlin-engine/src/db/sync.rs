@@ -235,7 +235,8 @@ fn pinned_loops_from_datamodel(model: &datamodel::Model) -> Vec<PinnedLoopSpec> 
         .variables
         .iter()
         .filter_map(|v| {
-            crate::patch::variable_uid(v).map(|uid| (uid, canonicalize(v.get_ident()).into_owned()))
+            v.get_uid()
+                .map(|uid| (uid, canonicalize(v.get_ident()).into_owned()))
         })
         .collect();
 

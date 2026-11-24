@@ -1600,7 +1600,7 @@ fn pin_loop_by_names(
                 .variables
                 .iter()
                 .find(|var| var.get_ident() == *v)
-                .and_then(crate::patch::variable_uid)
+                .and_then(|var| var.get_uid())
                 .unwrap_or_else(|| panic!("variable {v} has no uid"))
         })
         .collect();

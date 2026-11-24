@@ -1970,7 +1970,7 @@ fn write_lookup(buf: &mut String, gf: &GraphicalFunction) {
 /// body)`. Delegates to the shared predicate so the writer, the MDL converter,
 /// and the compiler all agree on what counts as lookup-only (issue #606).
 fn is_lookup_only_equation(eqn: &str) -> bool {
-    crate::variable::is_empty_or_sentinel(eqn)
+    crate::datamodel::is_empty_or_sentinel(eqn)
 }
 
 /// Format f64 for MDL output: omit trailing `.0` for whole numbers.

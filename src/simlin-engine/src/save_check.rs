@@ -67,7 +67,7 @@ use std::io::BufReader;
 use crate::ast::{Aliases, CanonicalEqn, Expr0, UnaryOp};
 use crate::buffa::Message;
 use crate::builtins::UntypedBuiltinFn;
-use crate::common::{CanonicalElementName, Result, canonicalize};
+use crate::common::{CanonicalElementName, Result, canonicalize, join_quoted_names};
 use crate::data_provider::DataProvider;
 use crate::datamodel::{
     Aux, Compat, Conveyor, DataSource, Dimension, DimensionElements, DimensionMapping, Dt,
@@ -75,7 +75,7 @@ use crate::datamodel::{
     MacroSpec, Model, Module, ModuleReference, Project, Queue, SimMethod, SimSpecs, SpreadFlow,
     Stock, Variable,
 };
-use crate::errors::{code_and_reason, join_quoted_names};
+use crate::errors::code_and_reason;
 
 #[cfg(test)]
 #[path = "save_check_tests.rs"]

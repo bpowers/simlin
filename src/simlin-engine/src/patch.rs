@@ -694,22 +694,6 @@ fn canonicalize_module_references(module: &mut datamodel::Module) {
     }
 }
 
-fn get_uid(var: &Variable) -> Option<i32> {
-    variable_uid(var)
-}
-
-/// The datamodel UID of a variable, or `None` if it has not been assigned
-/// one yet. Pinned-loop sync (`db::sync`) reads this to resolve a
-/// `LoopMetadata`'s UID references back to canonical variable names.
-pub fn variable_uid(var: &Variable) -> Option<i32> {
-    match var {
-        Variable::Stock(s) => s.uid,
-        Variable::Flow(f) => f.uid,
-        Variable::Aux(a) => a.uid,
-        Variable::Module(m) => m.uid,
-    }
-}
-
 fn set_uid(var: &mut Variable, uid: Option<i32>) {
     match var {
         Variable::Stock(s) => s.uid = uid,
@@ -727,7 +711,7 @@ fn next_available_uid(model: &datamodel::Model) -> i32 {
     let max_var_uid = model
         .variables
         .iter()
-        .filter_map(get_uid)
+        .filter_map(|var| var.get_uid())
         .max()
         .unwrap_or(0);
     let max_view_uid = model
@@ -747,8 +731,8 @@ fn upsert_variable(model: &mut datamodel::Model, mut variable: Variable) {
     if let Some(index) = model.variable_index(&ident) {
         // View elements reference variables by UID, so preserve the existing
         // UID when the replacement doesn't specify one.
-        if get_uid(&variable).is_none() {
-            set_uid(&mut variable, get_uid(&model.variables[index]));
+        if variable.get_uid().is_none() {
+            set_uid(&mut variable, model.variables[index].get_uid());
         }
         // An upsert of the variable as it is changes nothing, so the model
         // keeps the allocation it has and a copy of the project keeps sharing
@@ -760,7 +744,7 @@ fn upsert_variable(model: &mut datamodel::Model, mut variable: Variable) {
         // New variables created via patch (e.g., from MCP EditModel) may arrive
         // without a UID. Assign one so that SetLoopName can later reference them
         // by UID.
-        if get_uid(&variable).is_none() {
+        if variable.get_uid().is_none() {
             set_uid(&mut variable, Some(next_available_uid(model)));
         }
         model.variables.push(variable);
@@ -921,7 +905,7 @@ fn apply_set_loop_name(
         })?;
         // Only a variable that takes a new uid is written: one that has a uid
         // stays in the allocation a copy of the project shares.
-        let uid = match get_uid(&model.variables[index]) {
+        let uid = match model.variables[index].get_uid() {
             Some(uid) => uid,
             None => {
                 let minted = next_uid;
@@ -4810,9 +4794,15 @@ mod tests {
 
         // The referenced variables must now carry the minted UIDs, and the
         // metadata entry must reference exactly those UIDs (sorted).
-        let pop_uid = variable_uid(model.get_variable("population").unwrap())
+        let pop_uid = model
+            .get_variable("population")
+            .unwrap()
+            .get_uid()
             .expect("population should have a minted UID");
-        let births_uid = variable_uid(model.get_variable("births").unwrap())
+        let births_uid = model
+            .get_variable("births")
+            .unwrap()
+            .get_uid()
             .expect("births should have a minted UID");
         assert_ne!(pop_uid, births_uid, "minted UIDs must be unique");
         let mut expected = vec![pop_uid, births_uid];
@@ -4846,9 +4836,9 @@ mod tests {
         apply_patch(&mut project, patch).unwrap();
 
         let model = project.get_model("main").unwrap();
-        let pop_uid = variable_uid(model.get_variable("population").unwrap()).unwrap();
-        let births_uid = variable_uid(model.get_variable("births").unwrap()).unwrap();
-        let rate_uid = variable_uid(model.get_variable("rate").unwrap()).unwrap();
+        let pop_uid = model.get_variable("population").unwrap().get_uid().unwrap();
+        let births_uid = model.get_variable("births").unwrap().get_uid().unwrap();
+        let rate_uid = model.get_variable("rate").unwrap().get_uid().unwrap();
         assert_eq!(rate_uid, 7, "pre-existing UID must be preserved");
         assert!(
             pop_uid > 7 && births_uid > 7,

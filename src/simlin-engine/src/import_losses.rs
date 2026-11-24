@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use crate::errors::join_quoted_names;
+use crate::common::join_quoted_names;
 
 /// Something a file holds that its reader does not bring into the project,
 /// so a save of the project, in that file's format or any other, does not

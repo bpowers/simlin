@@ -1719,6 +1719,34 @@ pub(crate) fn duplicate_model_message(canonical: &str, spellings: &[String]) -> 
     )
 }
 
+/// Join variable names for a user-facing sentence: `'a'`, `'a' and 'b'`,
+/// `'a', 'b', and 'c'`. Long lists are truncated to the first three names
+/// plus a count, so a macro-instantiated conflict with dozens of sources
+/// stays readable.
+pub(crate) fn join_quoted_names(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [a] => format!("'{a}'"),
+        [a, b] => format!("'{a}' and '{b}'"),
+        [a, b, c] => format!("'{a}', '{b}', and '{c}'"),
+        [a, b, c, rest @ ..] => {
+            format!("'{a}', '{b}', '{c}', and {} more", rest.len())
+        }
+    }
+}
+
+#[test]
+fn join_quoted_names_truncates_long_lists() {
+    assert_eq!(join_quoted_names(&[]), "");
+    assert_eq!(join_quoted_names(&["a"]), "'a'");
+    assert_eq!(join_quoted_names(&["a", "b"]), "'a' and 'b'");
+    assert_eq!(join_quoted_names(&["a", "b", "c"]), "'a', 'b', and 'c'");
+    assert_eq!(
+        join_quoted_names(&["a", "b", "c", "d", "e"]),
+        "'a', 'b', 'c', and 2 more"
+    );
+}
+
 #[test]
 fn test_duplicate_variable_groups() {
     // No collisions: distinct canonicals yield no groups.

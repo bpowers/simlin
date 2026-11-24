@@ -522,15 +522,6 @@ fn build_tables(
     (tables, errors)
 }
 
-/// An equation string with no functional content: empty/whitespace-only (the
-/// canonical lookup-only form) or exactly the MDL lookup sentinel `"0+0"` (a
-/// legacy back-compat read-shim -- older serialized models may still carry it).
-/// The trimmed comparison mirrors `mdl::writer::is_lookup_only_equation`.
-pub(crate) fn is_empty_or_sentinel(equation: &str) -> bool {
-    let trimmed = equation.trim();
-    trimmed.is_empty() || trimmed == crate::mdl::LOOKUP_SENTINEL
-}
-
 /// Whether a variable is a standalone "lookup-only" table: it carries a
 /// graphical function and has no functional input expression to feed it. Such
 /// a variable is a *table indexed by an explicit input* (`y = table(input)`),
@@ -560,7 +551,7 @@ pub(crate) fn is_lookup_only(
     eqn: &datamodel::Equation,
     gf: Option<&datamodel::GraphicalFunction>,
 ) -> bool {
-    use crate::datamodel::Equation;
+    use crate::datamodel::{Equation, is_empty_or_sentinel};
     match eqn {
         Equation::Scalar(s) | Equation::ApplyToAll(_, s) => gf.is_some() && is_empty_or_sentinel(s),
         // The per-element gf is the 4th tuple field
@@ -1219,7 +1210,7 @@ mod is_lookup_only_tests {
     #[test]
     fn is_lookup_only_covers_every_equation_shape() {
         use datamodel::Equation::{ApplyToAll, Scalar};
-        let sentinel = crate::mdl::LOOKUP_SENTINEL;
+        let sentinel = crate::datamodel::LOOKUP_SENTINEL;
         let cases: Vec<(&str, datamodel::Equation, bool, bool)> = vec![
             // -- scalar --
             ("scalar empty + gf", Scalar(String::new()), true, true),

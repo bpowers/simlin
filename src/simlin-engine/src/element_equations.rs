@@ -348,7 +348,7 @@ fn compacted(var: &Variable, model: &Model) -> Option<Variable> {
         if kept.len() == arms.len() || (numbers && kept.is_empty()) {
             return None;
         }
-        let compact = crate::patch_fields::arrayed(dims.clone(), kept, default.clone(), true);
+        let compact = datamodel::Equation::arrayed(dims.clone(), kept, default.clone(), true);
         return with_equation(var, compact);
     }
     if numbers {

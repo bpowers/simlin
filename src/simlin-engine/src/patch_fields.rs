@@ -154,20 +154,6 @@ pub(crate) fn in_dimension_order(dims: &[&datamodel::Dimension], arms: Vec<Arm>)
     arms.into_iter().map(|(_, arm)| arm).collect()
 }
 
-/// An arrayed equation from its default and arms, in its smallest form: no
-/// arms left and a default every element follows is apply-to-all.
-pub(crate) fn arrayed(
-    dims: Vec<String>,
-    arms: Vec<Arm>,
-    default: Option<String>,
-    applies: bool,
-) -> Equation {
-    match default {
-        Some(default) if applies && arms.is_empty() => Equation::ApplyToAll(dims, default),
-        default => Equation::Arrayed(dims, arms, default, applies),
-    }
-}
-
 /// `setEquation`: a scalar's equation (a stock's initial value), or the
 /// equation every element of an arrayed variable follows. Elements with
 /// equations of their own keep them.
@@ -178,7 +164,7 @@ pub(crate) fn set_equation(model: &mut datamodel::Model, ident: &str, text: Stri
         *equation = match std::mem::replace(equation, Equation::Scalar(String::new())) {
             Equation::Scalar(_) => Equation::Scalar(text),
             Equation::ApplyToAll(dims, _) => Equation::ApplyToAll(dims, text),
-            Equation::Arrayed(dims, arms, _, _) => arrayed(dims, arms, Some(text), true),
+            Equation::Arrayed(dims, arms, _, _) => Equation::arrayed(dims, arms, Some(text), true),
         };
         Ok(var)
     })
@@ -246,7 +232,7 @@ pub(crate) fn set_element_equation(
             (None, None) => {}
         }
         let arms = in_dimension_order(&resolved, arms);
-        *equation = arrayed(dims, arms, default, applies);
+        *equation = Equation::arrayed(dims, arms, default, applies);
         Ok(var)
     })
 }
@@ -364,7 +350,7 @@ pub(crate) fn set_lookup(
             (None, None) => {}
         }
         let arms = in_dimension_order(&resolved, arms);
-        *equation = arrayed(dims, arms, default, applies);
+        *equation = Equation::arrayed(dims, arms, default, applies);
         Ok(var)
     })
 }
@@ -606,7 +592,7 @@ pub(crate) fn set_dimensions(
         }
         let names: Vec<String> = new.iter().map(|d| d.name().to_string()).collect();
         let applies = default.is_some();
-        *equation = arrayed(names, new_arms, default, applies);
+        *equation = Equation::arrayed(names, new_arms, default, applies);
         Ok(var)
     })
 }

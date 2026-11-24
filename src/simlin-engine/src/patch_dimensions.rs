@@ -21,7 +21,7 @@ use std::collections::BTreeSet;
 use crate::common::{Canonical, ErrorCode, Ident, Result, canonicalize};
 use crate::datamodel::{self, DimensionElements, Equation, Variable};
 use crate::patch::{Site, respelled_text};
-use crate::patch_fields::{Arm, arrayed, elements_of, in_dimension_order, refuse};
+use crate::patch_fields::{Arm, elements_of, in_dimension_order, refuse};
 
 /// What joins a dimension's name to one of its elements in an equation
 /// (`Age.young`, canonical `age·young`), the element's position.
@@ -372,7 +372,7 @@ pub(crate) fn upsert_dimension(
         if kept == *arms {
             return Ok(None);
         }
-        *equation = arrayed(dims.clone(), kept, default.clone(), *applies);
+        *equation = Equation::arrayed(dims.clone(), kept, default.clone(), *applies);
         Ok(Some(edited))
     })?;
     project.dimensions[at] = dimension;

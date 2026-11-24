@@ -2072,7 +2072,7 @@ fn the_variables_of_a_loop_the_session_named_are_as_read() {
         host.project.models[0]
             .variables
             .iter()
-            .all(|v| crate::patch::variable_uid(v).is_none()),
+            .all(|v| v.get_uid().is_none()),
         "the premise: a Vensim import gives no uids"
     );
     let mut session = Session::new("main");
@@ -2086,7 +2086,10 @@ fn the_variables_of_a_loop_the_session_named_are_as_read() {
         operations(json!([{"op": "name_loop", "loop": found["id"], "name": "contagion"}])),
     );
     assert!(
-        crate::patch::variable_uid(host.project.models[0].get_variable(&through).unwrap())
+        host.project.models[0]
+            .get_variable(&through)
+            .unwrap()
+            .get_uid()
             .is_some(),
         "the premise: naming the loop gave its variables uids"
     );

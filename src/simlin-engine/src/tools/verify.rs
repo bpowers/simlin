@@ -379,7 +379,7 @@ fn check(
         Citation::Equation { variable, equation } => {
             let (label, actual) = equation_of(ws.project, model, variable)?;
             let Some(actual) = actual else {
-                return if crate::variable::is_empty_or_sentinel(equation) {
+                return if crate::datamodel::is_empty_or_sentinel(equation) {
                     Ok(())
                 } else {
                     Err(format!(
@@ -997,7 +997,7 @@ fn equation_of(
         Some(element) => format!("{}[{element}]", var.get_ident()),
         None => var.get_ident().to_string(),
     };
-    if table && crate::variable::is_empty_or_sentinel(&text) {
+    if table && crate::datamodel::is_empty_or_sentinel(&text) {
         return Ok((label, None));
     }
     // A variable with a table is the table at its equation's value.

@@ -5,12 +5,12 @@
 use super::*;
 use crate::ast::{Expr0, IndexExpr0, Loc};
 use crate::common::RawIdent;
+use crate::datamodel::LOOKUP_SENTINEL;
 use crate::datamodel::{
     Aux, Compat, Equation, Flow, GraphicalFunction, GraphicalFunctionKind, GraphicalFunctionScale,
     Rect, SimMethod, Stock, StockFlow, Unit, Variable, view_element,
 };
 use crate::lexer::LexerType;
-use crate::mdl::LOOKUP_SENTINEL;
 
 /// Parse XMILE equation text to Expr0, then convert to MDL and assert.
 fn assert_mdl(xmile_eqn: &str, expected_mdl: &str) {

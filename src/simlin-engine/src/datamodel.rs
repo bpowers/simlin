@@ -277,6 +277,25 @@ pub enum Equation {
 }
 
 impl Equation {
+    /// An arrayed equation from its default and arms, in its smallest form: no
+    /// arms left and a default every element follows is apply-to-all.
+    pub(crate) fn arrayed(
+        dims: Vec<DimensionName>,
+        arms: Vec<(
+            ElementName,
+            String,
+            Option<String>,
+            Option<GraphicalFunction>,
+        )>,
+        default: Option<String>,
+        applies: bool,
+    ) -> Equation {
+        match default {
+            Some(default) if applies && arms.is_empty() => Equation::ApplyToAll(dims, default),
+            default => Equation::Arrayed(dims, arms, default, applies),
+        }
+    }
+
     /// The equation's source text concatenated into a single string:
     /// the scalar / Apply-to-All formula verbatim, or -- for the
     /// per-element (`Arrayed`) variant -- every element formula plus any
@@ -296,6 +315,27 @@ impl Equation {
             }
         }
     }
+}
+
+/// Sentinel equation `"0+0"` used by the MDL converter for a variable with an
+/// empty RHS (`MdlEquation::EmptyRhs`) -- a defined-but-unspecified variable
+/// that should evaluate to 0 rather than error.
+///
+/// A bare lookup definition (`MdlEquation::Lookup`) imports as the canonical
+/// lookup-only form -- an EMPTY equation + a graphical function -- NOT this
+/// sentinel (issue #606). The sentinel is ACCEPTED on read as a lookup-only
+/// marker ([`is_empty_or_sentinel`]) for models already serialized with it.
+/// The MDL writer recognises both the empty and sentinel forms to emit native
+/// Vensim `name(body)` syntax instead of `name = WITH LOOKUP(input, body)`.
+pub(crate) const LOOKUP_SENTINEL: &str = "0+0";
+
+/// An equation string with no functional content: empty/whitespace-only (the
+/// canonical lookup-only form) or exactly the MDL lookup sentinel `"0+0"` (a
+/// legacy back-compat read-shim -- older serialized models may still carry it).
+/// The trimmed comparison mirrors `mdl::writer::is_lookup_only_equation`.
+pub(crate) fn is_empty_or_sentinel(equation: &str) -> bool {
+    let trimmed = equation.trim();
+    trimmed.is_empty() || trimmed == LOOKUP_SENTINEL
 }
 
 /// The kind of external data function from Vensim's GET DIRECT family.
@@ -627,6 +667,17 @@ impl Variable {
             Variable::Flow(flow) => flow.ai_state,
             Variable::Aux(aux) => aux.ai_state,
             Variable::Module(module) => module.ai_state,
+        }
+    }
+
+    /// The variable's UID, or `None` if it has not been assigned one yet. A
+    /// `LoopMetadata` names its variables by these.
+    pub(crate) fn get_uid(&self) -> Option<i32> {
+        match self {
+            Variable::Stock(stock) => stock.uid,
+            Variable::Flow(flow) => flow.uid,
+            Variable::Aux(aux) => aux.uid,
+            Variable::Module(module) => module.uid,
         }
     }
 

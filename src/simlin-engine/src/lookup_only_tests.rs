@@ -32,11 +32,11 @@
 
 use crate::common::ErrorCode;
 use crate::datamodel;
+use crate::datamodel::LOOKUP_SENTINEL;
 use crate::db::{
     DiagnosticError, DiagnosticSeverity, SimlinDb, collect_all_diagnostics,
     compile_project_incremental, sync_from_datamodel, sync_from_datamodel_incremental,
 };
-use crate::mdl::LOOKUP_SENTINEL;
 use crate::vm::Vm;
 
 /// A 3-point continuous graphical function keyed on `x = [2000, 2001, 2002]`.

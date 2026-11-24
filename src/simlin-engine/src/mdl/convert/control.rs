@@ -15,8 +15,8 @@
 //! ([`ConversionContext::control_losses`]), since a save then writes the
 //! default in its place.
 
+use crate::common::join_quoted_names;
 use crate::datamodel::Dt;
-use crate::errors::join_quoted_names;
 use crate::import_losses::ImportWarning;
 use crate::mdl::ast::{BinaryOp, Equation as MdlEquation, Expr, UnaryOp};
 use crate::mdl::builtins::eq_lower_space;

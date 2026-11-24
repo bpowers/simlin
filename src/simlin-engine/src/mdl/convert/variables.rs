@@ -915,7 +915,7 @@ impl<'input> ConversionContext<'input> {
             // empty equation + a graphical function (no functional input). It is
             // a static table indexed by callers, not a value-bearing variable
             // (issue #606). The legacy `"0+0"` sentinel is still ACCEPTED on read
-            // (see `variable::is_empty_or_sentinel`) for already-serialized models.
+            // (see `datamodel::is_empty_or_sentinel`) for already-serialized models.
             MdlEquation::Lookup(_, table) => Ok((
                 String::new(),
                 None,

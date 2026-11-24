@@ -651,7 +651,7 @@ impl Delta {
                         .filter_map(|uid| {
                             is.variables
                                 .iter()
-                                .find(|v| crate::patch::variable_uid(v) == Some(*uid))
+                                .find(|v| v.get_uid() == Some(*uid))
                                 .map(|v| v.get_ident().to_string())
                         })
                         .collect();
