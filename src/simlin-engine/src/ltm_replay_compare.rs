@@ -18,12 +18,15 @@ use simlin_base::results::Results;
 
 use crate::analysis::build_link_expansion_context;
 use crate::db::{
-    LtmOverlay, LtmSyntheticVar, SimlinDb, SourceModel, SourceProject, compile_project_incremental,
+    LtmOverlay, LtmSyntheticVar, SimlinDb, SourceProject, compile_project_incremental,
     model_ltm_variables, project_datamodel_dims, set_project_ltm_discovery_mode,
     sync_from_datamodel_incremental,
 };
 use crate::ltm_agg::AGG_NAME_PREFIX;
-use crate::ltm_finding::{link_score_offsets, resolve_dim_element_tuples, subscript_from_elements};
+use crate::ltm_augment::dimension_element_names;
+use crate::ltm_finding::{
+    LinkExpansionContext, link_score_offsets, resolve_dim_element_tuples, subscript_from_elements,
+};
 use crate::ltm_replay::{Convention, Instance, Misreproduced, Reducers, Replay};
 use crate::vm::{CompiledSimulation, Vm};
 
@@ -137,27 +140,44 @@ impl Comparison {
     }
 }
 
+/// Why a model's scores are not compared.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum NotCompared {
+    /// The model does not run as it is, so it has no scores.
+    DoesNotRun(String),
+    /// The model runs, and its program could not be replayed, or its scores
+    /// could not be run beside it: what compares them is wrong, or they are.
+    Broken(String),
+}
+
+impl std::fmt::Display for NotCompared {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NotCompared::DoesNotRun(why) => write!(f, "does not run: {why}"),
+            NotCompared::Broken(why) => write!(f, "broken: {why}"),
+        }
+    }
+}
+
 /// Compare every link score of `project`'s main model, its module instances'
-/// inner ones included, at every row a run saves. `Err` says why there is
-/// nothing to compare.
-pub fn compare(project: &datamodel::Project) -> Result<Comparison, String> {
+/// inner ones included, at every row a run saves.
+pub fn compare(project: &datamodel::Project) -> Result<Comparison, NotCompared> {
     let main = project
         .models
         .iter()
         .find(|m| m.name == "main" || m.name.is_empty())
         .or_else(|| project.models.iter().find(|m| m.macro_spec.is_none()))
-        .ok_or("no model")?;
+        .ok_or_else(|| NotCompared::DoesNotRun("no model".to_string()))?;
     let main = datamodel::canonical_model_name(&main.name).into_owned();
-    let plain = {
-        let mut db = SimlinDb::default();
-        let sync = sync_from_datamodel_incremental(&mut db, project, None);
-        compile_project_incremental(&db, sync.project, &main, LtmOverlay::Off)
-            .map_err(|e| e.to_string())?
-    };
-    let nodes = Side::new(&plain, Reducers::AsNodes)?;
-    let inline = Side::new(&plain, Reducers::Inline)?;
-    let generated = Generated::new(project, &main, nodes.replay.instances())?;
-    generated.ran_the_same_model(&plain, &nodes.replay)?;
+    let plain = plain_run(project, &main).map_err(NotCompared::DoesNotRun)?;
+    let side = |reducers| Side::new(&plain, reducers).map_err(NotCompared::Broken);
+    let (nodes, inline) = (side(Reducers::AsNodes)?, side(Reducers::Inline)?);
+    let generated = Generated::new(project, &main, nodes.replay.instances())
+        .and_then(|generated| {
+            generated.ran_the_same_model(&plain, &nodes.replay)?;
+            Ok(generated)
+        })
+        .map_err(NotCompared::Broken)?;
     Ok(Comparer {
         nodes,
         inline,
@@ -166,6 +186,17 @@ pub fn compare(project: &datamodel::Project) -> Result<Comparison, String> {
         placed: HashSet::new(),
     }
     .run())
+}
+
+/// The model without its scores, which runs.
+fn plain_run(project: &datamodel::Project, main: &str) -> Result<Arc<CompiledSimulation>, String> {
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, project, None);
+    let plain = compile_project_incremental(&db, sync.project, main, LtmOverlay::Off)
+        .map_err(|e| e.to_string())?;
+    let mut vm = Vm::new(plain.clone()).map_err(|e| e.to_string())?;
+    vm.run_to_end().map_err(|e| e.to_string())?;
+    Ok(plain)
 }
 
 /// One link with a generated score.
@@ -208,12 +239,21 @@ impl Generated {
             };
             let vars = &model_ltm_variables(&db, model, sync.project).vars;
             let (prefix, within) = (&instance.prefix, names_within(&results, instance));
+            let expansion = build_link_expansion_context(&db, model, sync.project);
+            let only_elements = only_elements(&expansion);
+            let result_name = |node: &str| {
+                let name = only_elements.get(node).map_or(node, String::as_str);
+                format!("{prefix}{name}")
+            };
+            // The links discovery would search, by the engine's own expansion
+            // of its score variables into them.
+            let dims = project_datamodel_dims(&db, sync.project);
             columns.extend(
-                element_links(&db, sync.project, model, vars, &within)
+                link_score_offsets(&within, vars, dims, &expansion)
                     .into_iter()
                     .map(|((from, to), offset)| Column {
-                        from: format!("{prefix}{}", from.as_str()),
-                        to: format!("{prefix}{}", to.as_str()),
+                        from: result_name(from.as_str()),
+                        to: result_name(to.as_str()),
                         offset,
                     }),
             );
@@ -282,21 +322,25 @@ fn names_within(results: &Results, instance: &Instance) -> Results {
     }
 }
 
-/// The links discovery would search, by the engine's own expansion of its
-/// score variables into them.
-fn element_links(
-    db: &SimlinDb,
-    project: SourceProject,
-    model: SourceModel,
-    vars: &[LtmSyntheticVar],
-    names: &Results,
-) -> Vec<crate::ltm_finding::LinkScoreOffset> {
-    link_score_offsets(
-        names,
-        vars,
-        project_datamodel_dims(db, project),
-        &build_link_expansion_context(db, model, project),
-    )
+/// The element an array of one has, as a link names it, and the array's name,
+/// which is what its one slot has in a run's results.
+fn only_elements(expansion: &LinkExpansionContext) -> HashMap<String, String> {
+    expansion
+        .declared_dims
+        .iter()
+        .filter(|(_, dims)| !dims.is_empty() && dims.iter().all(|dim| dim.len() == 1))
+        .map(|(variable, dims)| {
+            let elements: Vec<String> = dims.iter().flat_map(dimension_element_names).collect();
+            (
+                format!(
+                    "{}[{}]",
+                    variable.as_str(),
+                    subscript_from_elements(&elements)
+                ),
+                variable.as_str().to_string(),
+            )
+        })
+        .collect()
 }
 
 /// Each aggregate node and the column of its value.
@@ -482,6 +526,12 @@ impl Side {
             })
             .collect()
     }
+
+    /// Whether an edge's score is not 0 at some row its ends are numbers at.
+    fn is_active(&self, edge: usize) -> bool {
+        let e = self.replay.edges()[edge];
+        is_active_at(self.series(edge), &self.defined(e.from, e.to))
+    }
 }
 
 /// Which replay an edge is of.
@@ -628,6 +678,7 @@ impl Comparer {
             };
         }
         let is_node = |slot: usize| self.nodes.replay.is_reducer_node(slot);
+        let is_active = is_active_at(series, &self.nodes.defined(from, to));
         let mut candidates = self.candidates(
             Which::Nodes,
             self.nodes.edges_between(from, to),
@@ -640,7 +691,7 @@ impl Comparer {
             // is in, so the same link of the other replay answers for it. Where
             // it did make one, what the source does is in the links through
             // the node, and the link past it does nothing.
-            if candidates.is_empty() && !is_active(series) {
+            if candidates.is_empty() && !is_active {
                 return self.agreed(series);
             }
             candidates.extend(self.candidates(
@@ -652,7 +703,7 @@ impl Comparer {
             ));
         }
         if candidates.is_empty() {
-            if is_active(series) {
+            if is_active {
                 self.found.not_read.push(one_sided(column));
             }
             return;
@@ -932,7 +983,7 @@ impl Comparer {
         };
         let edges = side.replay.edges();
         for (i, first) in edges.iter().enumerate() {
-            if !is_variable(first.from) || !is_active(side.series(i)) {
+            if !is_variable(first.from) || !side.is_active(i) {
                 continue;
             }
             // Through reducer nodes to each variable they are read by.
@@ -947,7 +998,7 @@ impl Comparer {
                     }
                 } else if side.replay.is_reducer_node(at) {
                     for &e in side.leaving.get(&at).into_iter().flatten() {
-                        if is_active(side.series(e)) {
+                        if side.is_active(e) {
                             work.push((edges[e].to, so_far && is_scored(at, edges[e].to)));
                         }
                     }
@@ -967,6 +1018,11 @@ fn one_sided(column: &Column) -> OneSided {
 /// Whether a score is not 0 throughout.
 fn is_active(series: &[f64]) -> bool {
     series.iter().any(|v| *v != 0.0)
+}
+
+/// Whether a score is not 0 at some row it is defined at.
+fn is_active_at(series: &[f64], defined: &[bool]) -> bool {
+    series.iter().zip(defined).any(|(v, d)| *d && *v != 0.0)
 }
 
 /// How far apart two numbers are, relative to the larger.

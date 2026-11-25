@@ -267,19 +267,62 @@ fn a_link_one_of_the_two_does_not_score_is_said_to_be() {
 }
 
 #[test]
-fn a_model_with_nothing_to_compare_says_why() {
+fn a_model_that_does_not_run_is_not_one_whose_comparison_is_broken() {
     let no_model = datamodel::Project {
         models: vec![],
         ..scalar().build_datamodel()
     };
-    assert_eq!(compare(&no_model).unwrap_err(), "no model");
-    let uncompiled = scalar().flow("f", "missing * 2", None).build_datamodel();
-    assert!(compare(&uncompiled).unwrap_err().contains("f"));
-    let no_steps = scalar()
-        .flow("f", "1", None)
-        .with_sim_time(0.0, 6.0, 0.0)
+    assert_eq!(
+        compare(&no_model).unwrap_err(),
+        NotCompared::DoesNotRun("no model".to_string())
+    );
+    let uncompiled = scalar().flow("f", "missing * 2", None);
+    let no_steps = scalar().flow("f", "1", None).with_sim_time(0.0, 6.0, 0.0);
+    for project in [uncompiled, no_steps] {
+        let why = compare(&project.build_datamodel()).unwrap_err();
+        assert!(matches!(why, NotCompared::DoesNotRun(_)), "{why:?}");
+    }
+    let why = NotCompared::DoesNotRun("a reason".to_string()).to_string();
+    assert_eq!(why, "does not run: a reason");
+    let why = NotCompared::Broken("a reason".to_string()).to_string();
+    assert_eq!(why, "broken: a reason");
+}
+
+/// What makes a comparison broken, as against a model that has none: the two
+/// runs are not of one model.
+#[test]
+fn a_run_with_scores_that_is_not_the_models_run_is_broken() {
+    let project = scalar().flow("f", "s * 0.1", None).build_datamodel();
+    let other = scalar().flow("f", "s * 0.2", None).build_datamodel();
+    let longer = scalar()
+        .flow("f", "s * 0.1", None)
+        .with_sim_time(0.0, 7.0, 1.0)
         .build_datamodel();
-    assert!(compare(&no_steps).is_err());
+    let more = scalar()
+        .flow("f", "s * 0.1", None)
+        .aux("extra", "TIME", None)
+        .build_datamodel();
+    let plain = plain_run(&more, "main").expect("runs");
+    let of_more = Side::new(&plain, Reducers::Inline).expect("cut").replay;
+    let scored = |project| Generated::new(project, "main", of_more.instances()).expect("runs");
+    assert!(
+        scored(&project)
+            .ran_the_same_model(&plain, &of_more)
+            .is_err_and(|e| e.contains("has no extra"))
+    );
+    let plain = plain_run(&project, "main").expect("runs");
+    let replay = Side::new(&plain, Reducers::Inline).expect("cut").replay;
+    assert!(scored(&project).ran_the_same_model(&plain, &replay).is_ok());
+    assert!(
+        scored(&other)
+            .ran_the_same_model(&plain, &replay)
+            .is_err_and(|e| e.contains("differs between the two runs"))
+    );
+    assert!(
+        scored(&longer)
+            .ran_the_same_model(&plain, &replay)
+            .is_err_and(|e| e.contains("different rows"))
+    );
 }
 
 #[test]
@@ -306,4 +349,37 @@ fn a_link_between_what_is_never_a_number_is_not_one_that_agrees() {
         (0, 0),
         "{found:#?}"
     );
+}
+
+#[test]
+fn an_array_of_one_element_is_compared_like_any_other() {
+    // Its one slot has no element in its results name, and the generated links
+    // name the element.
+    let found = compared(
+        &TestProject::new("one_element")
+            .with_sim_time(0.0, 6.0, 1.0)
+            .indexed_dimension("D", 1)
+            .array_stock("pop[D]", "100", &["grow"], &[], None)
+            .array_flow("grow[D]", "pop[D] * 0.1", None),
+    );
+    assert_eq!(
+        (
+            found.agreed_active,
+            found.not_slots.len(),
+            found.not_scored.len()
+        ),
+        (2, 0, 0),
+        "{found:#?}"
+    );
+}
+
+#[test]
+fn a_target_that_is_never_a_number_is_not_one_whose_links_go_unscored() {
+    let found = compared(
+        &arrayed()
+            .array_aux("on[R]", "0")
+            .aux("selected", "VECTOR SELECT(on[*], pop[*], NAN, 0, 0)", None)
+            .array_flow("grow[R]", "k[R] * pop[R]", None),
+    );
+    assert_eq!(links(&found.not_scored), Vec::<String>::new());
 }

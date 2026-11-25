@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use std::io::BufReader;
 
 use simlin_base::datamodel::Project;
-use simlin_engine::ltm_replay_compare::{Comparison, Why, compare};
+use simlin_engine::ltm_replay_compare::{Comparison, NotCompared, Why, compare};
 
 use crate::test_helpers::corpus;
 
@@ -154,22 +154,27 @@ fn known(path: &str) -> Found {
         .unwrap_or_default()
 }
 
-/// Compare each model, and what is found with what is known. Returns how many
-/// were compared and how many active scores agree.
-fn check(paths: &[String]) -> (usize, usize) {
+/// Compare each model, and what is found with what is known. Returns the
+/// models compared, and how many active scores of each agree.
+fn check(paths: &[String]) -> BTreeMap<&str, usize> {
     use rayon::prelude::*;
 
-    let compared: Vec<(&str, Comparison)> = paths
+    let results: Vec<(&str, Result<Comparison, NotCompared>)> = paths
         .par_iter()
-        .filter_map(|path| {
-            let project = open(path)?;
-            // A model that does not compile, or whose stocks the overlay does
-            // not take (a conveyor, a queue), has no scores.
-            let comparison = compare(&project).ok()?;
-            Some((path.as_str(), comparison))
-        })
+        .filter_map(|path| Some((path.as_str(), compare(&open(path)?))))
         .collect();
+    let mut compared: Vec<(&str, Comparison)> = Vec::new();
     let mut off: Vec<String> = Vec::new();
+    for (path, result) in results {
+        match result {
+            Ok(comparison) => compared.push((path, comparison)),
+            // A model that does not run, or that the overlay does not take (a
+            // conveyor's, a queue's, which the ordinary compile refuses), has
+            // no scores.
+            Err(NotCompared::DoesNotRun(_)) => {}
+            Err(NotCompared::Broken(why)) => off.push(format!("{path}: {why}")),
+        }
+    }
     for (path, comparison) in &compared {
         if !comparison.misreproduced.is_empty() {
             off.push(format!("{path}: {:#?}", comparison.misreproduced));
@@ -184,8 +189,10 @@ fn check(paths: &[String]) -> (usize, usize) {
         }
     }
     assert!(off.is_empty(), "{}", off.join("\n"));
-    let active = compared.iter().map(|(_, c)| c.agreed_active).sum();
-    (compared.len(), active)
+    compared
+        .into_iter()
+        .map(|(path, comparison)| (path, comparison.agreed_active))
+        .collect()
 }
 
 #[test]
@@ -200,9 +207,11 @@ fn small_models_scores_are_the_replayed_ones() {
         "test/systems-format/hiring.txt",
     ]
     .map(str::to_string);
-    let (compared, active) = check(&paths);
-    assert_eq!(compared, paths.len());
-    assert!(active >= 400, "{active} active scores");
+    let compared = check(&paths);
+    assert_eq!(compared.len(), paths.len());
+    for (path, active) in compared {
+        assert!(active > 0, "{path} has an active score");
+    }
 }
 
 #[test]
@@ -216,15 +225,16 @@ fn the_corpus_scores_are_the_replayed_ones() {
             paths.push(format!("test/systems-format/{name}"));
         }
     }
-    let (compared, active) = check(&paths);
+    let compared = check(&paths);
     // Fewer means the corpus walk or the comparison broke, which would
     // otherwise pass with nothing to say.
-    assert!(compared >= 400, "{compared} models");
+    assert!(compared.len() >= 400, "{} models", compared.len());
+    let active: usize = compared.values().sum();
     assert!(active >= 5_700, "{active} active scores");
     for known in KNOWN {
         assert!(
-            paths.iter().any(|path| path == known.path),
-            "{}",
+            compared.contains_key(known.path),
+            "{} is compared",
             known.path
         );
     }

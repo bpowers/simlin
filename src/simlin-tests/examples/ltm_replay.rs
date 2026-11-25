@@ -120,7 +120,7 @@ fn main() {
                 if one {
                     println!("{}: {why}", path.display());
                 }
-                *refused.entry(why).or_default() += 1;
+                *refused.entry(why.to_string()).or_default() += 1;
                 continue;
             }
         };
