@@ -122,9 +122,11 @@ pub(crate) fn sub_model_output_ports(
     model: SourceModel,
     project: SourceProject,
 ) -> Vec<Ident<Canonical>> {
-    // Stdlib models are always read through the `output` convention, so their
-    // single LTM output port is `output` rather than a scanned port name.
-    if model.name(db).starts_with("stdlib\u{205A}") {
+    // A stdlib model a call expands to (`SMTH1`, `DELAY3`, ...) is read through
+    // its `output`, so that is its single LTM output port. The systems-format
+    // ones are instantiated by name and have none: the variables they are read
+    // through are the ones a reader names, like a person's own sub-model's.
+    if model.name(db).starts_with("stdlib\u{205A}") && model.variables(db).contains_key("output") {
         return vec![Ident::new("output")];
     }
     find_model_output_ports(db, model, project)

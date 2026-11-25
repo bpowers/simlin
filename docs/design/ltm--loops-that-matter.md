@@ -1933,6 +1933,10 @@ Two kinds of agg:
   Routing through a synthetic agg gives
   the whole-RHS case the same remapped two-half scoring as an inline mapped
   reducer.
+  Another is a whole array's sum that an arrayed variable spreads over its
+  elements (`share[R] = SUM(pop[*])`): every element reads every row, which a
+  score of the direct edge with a slot per element of `share` cannot hold.
+  `ltm_agg::variable_backed_shape_is_expressible` states every exception.
 
 **Loop reporting trims agg nodes.** `$⁚ltm⁚agg⁚{n}` nodes don't appear in the
 user-facing loop list -- like the internal stocks of `DELAY3`/`SMOOTH` in the
@@ -2645,6 +2649,16 @@ All integration tests use `compile_project_incremental` + VM:
 
 - **`discovery_decoupled_stocks`**: Tests time-varying loop activation where
   different loops become active at different timesteps
+
+### Replayed link scores
+
+The tests above hold generated scores to scores worked out by hand, or to each other.
+`ltm_replay` (`src/simlin-engine/src/ltm_replay.rs`, built for tests only) is the method's own procedure: it runs the model as it is and, for each link at each step, runs the code the model already has for the target once more, over the step before's values with the one source slot moved to this step's.
+Nothing is generated or compiled for it, so it cannot share a generator's mistake.
+`ltm_replay_compare` compares the two for every link of a model and gives each difference a reason whose number it checks: a documented convention (changed-last, a lag or the clock left live), one read of several, the target's whole change, a score of 0, a whole array's change credited to each element, another way through a module, or none of these.
+`src/simlin-tests/tests/integration/ltm_replay.rs` runs it over every model of the corpus against the table of what is known to differ.
+
+What it does not do: it scores slots, so it has no score for a variable-level link of an array; it keeps every step's row of a run; and it looks at link scores, of which loop scores are products.
 
 ## References
 

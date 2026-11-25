@@ -552,8 +552,8 @@ fn compute_module_link_overrides(
             // Same salsa-cached inputs the sub-model's own emission uses, so the
             // pathway Vec order (and therefore the `{idx}` in the emitted
             // `$⁚ltm⁚path⁚{port}⁚{idx}` names) is identical index-for-index. The
-            // shared `sub_model_output_ports` is what guarantees the stdlib
-            // `output` convention and the user-model port scan can't skew apart.
+            // shared `sub_model_output_ports` is what guarantees a stdlib
+            // `output` and the port scan can't skew apart.
             let output_ports = sub_model_output_ports(db, sub_model, project);
             if output_ports.is_empty() {
                 return None;
@@ -963,9 +963,8 @@ pub fn model_ltm_variables(
     let edges_result = model_causal_edges(db, model, project);
 
     // Determine output ports for this model and the internal input->output
-    // pathways through them. Stdlib models always use the "output"
-    // convention; for user-defined models the output ports come from which
-    // internal variables are read from parent models via module·var syntax.
+    // pathways through them (`sub_model_output_ports`: a stdlib model's
+    // `output`, or the variables a parent reads via module·var syntax).
     //
     // This is computed BEFORE the stock-free early return because a
     // *passthrough* sub-model (no internal stocks) still has parent-visible

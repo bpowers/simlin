@@ -5069,6 +5069,33 @@ mod arrayed_vector_sort_order_per_slice_tests {
         project.assert_compiles_incremental();
         project.assert_vm_result("picked", &[20.0, 30.0, 40.0]);
     }
+
+    /// An offset past what an integer holds is past the end of the source,
+    /// whatever element it is an offset from, and an offset that is not a
+    /// number is no element's: `:NA:`, in an offset the run computes and in one
+    /// the compiler folds.
+    #[test]
+    fn elm_map_offset_that_is_no_index_is_na_vm() {
+        for offset in ["1e300", "-1e300", "NAN"] {
+            let project = TestProject::new("elm_map_no_index")
+                .indexed_dimension("D", 2)
+                .indexed_dimension("E", 3)
+                .array_aux("m[D,E]", "D * E")
+                .array_aux("offs[E]", &format!("{offset} + 0 * TIME"))
+                .array_aux("picked[E]", "VECTOR ELM MAP(m[2,*], offs[E])")
+                .array_aux(
+                    "folded[E]",
+                    &format!("VECTOR ELM MAP(m[2,2], {offset} * E)"),
+                );
+            for name in ["picked", "folded"] {
+                let picked = project.vm_result(name);
+                assert!(
+                    picked.len() == 3 && picked.iter().all(|v| v.is_nan()),
+                    "{name} at {offset}: {picked:?}"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]

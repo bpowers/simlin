@@ -378,38 +378,40 @@ fn whole_rhs_arrayed_partial_reduce_is_its_own_agg() {
     );
 }
 
-/// AC4.3 (arrayed full-reduce broadcast): `share[Region] = SUM(pop[*])` is
-/// a whole-RHS reducer, so the variable is the agg -- but `SUM(pop[*])` is a
-/// *full* reduce (scalar result) merely broadcast to `[Region]`, so the
-/// agg's `result_dims` is `[]`, not `[Region]`. (Contrast with
-/// `agg[D1] = SUM(matrix[D1, *])`, a partial reduce that genuinely varies
-/// per `D1`.)
+/// `share[Region] = SUM(pop[*])` (a full reduce spread over an arrayed
+/// variable): the reducer's one value is a node of its own, with scalar result
+/// dims, which every element of `share` reads. (Contrast with
+/// `agg[D1] = SUM(matrix[D1, *])`, a partial reduce that genuinely varies per
+/// `D1` and that the variable itself is.)
 #[test]
-fn whole_rhs_arrayed_full_reduce_broadcast_has_scalar_result_dims() {
+fn whole_rhs_arrayed_full_reduce_broadcast_is_a_node_of_its_own() {
     let project = TestProject::new("whole_rhs_broadcast")
         .named_dimension("Region", &["NYC", "Boston"])
         .array_aux("pop[Region]", "100")
-        .array_aux("share[Region]", "SUM(pop[*])");
+        .array_aux("share[Region]", "SUM(pop[*])")
+        .aux("total", "SUM(pop[*])", None);
 
     let result = agg_nodes(&project);
 
-    assert!(
-        result.aggs.iter().all(|a| !a.is_synthetic),
-        "whole-RHS reducer must not mint a synthetic agg; got: {:?}",
-        result.aggs
-    );
-    let agg = result
-        .aggs_in_var("share")
-        .next()
-        .expect("expected an agg owned by `share`");
-    assert_eq!(agg.name, "share");
-    assert!(!agg.is_synthetic);
+    let of_share: Vec<&AggNode> = result.aggs_in_var("share").collect();
+    let [agg] = of_share.as_slice() else {
+        panic!("one node owned by `share`; got: {of_share:?}");
+    };
+    assert!(agg.is_synthetic);
     assert_eq!(source_names(agg), vec!["pop"]);
     assert!(
         agg.result_dims.is_empty(),
-        "a full reduce broadcast to an arrayed variable has scalar result dims, got: {:?}",
+        "one value for every element, got: {:?}",
         agg.result_dims
     );
+
+    // A scalar variable of the same reducer is the node itself.
+    let of_total: Vec<&AggNode> = result.aggs_in_var("total").collect();
+    let [agg] = of_total.as_slice() else {
+        panic!("one node owned by `total`; got: {of_total:?}");
+    };
+    assert!(!agg.is_synthetic);
+    assert_eq!(agg.name, "total");
 }
 
 /// AC4.1 (the basic mint): `share[r] = pop[r] / SUM(pop[*])` mints one

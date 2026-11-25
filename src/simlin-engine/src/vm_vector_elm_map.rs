@@ -116,7 +116,9 @@ pub fn vector_elm_map(
         let elem = if offset_val.is_nan() {
             f64::NAN
         } else {
-            let flat_i = base_i + offset_val.round() as i64;
+            // The cast saturates, so an offset past what an i64 holds is one
+            // past the end whatever the base is.
+            let flat_i = base_i.saturating_add(offset_val.round() as i64);
             if flat_i < 0 || flat_i >= full_len as i64 {
                 f64::NAN
             } else {

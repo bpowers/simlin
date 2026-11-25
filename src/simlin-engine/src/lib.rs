@@ -53,6 +53,12 @@ pub mod ltm_finding;
 #[cfg(any(test, feature = "test-support"))]
 pub mod ltm_loop_scores_test_support;
 pub mod ltm_post;
+// An independent account of LTM's link scores, which tests hold the generated
+// ones to; no shipped build has it.
+#[cfg(any(test, feature = "test-support"))]
+pub mod ltm_replay;
+#[cfg(any(test, feature = "test-support"))]
+pub mod ltm_replay_compare;
 #[cfg(test)]
 mod macro_expansion_tests;
 #[cfg(test)]

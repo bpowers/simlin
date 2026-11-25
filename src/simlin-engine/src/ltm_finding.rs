@@ -954,7 +954,7 @@ fn expand_fixed_from_a2a_link_offsets(
 /// their element names (row-major). Returns `None` if any dimension is
 /// missing from `dims`; callers fall back to a non-expanded entry in
 /// that case.
-fn resolve_dim_element_tuples(
+pub(crate) fn resolve_dim_element_tuples(
     var_dims: &[String],
     dims: &[datamodel::Dimension],
 ) -> Option<Vec<Vec<String>>> {
@@ -994,7 +994,7 @@ fn resolve_dim_element_tuples(
 /// Render a list of element names as a subscript body (no surrounding
 /// brackets). Single-dimension subscripts are emitted bare (`nyc`);
 /// multi-dimension subscripts are comma-joined (`nyc,q1`).
-fn subscript_from_elements(elems: &[String]) -> String {
+pub(crate) fn subscript_from_elements(elems: &[String]) -> String {
     if elems.len() == 1 {
         elems[0].clone()
     } else {

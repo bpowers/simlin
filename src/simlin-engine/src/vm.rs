@@ -756,6 +756,73 @@ pub fn increment_indices(indices: &mut [u16], dims: &[u16]) {
     }
 }
 
+/// Runs pieces of a compiled flows program over rows the caller holds: what
+/// [`crate::ltm_replay`] evaluates one variable's own code with.
+///
+/// Only tests build it, so the VM's dispatch loop has its one caller in every
+/// shipped build.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) struct PieceEvaluator {
+    sliced_sim: CompiledSlicedSimulation,
+    stack: Stack,
+    temp_storage: Vec<f64>,
+    view_stack: Vec<RuntimeView>,
+    iter_stack: Vec<IterState>,
+    initial_values: Box<[f64]>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl PieceEvaluator {
+    /// An evaluator whose `INIT` reads are the initial values of `vm`'s run.
+    pub(crate) fn new(vm: &Vm) -> Self {
+        PieceEvaluator {
+            sliced_sim: vm.sliced_sim.clone(),
+            stack: Stack::new(),
+            temp_storage: vec![0.0; vm.temp_storage.len()],
+            view_stack: Vec::new(),
+            iter_stack: Vec::new(),
+            initial_values: vm.initial_values.clone(),
+        }
+    }
+
+    /// Run `code`, which calls no module, with `curr` as the step's row and
+    /// `prev` as the row of the step before it. At the first step there is
+    /// none and `PREVIOUS` reads its fallback (`at_first_step`).
+    pub(crate) fn run(
+        &mut self,
+        context: &ByteCodeContext,
+        code: &ByteCode,
+        module_off: usize,
+        curr: &mut [f64],
+        prev: &mut [f64],
+        at_first_step: bool,
+    ) {
+        let mut state = EvalState {
+            stack: &mut self.stack,
+            temp_storage: &mut self.temp_storage,
+            view_stack: &mut self.view_stack,
+            iter_stack: &mut self.iter_stack,
+            initial_values: &self.initial_values,
+            prev_values: prev,
+            use_prev_fallback: at_first_step,
+        };
+        Vm::eval_bytecode(
+            &self.sliced_sim,
+            &mut state,
+            context,
+            code,
+            StepPart::Flows,
+            module_off,
+            // The index of the module whose `EvalModule` calls this resolves,
+            // of which a piece has none.
+            0,
+            &[],
+            curr,
+            &mut [],
+        );
+    }
+}
+
 /// Sentinel written into the `next` chunk by `poison_next_chunk_for_test`. A
 /// distinctive finite value rather than NaN, so a slot that carries forward is
 /// distinguishable from a model's own NaN.

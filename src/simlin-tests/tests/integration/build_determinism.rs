@@ -21,7 +21,6 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::BufReader;
-use std::path::PathBuf;
 
 use simlin_base::datamodel::Project;
 use simlin_engine::db::{
@@ -30,35 +29,11 @@ use simlin_engine::db::{
 };
 use simlin_formats::buffa::Message;
 
+use crate::test_helpers::corpus;
+
 /// Loop analysis compiles the model under the LTM overlay and searches its
 /// loops, so only files up to this size take it.
 const LOOP_ANALYSIS_MAX_BYTES: usize = 20 * 1024;
-
-/// Every model file under `test/`, relative to the repo root.
-fn corpus() -> Vec<String> {
-    let root = PathBuf::from("../..");
-    let mut files = Vec::new();
-    let mut dirs = vec![root.join("test")];
-    while let Some(dir) = dirs.pop() {
-        let Ok(entries) = fs::read_dir(&dir) else {
-            continue;
-        };
-        for path in entries.flatten().map(|entry| entry.path()) {
-            let model = path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
-                ["mdl", "xmile", "stmx", "itmx"]
-                    .iter()
-                    .any(|x| e.eq_ignore_ascii_case(x))
-            });
-            if path.is_dir() {
-                dirs.push(path);
-            } else if model && let Ok(relative) = path.strip_prefix(&root) {
-                files.push(relative.to_string_lossy().into_owned());
-            }
-        }
-    }
-    files.sort();
-    files
-}
 
 fn open(path: &str, bytes: &[u8]) -> Option<(Project, Vec<String>)> {
     let (project, warnings) = if path.to_ascii_lowercase().ends_with(".mdl") {

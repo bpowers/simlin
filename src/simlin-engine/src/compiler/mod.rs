@@ -1690,9 +1690,10 @@ fn try_fold_scalar_source_elm_map(ctx: &Context, main_expr: &Expr) -> Option<Exp
         return None;
     };
     let full_len = ctx.full_var_len_for_base(base)?;
-    // round() matches the VM's `vm_vector_elm_map` per-element offset rounding.
-    let flat = elem_flat as i64 + offset_val.round() as i64;
-    if flat < 0 || flat >= full_len as i64 {
+    // The VM's own reading of an offset (`vm_vector_elm_map`): rounded, out of
+    // range past what an integer holds, and no element's when it is NaN.
+    let flat = (elem_flat as i64).saturating_add(offset_val.round() as i64);
+    if offset_val.is_nan() || flat < 0 || flat >= full_len as i64 {
         Some(Expr::Const(f64::NAN, *loc))
     } else {
         Some(Expr::Var(base.offset_by(flat as usize), *loc))

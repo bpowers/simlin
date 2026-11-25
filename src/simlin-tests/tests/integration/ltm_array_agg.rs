@@ -4868,9 +4868,9 @@ fn a_row_reducer_owner_and_a_whole_reducer_owner_of_one_text_get_their_own_nodes
 /// pass 0 pairs a bare in-equation read under `DirectMappingsOnly`, which
 /// withholds the parent rung (`y[a1] = y[a3] = src[b1] + src[b2] + src[b3]`,
 /// measured; `yi[suba] = SUM(src[*])` is the same read spelled). The IR says
-/// so (`Wildcard`, the pairing `BareSpelling::Equation`), the element graph
-/// carries all six `src[b] -> y[a]` edges, and the `src -> y` score is the
-/// loud decline the spelled `yi` gets (an arrayed pair with no correspondence).
+/// so (`Wildcard`, the pairing `BareSpelling::Equation`), and the element graph
+/// leads every `src[b]` to a node that leads to every `y[a]`, as it does for
+/// the spelled `yi`, each of the links scored.
 /// Paired under the full context -- the stock/flow wiring's rule -- the parent
 /// mapping related `dimb` to `suba` and the graph carried `src[b1] -> y[a1]`
 /// and `src[b3] -> y[a3]` alone: a strict subset of the executed reads, and
@@ -4881,7 +4881,7 @@ fn a_row_reducer_owner_and_a_whole_reducer_owner_of_one_text_get_their_own_nodes
 /// subscripts under the full context (`z[a1] = src[b1]`, `z[a3] = src[b3]`,
 /// measured). The equation pairing describes it as the broadcast -- every
 /// `src[b] -> z[a]`, a superset of the two reads -- and declines its score
-/// loudly, as it declines `src -> y`.
+/// loudly.
 #[test]
 fn a_parent_mapped_bare_argument_reads_the_whole_array() {
     let project = TestProject::new("parent_mapped_bare")
@@ -4895,7 +4895,7 @@ fn a_parent_mapped_bare_argument_reads_the_whole_array() {
         .array_aux("yi[suba]", "SUM(src[*])")
         .array_aux("z[suba]", "src")
         // Every target sits on a loop, so exhaustive mode scores (or declines)
-        // each of the three edges.
+        // each of the three.
         .array_flow(
             "f[dimb]",
             "src[dimb] * 0.01 + SUM(y) * 0.001 + SUM(z) * 0.0001 + SUM(yi) * 0.00001",
@@ -4907,32 +4907,35 @@ fn a_parent_mapped_bare_argument_reads_the_whole_array() {
     let sync = sync_from_datamodel_incremental(&mut db, &project, None);
     let _ = model_ltm_variables(&db, sync.models["main"].source_model, sync.project);
     let edges = model_element_causal_edges(&db, sync.models["main"].source_model, sync.project);
+    let leads = |from: &str, to: &str| edges.edges.get(from).is_some_and(|t| t.contains(to));
     for b in ["b1", "b2", "b3"] {
+        let source = format!("src[{b}]");
         for a in ["a1", "a3"] {
-            for target in ["y", "yi", "z"] {
+            assert!(leads(&source, &format!("z[{a}]")), "{source} -> z[{a}]");
+            for target in ["y", "yi"] {
+                let target = format!("{target}[{a}]");
                 assert!(
-                    edges
-                        .edges
-                        .get(&format!("src[{b}]"))
-                        .is_some_and(|t| t.contains(&format!("{target}[{a}]"))),
-                    "element edge src[{b}] -> {target}[{a}]; got: {:?}",
-                    edges.edges.get(&format!("src[{b}]"))
+                    edges.edges[&source]
+                        .iter()
+                        .any(|node| node.starts_with("$\u{205A}ltm\u{205A}agg\u{205A}")
+                            && leads(node, &target)),
+                    "{source} -> a node -> {target}; got: {:?}",
+                    edges.edges[&source]
                 );
             }
         }
     }
-    let warnings = assembly_warnings(&db, sync.project);
-    for edge in ["src -> y", "src -> yi", "src -> z"] {
-        assert!(
-            warnings.iter().any(|w| match &w.error {
-                DiagnosticError::Assembly(m) => m.contains(&format!(
-                    "LTM link score for edge {edge} could not be computed"
-                )),
-                _ => false,
-            }),
-            "{edge} is declined loudly; got: {warnings:?}"
-        );
-    }
+    let declined: Vec<String> = assembly_warnings(&db, sync.project)
+        .iter()
+        .filter_map(|w| match &w.error {
+            DiagnosticError::Assembly(m) if m.contains("could not be computed") => Some(m.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        matches!(declined.as_slice(), [one] if one.contains("edge src -> z ")),
+        "src -> z alone is declined, loudly; got: {declined:?}"
+    );
 
     let compiled =
         compile_project_incremental(&db, sync.project, "main", simlin_engine::db::LtmOverlay::On)

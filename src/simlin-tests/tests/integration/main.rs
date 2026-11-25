@@ -43,6 +43,7 @@ mod ltm_frozen_clock;
 mod ltm_integration_method;
 mod ltm_loop_nodes;
 mod ltm_relative_scores;
+mod ltm_replay;
 mod ltm_snapshot_inputs;
 mod mdl_roundtrip;
 mod mdl_saves_of_arrays;

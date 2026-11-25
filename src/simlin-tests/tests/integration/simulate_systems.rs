@@ -413,3 +413,41 @@ fn open_systems_entry_point_works() {
         }
     }
 }
+
+/// What leaves a stock depends on what is in it, so a flow is on a balancing
+/// loop with its source, and the loop leads what the stock does. Both run
+/// through a module instance: one stock's outflow's `actual` output, and for a
+/// second outflow the `remaining` the first one left.
+#[test]
+fn a_flow_is_on_a_loop_with_its_source() {
+    // The stock's level leaves by a rate and then, from what is left, by a
+    // share of it.
+    let project = simlin_formats::open_systems("A(1000) > B @ Leak(0.1)\nA > C @ Leak(0.2)")
+        .expect("the model opens");
+    let mut db = SimlinDb::default();
+    let sync = sync_from_datamodel_incremental(&mut db, &project, None);
+    let analysis =
+        simlin_engine::analysis::analyze_model(&project, &mut db, sync.project, "main", None)
+            .expect("the model is analyzed");
+    let through = |module: &str| -> Vec<&str> {
+        analysis
+            .loop_dominance
+            .iter()
+            .filter(|l| {
+                l.variables.iter().any(|v| v == "a") && l.variables.iter().any(|v| v == module)
+            })
+            .filter(|l| l.importance.iter().any(|share| *share != 0.0))
+            .map(|l| l.polarity.as_str())
+            .collect()
+    };
+    for module in ["a_outflows_b", "a_outflows_c"] {
+        let found = through(module);
+        assert!(
+            !found.is_empty() && found.contains(&"balancing"),
+            "{module}: {:#?}",
+            (analysis.loop_dominance.iter())
+                .map(|l| (&l.variables, &l.polarity, &l.importance))
+                .collect::<Vec<_>>()
+        );
+    }
+}
