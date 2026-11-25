@@ -501,8 +501,9 @@ fn dynamic_pin_slice_keeps_loud_decline() {
 }
 
 /// THE review-driven regression pin: an A2A-emitted link score whose target
-/// reduces over ITS OWN dimension. The `year -> sel` score is
-/// `ApplyToAll([C], ... sum("$:ltm:freeze:active[*]"[*] * year[*]) ...)`, and
+/// reduces over ITS OWN dimension, through a reducer that is no node. The
+/// `year -> sel` score is
+/// `ApplyToAll([C], ... vector select(on[*], "$:ltm:freeze:active[*]"[*] * year[*], ..) ...)`, and
 /// a BARE helper reference (a variable declared over C, inside an equation
 /// iterating C) resolves to the CURRENT element -- turning the whole-row
 /// frozen read into a per-element broadcast, a silent wrong score. The
@@ -519,7 +520,11 @@ fn a2a_score_over_its_own_dimension_reads_the_whole_frozen_row() {
             vec![("c1", "2 + s / 1000"), ("c2", "3 + s / 1000")],
         )
         .array_with_ranges("year[C]", vec![("c1", "s"), ("c2", "s * 2")])
-        .array_aux("sel[C]", "SUM(active[*] * year[*])")
+        .array_aux("on[C]", "1")
+        .array_aux(
+            "sel[C]",
+            "VECTOR SELECT(on[*], active[*] * year[*], 0, 0, 0)",
+        )
         .flow("g", "sel[c1] * 0.001", None)
         .stock("s", "10", &["g"], &[], None);
     let datamodel = project.build_datamodel();
@@ -531,6 +536,12 @@ fn a2a_score_over_its_own_dimension_reads_the_whole_frozen_row() {
     assert!(
         ltm.vars.iter().any(|v| v.name == score),
         "expected the A2A year->sel score to be emitted"
+    );
+    assert!(
+        ltm.vars
+            .iter()
+            .any(|v| v.name.contains("freeze\u{205A}active[*]")),
+        "the score holds the whole `active` row through a helper"
     );
     let failures = fragment_failures(&db, sync.project);
     assert!(failures.is_empty(), "failures:\n{}", failures.join("\n"));

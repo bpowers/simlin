@@ -1933,6 +1933,10 @@ Two kinds of agg:
   Routing through a synthetic agg gives
   the whole-RHS case the same remapped two-half scoring as an inline mapped
   reducer.
+  Another is a whole array's sum that an arrayed variable spreads over its
+  elements (`share[R] = SUM(pop[*])`): every element reads every row, which a
+  score of the direct edge with a slot per element of `share` cannot hold.
+  `ltm_agg::variable_backed_shape_is_expressible` states every exception.
 
 **Loop reporting trims agg nodes.** `$⁚ltm⁚agg⁚{n}` nodes don't appear in the
 user-facing loop list -- like the internal stocks of `DELAY3`/`SMOOTH` in the

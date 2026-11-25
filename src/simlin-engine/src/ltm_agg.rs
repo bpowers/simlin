@@ -40,8 +40,9 @@
 //!   (`total_population = SUM(population[*])`, `row_sum[D1] = SUM(matrix[D1,*])`).
 //!   That variable *is* the aggregate node; no synthetic is minted. One
 //!   exception: a whole-RHS reducer whose shape the variable-backed
-//!   machinery cannot express -- a MAPPED iterated axis (GH #534) or
-//!   NON-ALIGNED result dims (broadcast/permuted, GH #764) -- mints a
+//!   machinery cannot express -- a MAPPED iterated axis (GH #534),
+//!   NON-ALIGNED result dims (broadcast/permuted, GH #764) or a whole-array
+//!   sum an ARRAYED variable spreads over its elements -- mints a
 //!   synthetic agg instead; see
 //!   [`variable_backed_shape_is_expressible`]. Each such
 //!   variable is its own distinct agg node -- variable-backed aggs are never
@@ -108,13 +109,13 @@
 //! per-read-row link scores `try_cross_dimensional_link_scores` derives
 //! from the SAME `read_slice_rows` (invariant I4), never the phantom
 //! cross-product or an inflated full-extent divisor. Whole-extent
-//! variable-backed reducers (`total = SUM(pop[*])`, including the broadcast
-//! `share[R] = SUM(pop[*])`) keep the normal reference walker's
-//! reduction/broadcast edges, which are already the true reads for those
-//! shapes. A whole-RHS partial reduce whose result dims are NON-ALIGNED
+//! variable-backed reducers (`total = SUM(pop[*])`, a scalar owner's) keep
+//! the normal reference walker's reduction edges, which are already the true
+//! reads for that shape. A whole-RHS reduce whose result dims are NON-ALIGNED
 //! with the owner's dims -- broadcast over extra target dims or permuted
-//! axes (GH #764 / T4 of the shape-expressiveness design) -- mints a
-//! SYNTHETIC agg instead, like the mapped GH #534 case (see
+//! axes (GH #764 / T4 of the shape-expressiveness design), a whole array's
+//! sum spread over an arrayed owner (`share[R] = SUM(pop[*])`) included --
+//! mints a SYNTHETIC agg instead, like the mapped GH #534 case (see
 //! [`variable_backed_shape_is_expressible`], the one minting condition).
 //! The gate's remaining decline -- the ARRAYED-owner scalar-result
 //! Pinned/subset slice (`share[R] = SUM(pop[nyc,*])`, no `Iterated` axis,
@@ -1117,10 +1118,10 @@ fn walk_var_equation(
     {
         // Whole-RHS reducer: the variable IS the aggregate node. The agg
         // node's result shape is the *reducer's* result shape (the `Iterated`
-        // axes' dims), not the owning variable's: a full reduce
-        // (`share[Region] = SUM(pop[*])`) has `result_dims == []` even though
-        // it is broadcast to an arrayed variable (every element holds the same
-        // value); a partial reduce keyed by the active A2A dimension
+        // axes' dims), not the owning variable's: a pinned reduce spread over
+        // an arrayed variable (`share[Region] = SUM(pop[nyc,*])`) has
+        // `result_dims == []` though every element holds its value; a partial
+        // reduce keyed by the active A2A dimension
         // (`rowsum[D1] = SUM(matrix[D1, *])`) keeps `[D1]` as its result dims.
         let key = simlin_base::ast::expr2_to_string(expr);
         let result_dims = candidate.result_dims;
@@ -1201,12 +1202,18 @@ fn walk_var_equation(
 ///   `expand_same_element`'s name-matched projection) handles the
 ///   broadcast fan-out and the reordering.
 ///
+/// - **Whole array, arrayed owner** (`share[R] = SUM(pop[*])`): a BROADCAST
+///   with no result dims at all. Every element of the owner reads every row,
+///   and a per-shape score of the direct edge has a slot per element of the
+///   owner: it would hold the diagonal alone, each credited with the whole
+///   sum's change.
+///
 /// Expressible (⇒ the variable IS the agg, byte-identical to pre-T4):
 /// - an ALIGNED partial reduce (`Iterated` dims == the owner's dims, in
 ///   order -- Pinned/subset axes included);
-/// - any slice with NO `Iterated` axis: the full-extent reduce
-///   (`total = SUM(pop[*])`, `share[R] = SUM(pop[*])` -- the inert
-///   reference-walker family), the scalar-owner Pinned/subset slice
+/// - any other slice with NO `Iterated` axis: the scalar owner's full-extent
+///   reduce (`total = SUM(pop[*])`, whose edges are the reference walker's),
+///   the scalar-owner Pinned/subset slice
 ///   (`total = SUM(pop[nyc,*])`, admitted by the gate), and the
 ///   ARRAYED-owner Pinned/subset BROADCAST slice
 ///   (`share[R] = SUM(pop[nyc,*])`, GH #777 -- the variable IS the agg
@@ -1242,14 +1249,20 @@ fn variable_backed_shape_is_expressible(
             iterated_dims.push(dim.as_str());
         }
     }
-    // Scalar-result slices (no Iterated axis) are always expressible-or-
-    // gate-declined as the variable itself; an Iterated-armed slice must
-    // align exactly with the owner's declared dims (GH #764).
-    iterated_dims.is_empty()
-        || iterated_dims
+    // A slice with no `Iterated` axis is one value, which an arrayed owner of
+    // a whole array's sum spreads over its elements and any other owner is; an
+    // Iterated-armed slice must align exactly with the owner's declared dims
+    // (GH #764).
+    if iterated_dims.is_empty() {
+        let is_full_extent = read_slice
             .iter()
-            .copied()
-            .eq(target_iterated_dims.iter().map(String::as_str))
+            .all(|axis| matches!(axis, AxisRead::Reduced { subset: None }));
+        return target_iterated_dims.is_empty() || !is_full_extent;
+    }
+    iterated_dims
+        .iter()
+        .copied()
+        .eq(target_iterated_dims.iter().map(String::as_str))
 }
 
 /// Recursively walk an expression looking for *maximal* reducer
@@ -2556,11 +2569,12 @@ pub fn is_synthetic_agg_name(name: &str) -> bool {
 /// scores.
 ///
 /// `None` (callers keep their conservative paths) for:
-/// - a PURE full-extent slice (all `Reduced{subset: None}`:
-///   `total = SUM(pop[*])`, `share[R] = SUM(pop[*,*])`): the reference
-///   walker's reduction/broadcast edges already ARE the read rows, so
-///   routing it through the gate would change nothing -- skipped to keep
-///   the surface byte-identical (inert).
+/// - a PURE full-extent slice (all `Reduced{subset: None}`), which only a
+///   scalar owner has (`total = SUM(pop[*])`;
+///   [`variable_backed_shape_is_expressible`]): the reference walker's
+///   reduction edges already ARE the read rows, so routing it through the
+///   gate would change nothing -- skipped to keep the surface
+///   byte-identical (inert).
 ///
 /// The Iterated-arm alignment check below (`result_dims` == `to`'s dims,
 /// in order) is defense-in-depth since T4: a whole-RHS reduce with
