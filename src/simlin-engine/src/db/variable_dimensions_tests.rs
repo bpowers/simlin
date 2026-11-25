@@ -19,7 +19,7 @@
 //! that cell wrong in either direction.
 
 use super::*;
-use crate::datamodel;
+use simlin_base::datamodel;
 
 fn dims() -> Vec<datamodel::Dimension> {
     vec![

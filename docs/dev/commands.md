@@ -51,10 +51,10 @@ Install: `cargo install cargo-llvm-cov`
 
 | Command | Description |
 |---------|-------------|
-| `cargo bench -p simlin-engine` | Run all Rust benchmarks |
-| `cargo bench -p simlin-engine --bench compiler` | Compiler pipeline benchmarks (real models) |
-| `cargo bench -p simlin-engine --bench simulation` | Simulation/VM benchmarks |
-| `cargo bench -p simlin-engine --bench array_ops` | Array operation benchmarks |
+| `cargo bench -p simlin-tests` | Run all Rust benchmarks |
+| `cargo bench -p simlin-tests --bench compiler` | Compiler pipeline benchmarks (real models) |
+| `cargo bench -p simlin-tests --bench simulation` | Simulation/VM benchmarks |
+| `cargo bench -p simlin-tests --bench array_ops` | Array operation benchmarks |
 
 Results are saved in `target/criterion/` with HTML reports.
 See [benchmarks.md](benchmarks.md) for profiling instructions.
@@ -68,11 +68,12 @@ See [benchmarks.md](benchmarks.md) for profiling instructions.
 
 ## Component-Specific Commands
 
-### simlin-engine (Rust)
+### The engine crates (Rust)
 
 ```bash
-cargo test -p simlin-engine              # Engine tests only
-cargo test -p simlin-engine mdl::        # MDL parser tests
+cargo test -p simlin-engine              # One crate's unit tests (the compiler and the VM)
+cargo test -p simlin-formats mdl::       # MDL parser tests
+cargo test -p simlin-tests               # The integration tests
 ```
 
 ### pysimlin (Python)

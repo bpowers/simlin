@@ -14,17 +14,25 @@ Exception: protobuf files must follow standard versioning (we have a DB with ser
 
 | Component             | Language    | Description                                                       | Docs                                        |
 |-----------------------|-------------|-------------------------------------------------------------------|---------------------------------------------|
+| `src/simlin-base`     | Rust        | Data model, identifiers, equation AST, results: what the rest is built on | [CLAUDE.md](/src/simlin-base/CLAUDE.md) |
+| `src/simlin-diagram`  | Rust        | Draws a diagram: SVG, PNG and the scene display list              | [CLAUDE.md](/src/simlin-diagram/CLAUDE.md)  |
+| `src/simlin-edit`     | Rust        | Patches to a project, diagram gestures, equation views            | [CLAUDE.md](/src/simlin-edit/CLAUDE.md)     |
 | `src/simlin-engine`   | Rust        | Compiles, type-checks, and simulates SD models                    | [CLAUDE.md](/src/simlin-engine/CLAUDE.md)   |
+| `src/simlin-formats`  | Rust        | Reads and writes XMILE, Vensim, systems, JSON and protobuf files  | [CLAUDE.md](/src/simlin-formats/CLAUDE.md)  |
+| `src/simlin-layout`   | Rust        | Lays out a model's diagram, whole or after an edit                | [CLAUDE.md](/src/simlin-layout/CLAUDE.md)   |
+| `src/simlin-save-check` | Rust      | Whether saving a project in a format keeps what it means          | [CLAUDE.md](/src/simlin-save-check/CLAUDE.md) |
+| `src/simlin-tools`    | Rust        | The agent tool surface: sessions answering tool calls with JSON   | [CLAUDE.md](/src/simlin-tools/CLAUDE.md)    |
+| `src/simlin-wasmgen`  | Rust        | Compiles a model to a self-contained wasm module                  | [CLAUDE.md](/src/simlin-wasmgen/CLAUDE.md)  |
 | `src/libsimlin`       | Rust        | Flat C FFI to simlin-engine (WASM, CGo, C/C++)                    | [CLAUDE.md](/src/libsimlin/CLAUDE.md)       |
 | `src/simlin-mcp-core` | Rust        | Transport-agnostic MCP tool surface (`ProjectAccess` trait, rmcp `ServerHandler`) | [CLAUDE.md](/src/simlin-mcp-core/CLAUDE.md) |
 | `src/simlin-mcp`      | Rust/JS     | Stdio MCP server for AI assistants (`@simlin/mcp` npm)            | [CLAUDE.md](/src/simlin-mcp/CLAUDE.md)      |
-| `src/simlin-serve`    | Rust/TS     | Local HTTP viewer/editor + in-process MCP (`@simlin/serve` npm)   | [CLAUDE.md](/src/simlin-serve/CLAUDE.md)    |
 | `src/engine`          | TypeScript  | Promise-based TypeScript API for WASM engine                      | [CLAUDE.md](/src/engine/CLAUDE.md)          |
 | `src/core`            | TypeScript  | Shared data models and common utilities                           | [CLAUDE.md](/src/core/CLAUDE.md)            |
 | `src/diagram`         | TypeScript  | React model editor and visualization toolkit                      | [CLAUDE.md](/src/diagram/CLAUDE.md)         |
 | `src/app`             | TypeScript  | Full-featured SD application                                      | [CLAUDE.md](/src/app/CLAUDE.md)             |
 | `src/notebook-widget` | TypeScript  | anywidget module hosting the Editor in notebook cells (pysimlin)  | [CLAUDE.md](/src/notebook-widget/CLAUDE.md) |
 | `src/server`          | TypeScript  | Express.js backend (Firebase Auth, Firestore)                     | [CLAUDE.md](/src/server/CLAUDE.md)          |
+| `src/simlin-tests`    | Rust        | The engine's integration tests, benchmarks and instruments        | [CLAUDE.md](/src/simlin-tests/CLAUDE.md)    |
 | `src/simlin-cli`      | Rust        | CLI for simulation/conversion (testing/debugging)                 | [CLAUDE.md](/src/simlin-cli/CLAUDE.md)      |
 | `src/pysimlin`        | Python/Rust | Python bindings for the simulation engine                         | [CLAUDE.md](/src/pysimlin/CLAUDE.md)        |
 | `website`             | TypeScript  | Rspress-based documentation site                                  | [CLAUDE.md](/website/CLAUDE.md)             |

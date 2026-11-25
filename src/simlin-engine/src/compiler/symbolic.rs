@@ -36,7 +36,7 @@ use crate::bytecode::{
     Op2, Opcode, PcOffset, RuntimeSparseMapping, STACK_CAPACITY, StaticArrayView, TableCount,
     TempId, VariableOffset, ViewId, ViewStorage, bind_kind, operand_of_kind,
 };
-use crate::common::{Canonical, Ident};
+use simlin_base::common::{Canonical, Ident};
 
 pub(crate) use super::expr::VarRef as SymVarRef;
 
@@ -479,7 +479,7 @@ symbolic_opcode_table!(declare_symbolic_opcodes);
 /// pattern: a NaN makes this value unequal to a bit-identical rebuild and so
 /// unable to backdate, and two pools differing only in a zero's sign compare
 /// equal. Both are accepted, knowingly -- see the "Float equality in this
-/// crate" section on [`crate::ast::Literal`] for the position, the corrected
+/// crate" section on [`simlin_base::ast::Literal`] for the position, the corrected
 /// premise behind GH #642, and what would change the decision.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct SymbolicByteCode {
@@ -607,7 +607,7 @@ impl CompiledVarFragment {
 /// non-tracked" reasoning does not hold here. Its floats (the literal pool
 /// inside `symbolic`, and `graphical_functions`) keep the derived IEEE
 /// `PartialEq`; see the "Float equality in this crate" section on
-/// [`crate::ast::Literal`] for why that is accepted rather than open.
+/// [`simlin_base::ast::Literal`] for why that is accepted rather than open.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct PerVarBytecodes {
     pub symbolic: SymbolicByteCode,
@@ -679,7 +679,9 @@ impl VariableLayout {
     /// flattened), so the two cannot diverge on the reservation amount, the
     /// implicit-global slots, or the body offset.
     pub(crate) fn root_shifted(&self) -> VariableLayout {
-        use crate::vm::{DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, TIME_OFF};
+        use simlin_base::results::{
+            DT_OFF, FINAL_TIME_OFF, IMPLICIT_VAR_COUNT, INITIAL_TIME_OFF, TIME_OFF,
+        };
 
         let mut entries = HashMap::with_capacity(self.entries.len() + IMPLICIT_VAR_COUNT);
         entries.insert(
@@ -742,8 +744,7 @@ impl VariableLayout {
 /// mapping, which the run-invariant flow prefix
 /// (`SymbolicCompiledModule::flows_invariant_opcode_len`) and the SCC
 /// per-element segmentation both depend on.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct SymbolicByteCodeBuilder {
     bytecode: SymbolicByteCode,
     // keyed on the literal's bit pattern: interning only needs Eq + Hash, and
@@ -2638,11 +2639,11 @@ mod tests {
 
     use crate::testutils::{x_aux, x_flow, x_model, x_module, x_project, x_stock};
 
-    fn default_sim_specs() -> crate::datamodel::SimSpecs {
-        crate::datamodel::SimSpecs {
+    fn default_sim_specs() -> simlin_base::datamodel::SimSpecs {
+        simlin_base::datamodel::SimSpecs {
             start: 0.0,
             stop: 12.0,
-            dt: crate::datamodel::Dt::Dt(1.0),
+            dt: simlin_base::datamodel::Dt::Dt(1.0),
             save_step: None,
             sim_method: Default::default(),
             time_units: None,
@@ -2660,7 +2661,10 @@ mod tests {
     /// resolved module is addressed against the same layout the assembler
     /// used, each `CompiledInitial` carries exactly the write targets its own
     /// bytecode has, and each module declaration points at a variable's base.
-    fn compile_and_check_resolution(dm_project: &crate::datamodel::Project, model_name: &str) {
+    fn compile_and_check_resolution(
+        dm_project: &simlin_base::datamodel::Project,
+        model_name: &str,
+    ) {
         let mut db = crate::db::SimlinDb::default();
         let sync = crate::db::sync_from_datamodel_incremental(&mut db, dm_project, None);
         let sim = crate::db::compile_project_incremental(

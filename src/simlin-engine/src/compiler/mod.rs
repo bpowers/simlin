@@ -17,18 +17,18 @@ pub(crate) mod symbolic;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
-use crate::ast::{ArrayView, Ast, BinaryOp, Loc};
-use crate::builtins::ResultKind;
+use crate::variable::{VarKind, Variable};
+use simlin_base::ast::{ArrayView, Ast, BinaryOp, Loc};
+use simlin_base::builtins::ResultKind;
 #[cfg(test)]
-use crate::common::ErrorCode;
-use crate::common::{
+use simlin_base::common::ErrorCode;
+use simlin_base::common::{
     Canonical, CanonicalDimensionName, CanonicalElementName, Ident, IdentMap, Result,
 };
-use crate::dimensions::{
+use simlin_base::dimensions::{
     Axis, Dimension, DimensionsContext, NoAxisRelations, SubscriptIterator, match_axes_partial,
 };
-use crate::sim_err;
-use crate::variable::{VarKind, Variable};
+use simlin_base::sim_err;
 
 // Re-exports for crate-internal API
 pub(crate) use self::codegen::ModuleCtx;
@@ -71,8 +71,7 @@ pub(crate) use self::expr::{BuiltinFn, Expr, SubscriptIndex, Table, VarRef};
 /// not the rule.)
 pub(crate) type VarSizes = IdentMap<VarRef, usize>;
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Var {
     pub(crate) ident: Ident<Canonical>,
     pub(crate) ast: Vec<Expr>,
@@ -86,10 +85,9 @@ pub struct Var {
 
 /// A read paired with its reader's element by position alone ([`Var`]): the
 /// read, where it is written, and the reader's element that makes it.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PositionalRead {
-    pub(crate) read: crate::common::MismatchedRead,
+    pub(crate) read: simlin_base::common::MismatchedRead,
     pub(crate) loc: Loc,
     pub(crate) element: CanonicalElementName,
 }
@@ -101,7 +99,7 @@ pub(crate) struct PositionalRead {
 fn test_context<'a>(
     dimensions: &'a [Dimension],
     dimensions_ctx: &'a DimensionsContext,
-    deps: &'a crate::common::IdentMap<Ident<Canonical>, fragment::DepShape>,
+    deps: &'a simlin_base::common::IdentMap<Ident<Canonical>, simlin_base::ast::DepShape>,
     var_sizes: &'a VarSizes,
     inputs: &'a BTreeSet<Ident<Canonical>>,
 ) -> Context<'a> {
@@ -119,10 +117,12 @@ fn test_context<'a>(
 
 /// Scalar dependency shapes for `names`.
 #[cfg(test)]
-fn scalar_deps(names: &[&str]) -> crate::common::IdentMap<Ident<Canonical>, fragment::DepShape> {
+fn scalar_deps(
+    names: &[&str],
+) -> simlin_base::common::IdentMap<Ident<Canonical>, simlin_base::ast::DepShape> {
     names
         .iter()
-        .map(|name| (Ident::new(name), fragment::DepShape::var(vec![])))
+        .map(|name| (Ident::new(name), simlin_base::ast::DepShape::var(vec![])))
         .collect()
 }
 
@@ -144,7 +144,7 @@ fn test_fold_flows() {
     );
     assert_eq!(
         Ok(Some(Expr::Op2(
-            crate::ast::BinaryOp::Add,
+            simlin_base::ast::BinaryOp::Add,
             Box::new(Expr::Var(VarRef::base(Ident::new("a")), Loc::default())),
             Box::new(Expr::Var(VarRef::base(Ident::new("d")), Loc::default())),
             Loc::default(),
@@ -186,11 +186,11 @@ fn test_module_var_new_missing_input_source_returns_error() {
     };
 
     // deps only contain "my_module" -- NOT "missing_source"
-    let mut deps: crate::common::IdentMap<Ident<Canonical>, fragment::DepShape> =
+    let mut deps: simlin_base::common::IdentMap<Ident<Canonical>, simlin_base::ast::DepShape> =
         Default::default();
     deps.insert(
         module_ident.clone(),
-        fragment::DepShape::module(Arc::new(fragment::ModelShape::default())),
+        simlin_base::ast::DepShape::module(Arc::new(simlin_base::ast::ModelShape::default())),
     );
 
     let dims_ctx = DimensionsContext::default();
@@ -230,14 +230,17 @@ fn test_build_stock_update_expr_inflows_only() {
 
     // stock + (inflow - 0.0) * dt
     // outflows should be Const(0.0) since there are none
-    if let Expr::Op2(crate::ast::BinaryOp::Add, stock_box, dt_update_box, _) = &result {
+    if let Expr::Op2(simlin_base::ast::BinaryOp::Add, stock_box, dt_update_box, _) = &result {
         assert_eq!(
             stock_box.as_ref(),
             &Expr::Var(VarRef::base(Ident::new("stock")), Loc::default())
         );
-        if let Expr::Op2(crate::ast::BinaryOp::Mul, sub_box, dt_box, _) = dt_update_box.as_ref() {
+        if let Expr::Op2(simlin_base::ast::BinaryOp::Mul, sub_box, dt_box, _) =
+            dt_update_box.as_ref()
+        {
             assert!(matches!(dt_box.as_ref(), Expr::Dt(_)));
-            if let Expr::Op2(crate::ast::BinaryOp::Sub, in_box, out_box, _) = sub_box.as_ref() {
+            if let Expr::Op2(simlin_base::ast::BinaryOp::Sub, in_box, out_box, _) = sub_box.as_ref()
+            {
                 assert_eq!(
                     in_box.as_ref(),
                     &Expr::Var(VarRef::base(Ident::new("inflow")), Loc::default())
@@ -283,13 +286,14 @@ fn test_build_stock_update_expr_outflows_only() {
 
     // stock + (0.0 - outflow) * dt
     // inflows should be Const(0.0) since there are none
-    if let Expr::Op2(crate::ast::BinaryOp::Add, stock_box, dt_update_box, _) = &result {
+    if let Expr::Op2(simlin_base::ast::BinaryOp::Add, stock_box, dt_update_box, _) = &result {
         assert_eq!(
             stock_box.as_ref(),
             &Expr::Var(VarRef::base(Ident::new("stock")), Loc::default())
         );
-        if let Expr::Op2(crate::ast::BinaryOp::Mul, sub_box, _, _) = dt_update_box.as_ref() {
-            if let Expr::Op2(crate::ast::BinaryOp::Sub, in_box, out_box, _) = sub_box.as_ref() {
+        if let Expr::Op2(simlin_base::ast::BinaryOp::Mul, sub_box, _, _) = dt_update_box.as_ref() {
+            if let Expr::Op2(simlin_base::ast::BinaryOp::Sub, in_box, out_box, _) = sub_box.as_ref()
+            {
                 assert!(
                     matches!(in_box.as_ref(), Expr::Const(v, _) if *v == 0.0),
                     "inflows should be Const(0.0) when empty"
@@ -334,9 +338,10 @@ fn test_build_stock_update_expr_no_flows() {
         .unwrap();
 
     // stock + (0.0 - 0.0) * dt
-    if let Expr::Op2(crate::ast::BinaryOp::Add, _, dt_update_box, _) = &result {
-        if let Expr::Op2(crate::ast::BinaryOp::Mul, sub_box, _, _) = dt_update_box.as_ref() {
-            if let Expr::Op2(crate::ast::BinaryOp::Sub, in_box, out_box, _) = sub_box.as_ref() {
+    if let Expr::Op2(simlin_base::ast::BinaryOp::Add, _, dt_update_box, _) = &result {
+        if let Expr::Op2(simlin_base::ast::BinaryOp::Mul, sub_box, _, _) = dt_update_box.as_ref() {
+            if let Expr::Op2(simlin_base::ast::BinaryOp::Sub, in_box, out_box, _) = sub_box.as_ref()
+            {
                 assert!(
                     matches!(in_box.as_ref(), Expr::Const(v, _) if *v == 0.0),
                     "inflows should be Const(0.0)"
@@ -381,23 +386,26 @@ fn test_build_stock_update_expr_multiple_flows() {
         .unwrap();
 
     // stock + ((in1 + in2) - (out1 + out2)) * dt
-    if let Expr::Op2(crate::ast::BinaryOp::Add, stock_box, dt_update_box, _) = &result {
+    if let Expr::Op2(simlin_base::ast::BinaryOp::Add, stock_box, dt_update_box, _) = &result {
         assert_eq!(
             stock_box.as_ref(),
             &Expr::Var(VarRef::base(Ident::new("stock")), Loc::default())
         );
-        if let Expr::Op2(crate::ast::BinaryOp::Mul, sub_box, dt_box, _) = dt_update_box.as_ref() {
+        if let Expr::Op2(simlin_base::ast::BinaryOp::Mul, sub_box, dt_box, _) =
+            dt_update_box.as_ref()
+        {
             assert!(matches!(dt_box.as_ref(), Expr::Dt(_)));
-            if let Expr::Op2(crate::ast::BinaryOp::Sub, in_sum, out_sum, _) = sub_box.as_ref() {
+            if let Expr::Op2(simlin_base::ast::BinaryOp::Sub, in_sum, out_sum, _) = sub_box.as_ref()
+            {
                 // in1 + in2
                 assert!(matches!(
                     in_sum.as_ref(),
-                    Expr::Op2(crate::ast::BinaryOp::Add, _, _, _)
+                    Expr::Op2(simlin_base::ast::BinaryOp::Add, _, _, _)
                 ));
                 // out1 + out2
                 assert!(matches!(
                     out_sum.as_ref(),
-                    Expr::Op2(crate::ast::BinaryOp::Add, _, _, _)
+                    Expr::Op2(simlin_base::ast::BinaryOp::Add, _, _, _)
                 ));
             } else {
                 panic!("Expected Sub expression");
@@ -434,7 +442,7 @@ fn test_sparse_array_element_returns_error_not_panic() {
 
 #[test]
 fn test_arrayed_default_equation_applies_to_missing_elements() {
-    let datamodel_dim = crate::datamodel::Dimension::named(
+    let datamodel_dim = simlin_base::datamodel::Dimension::named(
         "dim".to_string(),
         vec!["a".to_string(), "b".to_string(), "c".to_string()],
     );
@@ -444,17 +452,17 @@ fn test_arrayed_default_equation_applies_to_missing_elements() {
     let mut elements = IdentMap::default();
     elements.insert(
         CanonicalElementName::from_raw("a"),
-        crate::ast::Expr2::Const(
+        simlin_base::ast::Expr2::Const(
             "1".to_string(),
-            crate::ast::Literal::new(1.0),
+            simlin_base::ast::Literal::new(1.0),
             Loc::default(),
         ),
     );
     elements.insert(
         CanonicalElementName::from_raw("b"),
-        crate::ast::Expr2::Const(
+        simlin_base::ast::Expr2::Const(
             "2".to_string(),
-            crate::ast::Literal::new(2.0),
+            simlin_base::ast::Literal::new(2.0),
             Loc::default(),
         ),
     );
@@ -468,9 +476,9 @@ fn test_arrayed_default_equation_applies_to_missing_elements() {
             ast: Some(Ast::Arrayed(
                 dims.clone(),
                 elements,
-                Some(crate::ast::Expr2::Const(
+                Some(simlin_base::ast::Expr2::Const(
                     "7".to_string(),
-                    crate::ast::Literal::new(7.0),
+                    simlin_base::ast::Literal::new(7.0),
                     Loc::default(),
                 )),
                 true,
@@ -484,9 +492,12 @@ fn test_arrayed_default_equation_applies_to_missing_elements() {
         },
     };
 
-    let mut deps: crate::common::IdentMap<Ident<Canonical>, fragment::DepShape> =
+    let mut deps: simlin_base::common::IdentMap<Ident<Canonical>, simlin_base::ast::DepShape> =
         Default::default();
-    deps.insert(Ident::new("x"), fragment::DepShape::var(dims.clone()));
+    deps.insert(
+        Ident::new("x"),
+        simlin_base::ast::DepShape::var(dims.clone()),
+    );
 
     let inputs = BTreeSet::new();
     let dims_ctx = DimensionsContext::from(std::slice::from_ref(&datamodel_dim));
@@ -546,7 +557,7 @@ fn stock_update_shape_guard_rejects_only_non_binary_updates() {
         &[Expr::AssignNext(
             level.clone(),
             Box::new(Expr::App(
-                crate::builtins::BuiltinFn::Max(Box::new(c()), Some(Box::new(var.clone()))),
+                simlin_base::builtins::BuiltinFn::Max(Box::new(c()), Some(Box::new(var.clone()))),
                 Loc::default(),
             )),
         )],
@@ -1327,7 +1338,7 @@ pub(super) fn view_repeats_a_dimension(view: &ArrayView) -> bool {
 ///
 /// Beyond identity the relation is by dimension NAME and size, because that is
 /// what the runtime broadcast matches on (`vm`'s `LoadIterViewAt` ->
-/// [`crate::dimensions::match_dimensions_two_pass`]): a source dimension the
+/// [`simlin_base::dimensions::match_dimensions_two_pass`]): a source dimension the
 /// iteration cannot match by id reads NaN, so placing one positionally would be
 /// a guess. A dimensionless view is contained by everything, which is how a
 /// collapsed element such as `vals[1]` broadcasts without constraining the shape
@@ -1555,11 +1566,11 @@ fn array_view_from_dims(dims: &[Dimension]) -> ArrayView {
 /// The equation element `key` evaluates -- its own explicit arm, or the EXCEPT
 /// default -- or `None` when the element has neither.
 fn arrayed_arm<'e>(
-    elements: &'e IdentMap<CanonicalElementName, crate::ast::Expr2>,
-    default_ast: Option<&'e crate::ast::Expr2>,
+    elements: &'e IdentMap<CanonicalElementName, simlin_base::ast::Expr2>,
+    default_ast: Option<&'e simlin_base::ast::Expr2>,
     apply_default_for_missing: bool,
     key: &CanonicalElementName,
-) -> Option<&'e crate::ast::Expr2> {
+) -> Option<&'e simlin_base::ast::Expr2> {
     if let Some(ast) = elements.get(key) {
         return Some(ast);
     }
@@ -1584,7 +1595,7 @@ fn element_target(base: &VarRef, dims: &[Dimension]) -> array_operand::ElementTa
 /// apply-to-all element gets, whether the element is one slot of an arrayed
 /// variable or the whole body of a per-element helper
 /// (`variable::ElementScope`).
-fn lower_element(ctx: &Context, elem_ctx: &Context, ast: &crate::ast::Expr2) -> Result<Expr> {
+fn lower_element(ctx: &Context, elem_ctx: &Context, ast: &simlin_base::ast::Expr2) -> Result<Expr> {
     // GH #578: fold a scalar-source / constant-offset ELM MAP to a direct
     // slot read before the materializer sees it. The array-producing opcode
     // needs a *view* offset, which a per-element constant cannot supply, so
@@ -1613,8 +1624,8 @@ fn expand_per_element(
     ctx: &Context,
     dims: &[Dimension],
     base: &VarRef,
-    elements: &IdentMap<CanonicalElementName, crate::ast::Expr2>,
-    default_ast: Option<&crate::ast::Expr2>,
+    elements: &IdentMap<CanonicalElementName, simlin_base::ast::Expr2>,
+    default_ast: Option<&simlin_base::ast::Expr2>,
     apply_default_for_missing: bool,
 ) -> Result<Vec<Expr>> {
     let active_dims = Arc::<[Dimension]>::from(dims.to_vec());

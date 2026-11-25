@@ -8,8 +8,9 @@
 
 use super::*;
 use crate::db::exec_probe::ProbedDb;
-use crate::patch::{ModelOperation, ModelPatch, ProjectPatch, apply_patch};
 use crate::test_common::TestProject;
+use simlin_base::project_patch::{ModelOperation, ModelPatch, ProjectPatch};
+use simlin_edit::patch::apply_patch;
 
 fn base() -> datamodel::Project {
     TestProject::new("identity")
@@ -201,7 +202,7 @@ fn a_resync_of_an_equal_project_holding_a_nan_reruns_nothing() {
   </variables></model>
 </xmile>"#;
     let open = || {
-        crate::compat::open_xmile(&mut std::io::BufReader::new(XMILE.as_bytes()))
+        simlin_formats::compat::open_xmile(&mut std::io::BufReader::new(XMILE.as_bytes()))
             .expect("the fixture opens")
     };
     let project = open();

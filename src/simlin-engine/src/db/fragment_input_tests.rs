@@ -18,10 +18,11 @@
 use std::collections::BTreeSet;
 
 use super::*;
-use crate::compiler::fragment::{DepKind, FragmentInput, lower_fragment};
+use crate::compiler::fragment::{FragmentInput, lower_fragment};
 use crate::compiler::symbolic::PerVarBytecodes;
-use crate::datamodel;
 use crate::test_common::TestProject;
+use simlin_base::ast::DepKind;
+use simlin_base::datamodel;
 
 /// `main` holds a three-element `arr[d]`, `src`, a module `sub` instantiating
 /// `producer` (wired `src -> sub.input`), and `usesub`, which reads the module
@@ -711,7 +712,7 @@ fn xmile_project(main_variables: &str, extra_models: &str) -> datamodel::Project
   {extra_models}
 </xmile>"#
     );
-    crate::compat::open_xmile(&mut source.as_bytes()).expect("the XMILE fixture imports")
+    simlin_formats::compat::open_xmile(&mut source.as_bytes()).expect("the XMILE fixture imports")
 }
 
 /// The t=0 value of every variable of `project`'s root, keyed by canonical

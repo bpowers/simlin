@@ -94,7 +94,6 @@ Tool-level behaviour tests (success and validation-error paths for each tool) li
 
 ## Dependencies
 
-Depends on `simlin-engine` for model types, file format parsing, error formatting (`simlin_engine::errors`), atomic file writes (`simlin_engine::io`), and SD-AI relationship regeneration (`compute_link_polarities` + `generate_relationships`).
 Depends on `simlin-mcp-core` for the tool surface and `ProjectAccess` trait.
 Depends on `rmcp` for the stdio transport.
 Does NOT depend on `libsimlin` (the C FFI crate).

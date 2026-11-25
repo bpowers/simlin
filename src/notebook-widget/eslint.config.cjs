@@ -6,7 +6,7 @@ const configs = createConfig({
 });
 
 // Standard browser globals the shared config does not list; added locally
-// (as simlin-serve/web does) rather than widening the shared file.
+// rather than widening the shared file.
 const baseConfig = configs.find((c) => c.files && c.files.includes('**/*.ts'));
 if (baseConfig) {
   baseConfig.languageOptions = {

@@ -25,6 +25,12 @@
   padding-top: var(--panel-top-inset);
 }
 
+/* Which elements the equation below is for (arrayed variables only). */
+.eqnNote {
+  font-size: var(--font-size-caption);
+  color: var(--color-text-muted);
+}
+
 .eqnEditor {
   background-color: var(--color-field-bg);
   border-radius: 4px;
@@ -86,6 +92,36 @@
   font-family: 'Roboto Mono', monospace;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* A per-element variable's equations, read-only, in the field's place. */
+.elementEquations {
+  background-color: var(--color-field-bg);
+  border-radius: 4px;
+  margin-top: 4px;
+  padding: 8px;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+/* The element names take the width they need, up to 40%; the equations wrap in
+   the rest. */
+.elementEquationList {
+  display: grid;
+  grid-template-columns: fit-content(40%) minmax(0, 1fr);
+  gap: 4px 16px;
+  margin: 0;
+  font-family: 'Roboto Mono', monospace;
+  overflow-wrap: anywhere;
+}
+
+.elementEquationList dt {
+  color: var(--color-text-muted);
+}
+
+.elementEquationList dd {
+  margin: 0;
+  white-space: pre-wrap;
 }
 
 .unitsEditor {

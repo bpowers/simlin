@@ -1,0 +1,33 @@
+[package]
+name = "simlin-wasmgen"
+version = "0.1.0"
+authors = ["Bobby Powers <bobbypowers@gmail.com>"]
+license = "Apache-2.0"
+edition = "2024"
+description = "Compiles a system dynamics model to a self-contained WebAssembly module"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+simlin-base = { version = "0.1", path = "../simlin-base" }
+simlin-engine = { version = "0.1", path = "../simlin-engine", default-features = false }
+smallvec = { version = "1", features = [ "union" ] }
+# The encoder (an alternative to the bytecode VM). no_std + alloc only, single
+# transitive dependency (leb128fmt), and builds cleanly to
+# wasm32-unknown-unknown so it is available inside the libsimlin wasm bundle.
+wasm-encoder = { version = "0.244", default-features = false }
+
+[dev-dependencies]
+simlin-base = { path = "../simlin-base", features = ["test-support"] }
+simlin-engine = { path = "../simlin-engine", features = ["test-support"] }
+simlin-formats = { path = "../simlin-formats", features = ["test-support"] }
+# Pure-Rust no_std wasm interpreter used as a correctness oracle: every wasm
+# module the wasmgen backend produces is executed here and checked against the
+# bytecode VM. Git-only (not yet published to crates.io); pinned to a commit.
+# The host `Store` API lives in the `checked` workspace member, not the `wasm`
+# lib crate.
+wasm-interpreter = { git = "https://github.com/DLR-FT/wasm-interpreter.git", rev = "64cedbba603edfd64cbb6b5a19f5fa34530bb03a" }
+checked = { git = "https://github.com/DLR-FT/wasm-interpreter.git", rev = "64cedbba603edfd64cbb6b5a19f5fa34530bb03a", features = ["linker", "interop"] }
+proptest = "1.5"
+rand = "0.9"

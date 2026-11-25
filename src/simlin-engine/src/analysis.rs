@@ -7,16 +7,15 @@
 //! This module provides `analyze_model()`, which takes a `datamodel::Project`
 //! along with a `SimlinDb` and `SourceProject` for incremental compilation,
 //! runs the full LTM discovery pipeline, and returns a `ModelAnalysis` with
-//! the model snapshot (views stripped), time array, per-loop importance series,
-//! and dominant-period intervals.  When the model cannot be compiled for LTM
-//! analysis the function still returns `Ok` (so callers can display the model
-//! snapshot), but with empty loop fields and the actionable compile error in
+//! the time array, per-loop importance series, and dominant-period intervals.
+//! When the model cannot be compiled for LTM analysis the function still
+//! returns `Ok`, but with empty loop fields and the actionable compile error in
 //! `ModelAnalysis::analysis_error` -- so "could not analyse" is distinguishable
 //! from "no loops" (GH #660).
 
 use crate::db::{SimlinDb, SourceProject};
 use crate::ltm_dominance::{self, DominantPeriod, FeedbackLoop};
-use crate::{datamodel, json};
+use simlin_base::datamodel;
 
 /// Summary of a feedback loop discovered via LTM analysis.
 pub struct LoopSummary {
@@ -47,7 +46,6 @@ pub struct LoopSummary {
 
 /// Complete analysis results for a model.
 pub struct ModelAnalysis {
-    pub model: json::Model,
     pub time: Vec<f64>,
     pub loop_dominance: Vec<LoopSummary>,
     /// The cycle partitions referenced by `loop_dominance` (indexed by each
@@ -105,26 +103,22 @@ pub struct ModelAnalysis {
     pub universe_loops: Option<usize>,
 }
 
-/// Build a `json::Model` from the named model in a `datamodel::Project`, with
-/// the `views` field cleared so the snapshot is diagram-free.
-///
-/// Returns `None` when the requested model name is not found and is not the
-/// "main" convenience alias.
-fn model_snapshot(project: &datamodel::Project, model_name: &str) -> Option<json::Model> {
+/// The model [`analyze_model`] analyzes for `model_name`; `Err` when no model
+/// has that name and it is not `"main"`, the convenience alias.
+pub fn analyzed_model<'a>(
+    project: &'a datamodel::Project,
+    model_name: &str,
+) -> Result<&'a datamodel::Model, String> {
     let model = if model_name == "main" {
         // "main" is a convenience alias: fall back to first model when no model
         // is explicitly named "main".
         project
             .get_model(model_name)
-            .cloned()
-            .or_else(|| project.models.first().cloned())
+            .or_else(|| project.models.first())
     } else {
-        project.get_model(model_name).cloned()
-    }?;
-
-    let mut json_model: json::Model = model.into();
-    json_model.views.clear();
-    Some(json_model)
+        project.get_model(model_name)
+    };
+    model.ok_or_else(|| format!("model '{model_name}' not found in project"))
 }
 
 /// Analyse a system-dynamics model: run LTM discovery and return the
@@ -132,15 +126,13 @@ fn model_snapshot(project: &datamodel::Project, model_name: &str) -> Option<json
 ///
 /// The caller provides a salsa `SimlinDb` and `SourceProject` (already
 /// synced from the datamodel project) for incremental compilation, plus
-/// the `datamodel::Project` for model snapshot construction and UID
-/// resolution.
+/// the `datamodel::Project` for UID resolution.
 ///
 /// A failure to *compile or simulate* the model for LTM analysis (a malformed
 /// equation, an unresolved reference, or a `Vm::new`/`run_to_end` failure) is
 /// NOT collapsed into a silent empty result:
-/// `Ok` is returned with the model snapshot, empty loop fields, AND
-/// `ModelAnalysis::analysis_error` set to the actionable error message, so a
-/// caller asking "what loops does this model have?" can tell "could not
+/// `Ok` is returned with empty loop fields AND `ModelAnalysis::analysis_error`
+/// set to the actionable error message, so a caller asking "what loops does this model have?" can tell "could not
 /// analyse" apart from "no loops" (GH #660).
 /// A non-compile structural edge case (e.g. the model is absent from the
 /// causal graph) still degrades gracefully to empty loop fields with
@@ -162,20 +154,18 @@ pub fn analyze_model(
     model_name: &str,
     budget: Option<std::time::Duration>,
 ) -> Result<ModelAnalysis, String> {
-    let json_model = model_snapshot(project, model_name)
-        .ok_or_else(|| format!("model '{model_name}' not found in project"))?;
+    analyzed_model(project, model_name)?;
 
     // A cyclic / self-referential module graph reachable from the analyzed model
     // would panic the recursive causal-graph / layout queries this analysis
-    // drives. Surface it as an actionable `analysis_error` (the model snapshot is
-    // intact, loops empty), matching the non-compilable-model degradation rather
-    // than aborting (GH #806). Scoped to reachability from `model_name` so an
+    // drives. Surface it as an actionable `analysis_error` (loops empty),
+    // matching the non-compilable-model degradation rather than aborting (GH
+    // #806). Scoped to reachability from `model_name` so an
     // unrelated draft cycle elsewhere does not block analyzing a valid model.
     if let Some((_code, msg)) =
         crate::db::project_module_graph(&*db, source_project).cycle_error_from(model_name)
     {
         return Ok(ModelAnalysis {
-            model: json_model,
             time: vec![],
             loop_dominance: vec![],
             partitions: vec![],
@@ -220,7 +210,6 @@ pub fn analyze_model(
 
     match result {
         Some(result) => Ok(ModelAnalysis {
-            model: json_model,
             time: result.time,
             loop_dominance: result.loop_dominance,
             partitions: result.partitions,
@@ -233,7 +222,6 @@ pub fn analyze_model(
             universe_loops: result.universe_loops,
         }),
         None => Ok(ModelAnalysis {
-            model: json_model,
             time: vec![],
             loop_dominance: vec![],
             partitions: vec![],
@@ -270,7 +258,7 @@ pub fn build_sub_model_output_ports(
         .iter()
         .map(|(name, model)| {
             (
-                crate::common::Ident::new(name.as_ref()),
+                simlin_base::common::Ident::new(name.as_ref()),
                 crate::db::sub_model_output_ports(db, *model, source_project),
             )
         })
@@ -301,7 +289,7 @@ pub fn build_link_expansion_context(
         .iter()
         .map(|(name, var)| {
             (
-                crate::common::Ident::new(name.as_str()),
+                simlin_base::common::Ident::new(name.as_str()),
                 crate::db::variable_dimensions(db, *var, source_project).clone(),
             )
         })
@@ -310,13 +298,19 @@ pub fn build_link_expansion_context(
     let flow_to_stock = source_model
         .variables(db)
         .iter()
-        .filter(|(_, var)| var.kind(db) == crate::db::SourceVariableKind::Stock)
+        .filter(|(_, var)| var.kind(db) == crate::variable::SourceVariableKind::Stock)
         .flat_map(|(stock, var)| {
-            let stock = crate::common::Ident::<crate::common::Canonical>::new(stock.as_str());
+            let stock =
+                simlin_base::common::Ident::<simlin_base::common::Canonical>::new(stock.as_str());
             var.inflows(db)
                 .iter()
                 .chain(var.outflows(db).iter())
-                .map(move |flow| (crate::common::Ident::new(flow.as_str()), stock.clone()))
+                .map(move |flow| {
+                    (
+                        simlin_base::common::Ident::new(flow.as_str()),
+                        stock.clone(),
+                    )
+                })
                 .collect::<Vec<_>>()
         })
         .collect();
@@ -370,7 +364,8 @@ fn run_ltm_pipeline(
     budget: Option<std::time::Duration>,
 ) -> Result<Option<PipelineResult>, String> {
     let matched_model = project.models.iter().find(|m| {
-        crate::canonicalize(&m.name).as_ref() == crate::canonicalize(model_name).as_ref()
+        simlin_base::canonicalize(&m.name).as_ref()
+            == simlin_base::canonicalize(model_name).as_ref()
     });
     let Some(dm_model) = matched_model.or_else(|| project.models.first()) else {
         return Ok(None);
@@ -379,7 +374,7 @@ fn run_ltm_pipeline(
     // Original name for datamodel lookups (get_model does exact matching);
     // canonical name for salsa map lookups (models(db) uses canonical keys).
     let original_name = &dm_model.name;
-    let canonical_name = crate::canonicalize(original_name).into_owned();
+    let canonical_name = simlin_base::canonicalize(original_name).into_owned();
 
     let uid_to_loop_name = build_uid_to_loop_name(project, original_name);
 
@@ -477,7 +472,7 @@ pub fn discover_run_loops(
     db: &dyn crate::db::Db,
     source_project: SourceProject,
     model_name: &str,
-    results: &crate::results::Results,
+    results: &simlin_base::results::Results,
     budget: Option<std::time::Duration>,
 ) -> Option<crate::ltm_finding::DiscoveryResult> {
     // Build an element-level CausalGraph for loop discovery. This ensures
@@ -498,10 +493,10 @@ pub fn discover_run_loops(
         element_edges,
     );
 
-    let stocks: Vec<crate::common::Ident<crate::common::Canonical>> = element_edges
+    let stocks: Vec<simlin_base::common::Ident<simlin_base::common::Canonical>> = element_edges
         .stocks
         .iter()
-        .map(|s| crate::common::Ident::new(s))
+        .map(|s| simlin_base::common::Ident::new(s))
         .collect();
 
     // Get LTM variable metadata and project dimensions for A2A link
@@ -535,7 +530,7 @@ pub fn discover_run_loops(
 /// Build a mapping from variable-UID sets to loop names using the model's
 /// persisted `loop_metadata`.  Entries are stored as a sorted Vec of UIDs
 /// because UIDs must be matched as a set.
-pub(crate) fn build_uid_to_loop_name(
+pub fn build_uid_to_loop_name(
     project: &datamodel::Project,
     model_name: &str,
 ) -> Vec<(Vec<i32>, String)> {
@@ -688,7 +683,7 @@ fn resolve_loop_name(
 ///
 /// UID lookup is scoped to `model_name` so that variables with the same
 /// identifier in different models don't produce false matches.
-pub(crate) fn persisted_loop_name(
+pub fn persisted_loop_name(
     loop_var_idents: &std::collections::HashSet<String>,
     uid_to_loop_name: &[(Vec<i32>, String)],
     model_name: &str,
@@ -704,11 +699,12 @@ pub(crate) fn persisted_loop_name(
         .models
         .iter()
         .filter(|m| {
-            crate::canonicalize(&m.name).as_ref() == crate::canonicalize(model_name).as_ref()
+            simlin_base::canonicalize(&m.name).as_ref()
+                == simlin_base::canonicalize(model_name).as_ref()
         })
         .flat_map(|m| &m.variables)
         .filter_map(|var| {
-            let ident = crate::canonicalize(match var {
+            let ident = simlin_base::canonicalize(match var {
                 datamodel::Variable::Stock(s) => &s.ident,
                 datamodel::Variable::Flow(f) => &f.ident,
                 datamodel::Variable::Aux(a) => &a.ident,
@@ -738,18 +734,17 @@ pub(crate) fn persisted_loop_name(
 /// The time of each saved row, read from the rows: a save step that is not a
 /// whole number of DTs saves rows that are not evenly spaced
 /// (`results::Specs`).
-fn build_time_array(results: &crate::results::Results) -> Vec<f64> {
+fn build_time_array(results: &simlin_base::results::Results) -> Vec<f64> {
     results
         .iter()
-        .map(|row| row[crate::results::TIME_OFF])
+        .map(|row| row[simlin_base::results::TIME_OFF])
         .collect()
 }
 
 /// One causal link of a model, as [`model_links`] reports it: its endpoints,
 /// its statically analyzed polarity, and, for a run under the LTM overlay, its
 /// link-score series.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ModelLink {
     pub from: String,
     pub to: String,
@@ -810,7 +805,7 @@ pub fn model_links(
     db: &dyn crate::db::Db,
     model: crate::db::SourceModel,
     project: SourceProject,
-    results: Option<&crate::results::Results>,
+    results: Option<&simlin_base::results::Results>,
     include_internal: bool,
 ) -> Vec<ModelLink> {
     let causal = crate::db::model_causal_edges(db, model, project);
@@ -833,7 +828,7 @@ pub fn model_links(
             let score = results.and_then(|r| {
                 let link_score_var =
                     format!("$\u{205A}ltm\u{205A}link_score\u{205A}{from}\u{2192}{to}");
-                let var_ident = crate::canonicalize(&link_score_var);
+                let var_ident = simlin_base::canonicalize(&link_score_var);
                 r.offsets
                     .get(&*var_ident)
                     .map(|&off| r.iter().map(|row| row[off]).collect::<Vec<f64>>())
@@ -863,8 +858,8 @@ pub fn model_links(
     let collapsible: Vec<crate::ltm_finding::CollapsibleLink> = raw
         .into_iter()
         .map(|l| crate::ltm_finding::CollapsibleLink {
-            from: crate::common::Ident::new(&l.from),
-            to: crate::common::Ident::new(&l.to),
+            from: simlin_base::common::Ident::new(&l.from),
+            to: simlin_base::common::Ident::new(&l.to),
             polarity: l.polarity,
             score: l.score,
         })
@@ -928,385 +923,6 @@ fn attach_relative_scores(links: Vec<ModelLink>) -> Vec<ModelLink> {
         .collect()
 }
 
-/// One read of a model, as [`model_reads`] reports it: `to` reads `from`.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq)]
-pub struct ModelRead {
-    pub from: String,
-    pub to: String,
-    /// The static polarity of the causal link from `from` to `to`
-    /// ([`model_links`]), and unknown for a read that is no causal link: a
-    /// read made only when the model starts, or a table a `LOOKUP` names.
-    pub polarity: crate::ltm::LinkPolarity,
-    /// Whether `to` reads `from` only when the model starts: in a stock's
-    /// initial value, in an initial-only equation, or as an `INIT` argument.
-    /// Such a read sets where `to` starts and never moves it afterwards, so
-    /// it is no causal link and no part of a feedback loop.
-    pub start_only: bool,
-    /// Whether `from` is a table `to` looks up (`LOOKUP(from, x)`) and never
-    /// reads as a value: the table shapes `to` and is no causal link.
-    pub table: bool,
-    /// The stock's or flow's option `to` reads `from` in, when every read of
-    /// the pair is in one (a conveyor's transit time, a leak's fraction):
-    /// the engine reads it in the special-stock build, outside `to`'s
-    /// equation.
-    pub option: Option<crate::datamodel::StockOption>,
-    /// Whether every read of the pair is in the text of an equation the
-    /// compiler cannot read (an unknown builtin, a wrong argument count): the
-    /// name is written there, and the equation reads it once it compiles.
-    pub unchecked: bool,
-}
-
-/// How one read of a pair was made, which the pair's [`ModelRead`] sums.
-#[derive(Clone, Copy)]
-struct ReadMade {
-    at_start: bool,
-    table: bool,
-    option: Option<crate::datamodel::StockOption>,
-    unchecked: bool,
-}
-
-impl ReadMade {
-    const EQUATION: ReadMade = ReadMade {
-        at_start: false,
-        table: false,
-        option: None,
-        unchecked: false,
-    };
-}
-
-/// Whether a read in `phase` under `lag` is made only when the model starts:
-/// every read of an initial-value equation, and a per-step equation's read of
-/// the frozen initial snapshot.
-pub(crate) fn read_at_start(phase: crate::db::DepPhase, lag: crate::variable::DepLag) -> bool {
-    use crate::db::DepPhase;
-    use crate::variable::DepLag;
-    match (phase, lag) {
-        (DepPhase::Init, DepLag::Current | DepLag::Previous | DepLag::Initial) => true,
-        (DepPhase::Dt, DepLag::Initial) => true,
-        (DepPhase::Dt, DepLag::Current | DepLag::Previous) => false,
-    }
-}
-
-/// What each variable of a model reads: the one owner of "what does this
-/// variable read, and what reads it", for the agent tools' variable records,
-/// the `readers` and `reads` citations and the validation battery's reach.
-///
-/// [`model_links`] is the loops' graph and answers a different question: it
-/// holds only what moves a variable from step to step, so a constant a stock
-/// starts from, or one read inside `INIT`, has no link out of it. A model
-/// still depends on both, and "nothing reads this constant" is false of them.
-///
-/// The reads come from `variable_direct_dependencies`, in both phases and
-/// under every lag:
-///
-/// - A helper a variable's parse synthesized (a hoisted argument, a
-///   `PREVIOUS`/`INIT` capture, a `SMTH1`/`DELAY` instance) is no variable of
-///   the model, so what it reads is read by the variable it was made for.
-/// - A read through a module instance (`m·x`) is a read of the instance, as
-///   a causal link through one is.
-/// - A stock reads its flows, and the names in its initial value at the
-///   start only.
-/// - A table a `LOOKUP` names is read by the caller: the dependency set
-///   leaves it out, since a table orders nothing, but the caller does not
-///   compile without it.
-///
-/// A pair is `start_only` when every read of it is made at the start
-/// ([`read_at_start`], through an `INIT`-only capture, or as a module
-/// instance's input source that only the sub-model's start reads, which the
-/// causal edges leave out for that reason). Sorted by reader,
-/// then by what is read.
-pub fn model_reads(
-    db: &dyn crate::db::Db,
-    model: crate::db::SourceModel,
-    project: SourceProject,
-) -> Vec<ModelRead> {
-    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-
-    use crate::common::{Canonical, Ident};
-    use crate::db::{DepRefs, ImplicitVarDeps, SourceVariable, SourceVariableKind};
-
-    /// The reads found so far, for one reader at a time.
-    struct Reads<'a> {
-        /// (reader, read) -> how every read of the pair was made, summed:
-        /// whether all are at the start, all table lookups, all in one
-        /// option, all in an unread equation's text.
-        pairs: BTreeMap<(String, String), ReadMade>,
-        declared: &'a HashMap<String, SourceVariable>,
-    }
-
-    impl Reads<'_> {
-        /// A read of `from` by `reader`. A name the model does not declare
-        /// (an equation's misspelling, a flow a stock lists that is gone) is
-        /// the reader's error, which its diagnostics report, not a read of
-        /// anything.
-        fn note(&mut self, from: &str, reader: &str, at_start: bool, table: bool) {
-            self.made(
-                from,
-                reader,
-                ReadMade {
-                    at_start,
-                    table,
-                    ..ReadMade::EQUATION
-                },
-            );
-        }
-
-        fn made(&mut self, from: &str, reader: &str, made: ReadMade) {
-            if !self.declared.contains_key(from) {
-                return;
-            }
-            self.pairs
-                .entry((reader.to_string(), from.to_string()))
-                .and_modify(|sum| {
-                    sum.at_start &= made.at_start;
-                    sum.table &= made.table;
-                    if sum.option != made.option {
-                        sum.option = None;
-                    }
-                    sum.unchecked &= made.unchecked;
-                })
-                .or_insert(made);
-        }
-
-        /// The reads `text` writes, by its references
-        /// ([`crate::patch::text_references`], the walk a rename makes), each
-        /// made as `made` says. A name alone in a subscript's brackets is a
-        /// read only when no dimension has an element of that name, as the
-        /// dependency walk reads it; a read through a module instance is a
-        /// read of the instance. `false` for a text that does not parse.
-        fn text(
-            &mut self,
-            dimensions: &crate::dimensions::DimensionsContext,
-            reader: &str,
-            text: &str,
-            made: ReadMade,
-        ) -> bool {
-            let Some(references) = crate::patch::text_references(text) else {
-                return false;
-            };
-            for (site, reference) in references {
-                let name = reference.as_str();
-                let name = name.strip_prefix("self\u{00B7}").unwrap_or(name);
-                let head = name.split('\u{00B7}').next().unwrap_or(name);
-                let element = crate::common::CanonicalElementName::from_raw(head);
-                if site == crate::patch::Site::Index
-                    && dimensions.is_element_of_any_dimension(&element)
-                {
-                    continue;
-                }
-                if head != reader {
-                    self.made(head, reader, made);
-                }
-            }
-            true
-        }
-
-        /// The tables `reader` looks up (a call of a name the model does not
-        /// declare is parsed as one too, and [`Reads::note`] drops it).
-        fn tables(&mut self, reader: &str, tables: &BTreeSet<Ident<Canonical>>, at_start: bool) {
-            for table in tables {
-                self.note(table.as_str(), reader, at_start, true);
-            }
-        }
-
-        /// Every read of `deps`, the reads of the node `node` (`reader`
-        /// itself or one of its helpers), as a read by `reader`, descending
-        /// into the reader's own helpers, each once (`visited`). `at_start`
-        /// says the reads are reached only through one made at the start; a
-        /// helper an `INIT` captures is read through `INIT`, whose lag
-        /// already says so, and a module instance's input source that only
-        /// its sub-model's start reads is in `start_only` (the causal edges'
-        /// `start_only_inputs`).
-        #[allow(clippy::too_many_arguments)]
-        fn record<'h>(
-            &mut self,
-            helpers: &HashMap<&'h str, &'h ImplicitVarDeps>,
-            visited: &mut HashSet<&'h str>,
-            start_only: &BTreeSet<(String, String)>,
-            reader: &str,
-            node: &str,
-            deps: &DepRefs,
-            at_start: bool,
-        ) {
-            for dep in deps.iter() {
-                let head = dep.target.head().as_str();
-                let at_start = at_start
-                    || read_at_start(dep.phase, dep.lag)
-                    || start_only.contains(&(head.to_string(), node.to_string()));
-                // A module instance's read of its own output binds nothing (a
-                // Stella import wires those as inputs), as in the causal
-                // graph.
-                if !dep.target.is_local() && head == reader {
-                    continue;
-                }
-                let Some((&name, &helper)) = helpers.get_key_value(head) else {
-                    self.note(head, reader, at_start, false);
-                    continue;
-                };
-                if visited.insert(name) {
-                    self.tables(reader, &helper.referenced_tables, at_start);
-                    self.record(
-                        helpers,
-                        visited,
-                        start_only,
-                        reader,
-                        name,
-                        &helper.deps,
-                        at_start,
-                    );
-                }
-            }
-        }
-    }
-
-    let empty_inputs = crate::db::ModuleInputSet::empty(db);
-    let dimensions = crate::db::project_dimensions_context(db, project);
-    let start_only = &crate::db::model_causal_edges(db, model, project).start_only_inputs;
-    let mut reads = Reads {
-        pairs: BTreeMap::new(),
-        declared: model.variables(db),
-    };
-    for (name, source_var) in model.variables(db).iter() {
-        // A stock's or a flow's options are expressions the special-stock
-        // build reads, outside the dependency set.
-        for (role, text) in source_var.compat(db).expression_texts() {
-            if let crate::datamodel::ExpressionRole::Option(option) = role {
-                reads.text(
-                    dimensions,
-                    name,
-                    text,
-                    ReadMade {
-                        option: Some(option),
-                        ..ReadMade::EQUATION
-                    },
-                );
-            }
-        }
-        // An equation the compiler cannot read has no dependency set; the
-        // names its text writes are what it reads once it compiles.
-        if !equation_is_read(db, *source_var, project, dimensions) {
-            for (_, text) in source_var.equation(db).expression_texts() {
-                reads.text(
-                    dimensions,
-                    name,
-                    text,
-                    ReadMade {
-                        unchecked: true,
-                        ..ReadMade::EQUATION
-                    },
-                );
-            }
-        }
-        let deps = crate::db::variable_direct_dependencies(db, *source_var, project, empty_inputs);
-        let helpers: HashMap<&str, &ImplicitVarDeps> = deps
-            .implicit_vars
-            .iter()
-            .map(|helper| (helper.name.as_str(), helper))
-            .collect();
-        // A stock's equation is its initial value; what moves it is its flows.
-        let is_stock = source_var.kind(db) == SourceVariableKind::Stock;
-        if is_stock {
-            for flow in source_var
-                .inflows(db)
-                .iter()
-                .chain(source_var.outflows(db).iter())
-            {
-                reads.note(&crate::canonicalize(flow), name, false, false);
-            }
-        }
-        let mut visited = HashSet::new();
-        reads.tables(name, &deps.referenced_tables, is_stock);
-        reads.record(
-            &helpers,
-            &mut visited,
-            start_only,
-            name,
-            name,
-            &deps.deps,
-            is_stock,
-        );
-    }
-
-    let polarities: HashMap<(String, String), crate::ltm::LinkPolarity> =
-        model_links(db, model, project, None, false)
-            .into_iter()
-            .map(|link| ((link.to, link.from), link.polarity))
-            .collect();
-    reads
-        .pairs
-        .into_iter()
-        .map(|((to, from), made)| {
-            let polarity = polarities
-                .get(&(to.clone(), from.clone()))
-                .copied()
-                .unwrap_or(crate::ltm::LinkPolarity::Unknown);
-            ModelRead {
-                from,
-                to,
-                polarity,
-                start_only: made.at_start,
-                table: made.table,
-                option: made.option,
-                unchecked: made.unchecked,
-            }
-        })
-        .collect()
-}
-
-/// Whether the compiler reads `var`'s equation: it parses, and its typed tree
-/// is built (`ast::typed_ast`, what the dependency walk classifies). One that
-/// is not read has no dependency set ([`model_reads`] reads its text instead).
-fn equation_is_read(
-    db: &dyn crate::db::Db,
-    var: crate::db::SourceVariable,
-    project: SourceProject,
-    dimensions: &crate::dimensions::DimensionsContext,
-) -> bool {
-    if var.kind(db) == crate::db::SourceVariableKind::Module {
-        return true;
-    }
-    let parsed = &crate::db::parse_source_variable(db, var, project).variable;
-    let typed = |ast: Option<&crate::ast::Ast<crate::ast::Expr0>>| {
-        ast.is_none_or(|ast| crate::ast::typed_ast(ast, dimensions).is_ok())
-    };
-    let written = var
-        .equation(db)
-        .expression_texts()
-        .iter()
-        .any(|(_, text)| !text.trim().is_empty());
-    let parsed_any = parsed.ast().is_some() || parsed.init_ast().is_some();
-    (parsed_any || !written) && typed(parsed.ast()) && typed(parsed.init_ast())
-}
-
-/// The variables of a model whose reads no reader can know: an expression
-/// text of theirs that does not even parse. Sorted. A claim that a variable
-/// has no reader, or no other, cannot hold over such a model.
-pub fn model_unread_equations(
-    db: &dyn crate::db::Db,
-    model: crate::db::SourceModel,
-) -> Vec<String> {
-    let mut unread: Vec<String> = model
-        .variables(db)
-        .iter()
-        .filter(|(_, var)| {
-            let equation = var.equation(db).expression_texts();
-            let compat = var.compat(db).expression_texts();
-            equation
-                .iter()
-                .chain(compat.iter())
-                .any(|(_, text)| crate::patch::text_references(text).is_none())
-        })
-        .map(|(name, _)| name.clone())
-        .collect();
-    unread.sort();
-    unread
-}
-
-#[cfg(test)]
-#[path = "analysis_reads_tests.rs"]
-mod reads_tests;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1318,7 +934,7 @@ mod tests {
         use std::io::BufReader;
         let f = File::open(path).expect("failed to open test fixture");
         let mut reader = BufReader::new(f);
-        crate::xmile::project_from_reader(&mut reader).expect("failed to parse XMILE")
+        simlin_formats::xmile::project_from_reader(&mut reader).expect("failed to parse XMILE")
     }
 
     fn synced_db(project: &datamodel::Project) -> (SimlinDb, SourceProject) {
@@ -1342,7 +958,7 @@ mod tests {
             .build_datamodel();
         project.sim_specs.save_step = Some(datamodel::Dt::Dt(0.3));
         // The rows a save step of 0.3 saves at a DT of 0.25.
-        let specs = crate::results::Specs::from(&project.sim_specs);
+        let specs = simlin_base::results::Specs::from(&project.sim_specs);
         let rows: Vec<f64> = (0..specs.n_chunks as u64)
             .map(|row| specs.time_at(specs.saved_row_step(row) as u64))
             .collect();
@@ -1366,62 +982,6 @@ mod tests {
         }
     }
 
-    /// Dominant periods begin and end at the rows' own times, in the analysis
-    /// and in the layout's metadata alike. A population whose births loop
-    /// leads until its crowding loop takes over, saved every 0.3 at a DT of
-    /// 0.25: the rows are not evenly spaced, so a boundary counted in save
-    /// steps from the start would be at no row's time.
-    #[test]
-    fn dominant_periods_begin_and_end_at_the_rows_times() {
-        let mut project = crate::test_common::TestProject::new("crowding")
-            .with_sim_time(0.0, 30.0, 0.25)
-            .stock("population", "10", &["births"], &["deaths"], None)
-            .flow("births", "population * 0.3", None)
-            .flow("deaths", "population * population / 1000", None)
-            .build_datamodel();
-        project.sim_specs.save_step = Some(datamodel::Dt::Dt(0.3));
-        let specs = crate::results::Specs::from(&project.sim_specs);
-        let rows: Vec<f64> = (0..specs.n_chunks as u64)
-            .map(|row| specs.time_at(specs.saved_row_step(row) as u64))
-            .collect();
-
-        let (mut db, sp) = synced_db(&project);
-        let analysis = analyze_model(&project, &mut db, sp, "main", None).expect("analysis");
-        let layout = crate::layout::compute_layout_metadata(&project, "main", None)
-            .expect("layout metadata");
-        for (surface, periods) in [
-            ("the analysis", &analysis.dominant_loops_by_period),
-            ("the layout", &layout.dominant_periods),
-        ] {
-            assert!(
-                periods.len() >= 2,
-                "{surface}: dominance changes hands: {periods:?}"
-            );
-            for period in periods.iter() {
-                for time in [period.start, period.end] {
-                    assert!(rows.contains(&time), "{surface}: {time} is no row's time");
-                }
-            }
-            // The handover is at a row a cadence of 0.3 would put elsewhere.
-            let handover = periods[1].start;
-            let row = rows.iter().position(|&t| t == handover).unwrap_or(0);
-            assert_ne!(handover, row as f64 * 0.3, "{surface}");
-        }
-
-        // Saved every 0.5, on the grid, the rows' times are the cadence's
-        // bit for bit, so the periods read from them are what a cadence
-        // gives.
-        project.sim_specs.save_step = Some(datamodel::Dt::Dt(0.5));
-        let (mut db, sp) = synced_db(&project);
-        let analysis = analyze_model(&project, &mut db, sp, "main", None).expect("analysis");
-        let cadence: Vec<u64> = (0..analysis.time.len())
-            .map(|row| (row as f64 * 0.5).to_bits())
-            .collect();
-        let times: Vec<u64> = analysis.time.iter().map(|t| t.to_bits()).collect();
-        assert_eq!(times, cadence);
-        assert!(analysis.dominant_loops_by_period.len() >= 2);
-    }
-
     /// F2: `analyze_model` on a conveyor model must NOT report a spurious
     /// `analysis_error`. Before the `build_sim` dispatch, the LTM pipeline's
     /// `compile_project_incremental` hit the `ConveyorNotExpanded` guard, so
@@ -1433,7 +993,7 @@ mod tests {
     #[test]
     fn analyze_model_conveyor_reports_no_spurious_error() {
         let xml = include_str!("../../../test/conveyors/minimal_conveyor.xmile");
-        let project = crate::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+        let project = simlin_formats::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
             .expect("parse minimal_conveyor.xmile");
         let (mut db, sp) = synced_db(&project);
         let analysis =
@@ -1786,26 +1346,6 @@ mod tests {
         }
     }
 
-    // ---- AC2.5: model snapshot has empty views ----
-
-    #[test]
-    fn ac2_5_views_are_empty() {
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../test/logistic_growth_ltm/logistic_growth.stmx"
-        );
-        let project = load_project(path);
-        let (mut db, sp) = synced_db(&project);
-        let analysis =
-            analyze_model(&project, &mut db, sp, "main", None).expect("analyze_model failed");
-
-        assert!(
-            analysis.model.views.is_empty(),
-            "model snapshot must have empty views, got {}",
-            analysis.model.views.len()
-        );
-    }
-
     // ---- AC2.6: graceful degradation on equation errors ----
 
     #[test]
@@ -1814,12 +1354,6 @@ mod tests {
         let (mut db, sp) = synced_db(&project);
         let analysis = analyze_model(&project, &mut db, sp, "main", None)
             .expect("analyze_model should not return Err");
-
-        // Model snapshot must still be present with the stock and flow.
-        assert!(
-            !analysis.model.stocks.is_empty() || !analysis.model.flows.is_empty(),
-            "model snapshot must contain variables even on simulation failure"
-        );
 
         // Loop-related fields must be empty.
         assert!(
@@ -1963,11 +1497,7 @@ mod tests {
             "the analysis_error must name the failing variable (births), got: {msg}"
         );
 
-        // The model snapshot is still intact and the loop fields stay empty.
-        assert!(
-            !analysis.model.stocks.is_empty(),
-            "model snapshot must still carry the stock"
-        );
+        // The loop fields stay empty.
         assert!(
             analysis.loop_dominance.is_empty(),
             "loop_dominance must be empty when the model can't be compiled"
@@ -2441,7 +1971,7 @@ mod tests {
         let mut vm = crate::vm::Vm::new(compiled).expect("vm");
         vm.run_to_end().expect("run");
         let results = vm.into_results();
-        let off = results.offsets[&crate::common::Ident::new(name)];
+        let off = results.offsets[&simlin_base::common::Ident::new(name)];
         let last = results.step_count - 1;
         results.data[last * results.step_size + off]
     }

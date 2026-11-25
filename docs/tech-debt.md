@@ -182,10 +182,10 @@ Each entry has a description, component, severity, and measurement command.
 
 ### 19. Rust VDF Parser Boundary Parity
 
-- **Component**: simlin-engine (src/simlin-engine/src/vdf.rs)
+- **Component**: simlin-engine (src/simlin-formats/src/vdf.rs)
 - **Severity**: RESOLVED (2026-07-05)
 - **Description**: (**Resolved** on branch `vdf-parity-fixes`.) `tools/vdf_xray.py` handled several VDF boundary cases the Rust parser had not adopted.
-  The two decode rules were ported to Rust `extract_data`: (1) per-block bitmap width -- `VdfFile::parse` now reads header `0x7C` (block time-point grid count) alongside `0x78` (saved count), and `VdfFile::block_bitmap_layout` discriminates each block by "u16 count == bitmap popcount" (preferring the compact saved-grid width when both match), with full-grid blocks decoded over the whole grid and sampled at the saved Time positions (`block_positions_for_time_values`, origin from the last saved time) -- fixing the garbage decode of the class-0x05 input blocks on the saved-suffix `risk.vdf`/`risk2.vdf` fixtures; (2) raw-zero OT entries with dynamic class `0x11` and a nonzero section-6 final value now decode as all-NaN missing data (`inline_ot_entry_is_missing`; 455 such slots on `Ref.vdf`) instead of constant 0.0, and the C-LEARN comparator skips such reference-missing columns (`vdf_reference_is_missing` in `tests/integration/simulate.rs`).
+  The two decode rules were ported to Rust `extract_data`: (1) per-block bitmap width -- `VdfFile::parse` now reads header `0x7C` (block time-point grid count) alongside `0x78` (saved count), and `VdfFile::block_bitmap_layout` discriminates each block by "u16 count == bitmap popcount" (preferring the compact saved-grid width when both match), with full-grid blocks decoded over the whole grid and sampled at the saved Time positions (`block_positions_for_time_values`, origin from the last saved time) -- fixing the garbage decode of the class-0x05 input blocks on the saved-suffix `risk.vdf`/`risk2.vdf` fixtures; (2) raw-zero OT entries with dynamic class `0x11` and a nonzero section-6 final value now decode as all-NaN missing data (`inline_ot_entry_is_missing`; 455 such slots on `Ref.vdf`) instead of constant 0.0, and the C-LEARN comparator skips such reference-missing columns (`vdf_reference_is_missing` in `src/simlin-tests/tests/integration/simulate.rs`).
   The other two boundary cases the entry listed were already moot in Rust: the slot table and section-6 arrays are decoded from exact header/section-header pointers (`slot_table_from_header`, header `0x58`/`0x5C`/`0x60`), so the `SCEN01.VDF` candidate-scan preference and the empty-ref-stream overrun do not arise.
   Covered by `test_saved_suffix_blocks_use_wider_bitmap_grid`, `test_ref_raw_zero_dynamic_ot_entries_decode_as_missing`, and the `risk.vdf`/`risk2.vdf` extension of `test_section6_final_values_match_extracted_last_values`.
 
@@ -339,7 +339,7 @@ Each entry has a description, component, severity, and measurement command.
 
 - **Component**: simlin-engine (src/simlin-engine/src/ltm_augment.rs flow-to-stock path)
 - **Severity**: RESOLVED (2026-09-07)
-- **Description**: (**Resolved**.) The flow-to-stock link score is `|Δflow / Δnet|` over the stock's synthetic net-flow aux, a ratio of integration-step (dt) deltas with no stock history behind it, and the VM and wasm both re-evaluate the flows at the restored end-of-step state before snapshotting it under RK2/RK4, so LTM runs under every integration method and needs no guard (`tests/integration/ltm_integration_method.rs` pins Euler, RK2 and RK4 identical on an isolated loop and on the births/deaths model, whose flows are proportional to the stock, and pins a nonlinear flow following each method's own trajectory).
+- **Description**: (**Resolved**.) The flow-to-stock link score is `|Δflow / Δnet|` over the stock's synthetic net-flow aux, a ratio of integration-step (dt) deltas with no stock history behind it, and the VM and wasm both re-evaluate the flows at the restored end-of-step state before snapshotting it under RK2/RK4, so LTM runs under every integration method and needs no guard (`src/simlin-tests/tests/integration/ltm_integration_method.rs` pins Euler, RK2 and RK4 identical on an isolated loop and on the births/deaths model, whose flows are proportional to the stock, and pins a nonlinear flow following each method's own trajectory).
   Keeping the entry as a pointer to the design doc's "Integration Methods and Save Step" note.
 - **Tracked in**: #486 (LTM tracking epic: #488)
 - **Owner**: unassigned
@@ -395,66 +395,16 @@ Each entry has a description, component, severity, and measurement command.
 - **Owner**: unassigned
 - **Last reviewed**: 2026-05-13
 
-### 36. darwin-x64 Not Included in @simlin/mcp and @simlin/serve npm Distributions
+### 36. darwin-x64 Not Included in the @simlin/mcp npm Distribution
 
-- **Component**: simlin-mcp, simlin-serve (`.github/workflows/serve-release.yml`, `mcp-release.yml`)
+- **Component**: simlin-mcp (`.github/workflows/mcp-release.yml`)
 - **Severity**: low
-- **Description**: The npm release workflows for `@simlin/mcp` and `@simlin/serve` do not produce a macOS Intel (darwin-x64) binary.
-  Only `darwin-arm64` (Apple Silicon) and Linux targets are built.
-  Intel Mac users cannot install these packages via npm optionalDependencies.
-  The fix is to add `cargo-zigbuild --target x86_64-apple-darwin` steps to both release workflows and add `"@simlin/mcp-darwin-x64"` / `"@simlin/serve-darwin-x64"` entries to the respective `package.json` optionalDependencies.
+- **Description**: The npm release workflow for `@simlin/mcp` does not produce a macOS Intel (darwin-x64) binary.
+  The only macOS target it builds is `darwin-arm64` (Apple Silicon).
+  Intel Mac users cannot install the package via npm optionalDependencies.
+  The fix is to add a `cargo-zigbuild --target x86_64-apple-darwin` step to the release workflow and a `"@simlin/mcp-darwin-x64"` entry to the `package.json` optionalDependencies.
 - **Owner**: unassigned
 - **Last reviewed**: 2026-04-25
-
-### 37. macOS Watcher Loses Pre-Existing-File Removal and Rename Events
-
-- **Component**: simlin-serve (`src/watcher.rs`, `tests/watcher_merge.rs`)
-- **Severity**: medium
-- **Description**: Three watcher behaviours are lost on macOS for files that existed *before* the watcher's `FSEventStreamCreate` subscription:
-  1. **Rename source side**: an external `mv a.sd.json b.sd.json` doesn't produce a paired `Modify(Name(Both))` event.
-     FSEvents reports each side as a single-path `Modify(Name(Any))`, and `notify-debouncer-full` only pairs them when its file-id cache already knows the source — which only happens for files that arrived via a `Create` event after the watcher started.
-     The destination side merges via `handle_model_change`; the source side stays in the registry as a phantom entry.
-  2. **Rename-collision dual-removal**: `mv a b` where both are tracked never broadcasts the second `ProjectRemoved` because the destination side surfaces as a content-modify into the existing entry rather than a `Modify(Name(Both))` that would route to the `AlreadyExists` arm of `handle_model_rename`.
-  3. **Plain `unlink()` of a pre-existing file**: `external_remove_drops_registry_entry_and_broadcasts_removed` consistently times out on macOS-latest waiting for `ProjectRemoved`.
-     The classify branch added in commit 7faf89d4 (treating `Modify(Name(_))` on a missing leaf as `Removed`) covers the rename-flagged-unlink case but does not move the test, so the underlying event must be arriving as something else (or not at all).
-     Sister tests that *create* a file inside the watch window and then mutate or remove it pass on macOS, suggesting the file-id cache miss is the common factor.
-- The Linux-equivalent flows work because inotify's `MOVED_FROM`/`MOVED_TO` cookies always arrive together regardless of cache state, and `IN_DELETE` is a first-class event with no FSEvents-style flag coalescing.
-- **Symptoms**: external rename of a tracked file: SPA's editor for the old path may not migrate cleanly to the new path; rename-collision over a tracked destination merges contents instead of dropping both stale Loro states; `ProjectRenamed` is never broadcast on macOS; an external `rm` of a tracked file may leave a phantom registry entry.
-- **Test impact**: three integration tests are gated with `#[cfg_attr(target_os = "macos", ignore = ...)]`:
-  - `external_remove_drops_registry_entry_and_broadcasts_removed`
-  - `external_rename_re_keys_registry_and_emits_project_renamed`
-  - `rename_over_tracked_destination_removes_both_and_rehydrates`
-- **Possible fixes** (need design discussion, not papered over):
-  - **Hydrate the file-id cache at watcher start** by recursively scanning the root and registering each existing file with the debouncer's cache (e.g. via `notify_debouncer_full::FileIdMap::add_path`).
-    Closes both the rename-source-side miss and the unlink miss for pre-existing files at the cost of a one-shot scan.
-  - **Heuristic post-hoc pairing / inference in our actor**: keep a short-lived (<=200ms) "recently disappeared registry entries" buffer; pair `Modify(Name(_))` events with a recent removal whose content hash matches.
-  - **Switch to `notify::PollWatcher` on macOS** for the smoke / CI surface and accept higher latency in exchange for deterministic event delivery.
-  - **Accept the macOS UX gap** as documented and update the SPA client to handle the unpaired event sequence (a removal followed by a separate hydrate of the destination) without losing in-flight Loro edits — likely requires Loro doc state to migrate via content rather than via path-key.
-- **Investigation log (2026-04-26)**: classify-side fix routes missing-leaf `Modify(Name(_))` → `Removed` was insufficient; path-resolution fix using `resolve_canonical_path` (canonicalize the deepest existing ancestor) made the Linux semantics platform-correct but did not move the macOS test 1 either, which strongly suggests the underlying event simply isn't reaching the actor.
-  Without a macOS box to instrument the FSEvents stream directly, the next investigative step is to spawn a debug binary on a macOS runner that subscribes to FSEvents directly and prints the raw flags it receives for the test scenario.
-- **Owner**: unassigned
-- **Last reviewed**: 2026-04-26
-
-### 38. Windows Smoke Save Returns 500 (Atomic-Replace Race)
-
-- **Component**: simlin-serve (`src/handlers.rs::save_project`, `simlin-engine/src/io.rs::atomic_write`, `tests/smoke.rs`)
-- **Severity**: medium
-- **Description**: On windows-latest the smoke test's `POST /api/projects/teacup.xmile` save returns `500 Internal Server Error` with the generic `SaveError::Internal` body.
-  The Linux and macOS smoke jobs both pass through the same end-to-end code path, so the failure is Windows-specific.
-  The most likely root cause is the Windows-only branch in `simlin-engine::io::atomic_write` that calls `fs::remove_file(target)` before `fs::rename(tmp, target)` — std's `rename` does not overwrite on Windows, so the target must be unlinked first, but if the in-process watcher's `notify-debouncer-full` is holding a directory handle (via `ReadDirectoryChangesW`) at the same path, the unlink can be deferred or the rename can lose to a kernel-level open-handle race.
-- **Symptoms**: Linux + macOS smoke pass; Windows smoke fails on the first save assertion at `tests/smoke.rs:316:5`.
-  The save POST receives a 500 within seconds, with the response body `{"error":"internal server error"}`.
-- **Test impact**: `tests/integration/main.rs` compiles `mod smoke` out on Windows, so `ci.yaml`'s `serve-smoke` matrix runs the smoke test on ubuntu and macOS only, and Windows coverage of simlin-serve is the `serve-windows-check` job's `cargo check -p simlin-serve --all-targets`: a regression that breaks the Windows compile still trips CI, a Windows runtime regression does not.
-  Resolving this item means dropping the cfg gate and adding windows-latest back to the `serve-smoke` matrix.
-- **Investigation hints**:
-  - The harness already captures the spawned binary's stdout (where `tracing_subscriber::fmt()` writes by default) and stderr, and `ChildGuard::drop` dumps both on test panic.
-    So the next failing CI run on Windows will surface the underlying `tracing::error!` from `handlers.rs:708` in the job log, naming the specific err value behind `SaveError::Internal`.
-    Read that first.
-  - Once the err is visible, the most likely paths are (a) `commit_write` -> `atomic_write` returning a Windows I/O error from `remove_file` or `rename`; (b) `serialize_project` failing on Windows-style line endings if Git's autocrlf checked out `teacup.xmile` with `\r\n` and the XMILE writer emits something incompatible; (c) registry `ensure_or_get` racing with the watcher.
-  - A fix worth trying as a hypothesis test: switch `atomic_write` on Windows to use `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING` via `windows-sys` instead of the `remove`-then-`rename` two-step.
-    That eliminates the open-handle window the watcher might be sitting in.
-- **Owner**: unassigned
-- **Last reviewed**: 2026-04-27
 
 ### 39. Web deploy uploads the whole monorepo and GAE installs the full dep set
 
@@ -470,7 +420,7 @@ Each entry has a description, component, severity, and measurement command.
 - **Status (2026-06-27): implemented as `pnpm deploy:web:staged`, locally proven, pending a real `gcloud --no-promote` test before it replaces `deploy:web`.** The staged path (`scripts/deploy-web-staged.sh` -> `scripts/build-deploy-staging.mjs` + the pure transforms in `scripts/deploy-staging-manifests.mjs`) assembles a self-contained `deploy-staging/` whose `package.json` is exactly the server's prod closure, and deploys `gcloud app deploy deploy-staging/app.yaml`.
   The workspace-ref blocker is resolved by vendoring `@simlin/core` and `@simlin/engine` into `deploy-staging/vendor/` and rewriting them (and core's transitive `@simlin/engine` ref) to `file:` deps; a `pnpm-lock.yaml` is generated for the minimal manifest.
   Confirmed the buildpack lever from Google's docs: App Engine standard ALWAYS reinstalls from the deployed `package.json` + lockfile and has no vendored-`node_modules` escape hatch, so the only thing that shrinks the install is the deployed manifest.
-  Note the pnpm10 devDep bug is a side issue -- the dominant bloat is installing the *whole workspace* (app/diagram/website/serve-web prod deps: React, slate, radix, rspress), which a `--prod` install at the root would still pull.
+  Note the pnpm10 devDep bug is a side issue -- the dominant bloat is installing the *whole workspace* (app/diagram/website prod deps: React, slate, radix, rspress), which a `--prod` install at the root would still pull.
 - **Locally verified (2026-06-27)**: builder runs; an isolated `pnpm install --frozen-lockfile --prod` OUTSIDE the repo (no workspace/`.npmrc` ancestor, the GAE-faithful case) succeeds from the generated lockfile; the full server-side `libsimlin.wasm` (with `simlin_project_render_png`) materializes at the `__dirname` path; `node lib/index.js` boots ("WASM module initialized"), serves `/`->200, `/api/user`->401, `/static/js/sd-component.js`->200, `/robots.txt`->200.
   Result: **590 MB / 1171 pkgs -> 80 MB / 230 pkgs** (~86% smaller), 28.7 MB upload payload.
   Unit tests in `scripts/tests/deploy-staging-manifests.test.mjs`.
@@ -689,24 +639,24 @@ Each entry has a description, component, severity, and measurement command.
 - **Owner**: unassigned
 - **Last reviewed**: 2026-05-08
 
-### 60. No CI feature matrix for `simlin-engine`'s lib-only configurations
+### 60. No CI feature matrix for the engine crates' lib-only configurations
 
-- **Component**: build / CI (`scripts/pre-commit`, `.github/workflows/`, `src/simlin-engine/Cargo.toml`)
+- **Component**: build / CI (`scripts/pre-commit`, `.github/workflows/`, the `Cargo.toml` of each engine crate)
 - **Severity**: low (was medium; the dev-target half of this is now structurally impossible — see below)
-- **Description**: Neither the pre-commit hook nor CI exercises a Cargo **feature matrix** for `simlin-engine`, so feature-gating bugs in the **library** are invisible to the canonical gate. simlin-engine features: `file_io`, `schema`, `ai_info`, `debug-derive` (default = `schema, ai_info, debug-derive`), plus `ext_data`, `png_render`, `ltm_bench`.
+- **Description**: Neither the pre-commit hook nor CI exercises a Cargo **feature matrix** for the engine crates, so feature-gating bugs in a **library** are invisible to the canonical gate.
+  The features: simlin-formats `schema` (default), `file_io`, `ext_data`; simlin-diagram `png_render`; simlin-edit `schema`, `invariants`; simlin-engine `ai_info` (default), `ltm_bench`; simlin-layout `layout_eval`; simlin-tools `schema` (default); and each one's `test-support`.
 
   **Historical failure (no longer reachable).** During Phase 7c of the Vensim macro epic a subagent added `src/simlin-engine/tests/metasd_macros.rs` (which calls the `file_io`-gated `load_dat`/`load_csv`) WITHOUT the mirroring `required-features = ["file_io"]` entry.
   That broke `cargo build -p simlin-engine --all-targets` whenever `file_io` was *not* enabled (`error[E0425]`, `load_dat`/`load_csv` configured out), and survived multiple commits because the workspace build pulls `file_io` into scope via cross-crate feature unification (`simlin-cli` requests `simlin-engine/file_io`).
   The Cargo.toml fix landed in `7cba4ad2`.
-  GH #925 then removed the underlying hazard: the crate takes a self dev-dependency (`simlin-engine = { path = ".", default-features = false, features = ["file_io"] }`), so `file_io` is unconditionally on for every test/bench/example target.
+  The underlying hazard (GH #925) is gone: what `file_io` gates is `cfg(any(test, feature = "file_io"))`, and the integration tests, benches and examples are the `simlin-tests` package, whose edge onto simlin-formats asks for `file_io`.
   A dev target can no longer break under a missing `file_io` — that entire failure class is gone, and the `#[cfg]`/`required-features` bookkeeping it demanded is gone with it.
 
-  **What remains.** The gap narrows to **lib-only** configurations: nothing gates `cargo check -p simlin-engine --lib --no-default-features` (or other non-default lib feature subsets), where a `#[cfg(feature = ...)]` mistake in `src/` can still break the build.
-  In practice this is caught indirectly by the pre-commit WASM build (src/engine/build.sh's `cargo rustc -p simlin --lib --release --target wasm32-unknown-unknown --crate-type cdylib --no-default-features`, which compiles the engine with `file_io`/`schema`/`png_render` off), but that is one point sample, not a matrix, and it is a *release* build of a different crate.
-  Note also that the self dev-dep means `--all-targets` no longer type-checks the lib with `file_io` off — so a matrix step must be `--lib`-scoped to test anything.
-- **Suspected fix**: Add a lib-scoped feature-matrix check to the pre-commit hook and/or CI: at minimum `cargo check -p simlin-engine --lib --no-default-features` and `cargo check -p simlin-engine --lib --all-features`.
+  **What remains.** The gap narrows to **lib-only** configurations: nothing gates `cargo check -p <crate> --lib --no-default-features` for the engine crates (or other non-default lib feature subsets), where a `#[cfg(feature = ...)]` mistake in `src/` can still break the build.
+  In practice this is caught indirectly by the pre-commit WASM build (src/engine/build.sh's `cargo rustc -p simlin --lib --release --target wasm32-unknown-unknown --crate-type cdylib --no-default-features`, which compiles the engine crates with `file_io`/`schema`/`png_render` off), but that is one point sample, not a matrix, and it is a *release* build of a different crate.
+  A workspace `--all-targets` build unifies the features its targets ask for, so it never type-checks the lib with `file_io` off — a matrix step must be `--lib`-scoped to test anything.
+- **Suspected fix**: Add a lib-scoped feature-matrix check to the pre-commit hook and/or CI: at minimum `cargo check --lib --no-default-features` and `cargo check --lib --all-features` of the engine crates.
   Optionally `cargo hack --feature-powerset --lib` (bounded).
-  Do **not** use `--all-targets --no-default-features`: the crate's own unit tests require `debug-derive` (thousands of `assert_eq!`/`{:?}` sites) and have never compiled without it, so that invocation fails for reasons unrelated to feature-gating hygiene.
   Keep within the documented test-time budget ([docs/dev/rust.md#test-time-budgets](dev/rust.md)) — a couple of representative lib configurations, not the full powerset, is the pragmatic choice given the 3-minute workspace cap.
 - **Secondary note** (workflow, not a separate item): the original break propagated because multi-agent plan execution structurally trusts the inherited baseline — each subagent verified only its own delta, and several built *with* `file_io` and concluded the base was clean.
   Subagents should verify the exact configuration they will later claim green BEFORE starting, and STOP if the inherited baseline is already broken.

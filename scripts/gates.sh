@@ -25,12 +25,12 @@ cd "$(git rev-parse --show-toplevel)"
 
 # The packages with gates. To add one, list it here with `-p`; its features go
 # in FEATURES in the same `package/feature` form.
-PACKAGES=(-p simlin-engine)
+PACKAGES=(-p simlin-formats -p simlin-edit -p simlin-engine -p simlin-wasmgen -p simlin-tools -p simlin-tests)
 
 # Features no other lane runs the suite with: `ext_data` (the Excel data
 # provider). FEATURE_TESTS is the libtest filter that selects their tests,
 # which are not ignored and run here because nothing else compiles them.
-FEATURES="simlin-engine/ext_data"
+FEATURES="simlin-formats/ext_data,simlin-tests/ext_data"
 FEATURE_TESTS=(data_provider::)
 
 # The unit tests and the one integration harness. Naming them keeps the

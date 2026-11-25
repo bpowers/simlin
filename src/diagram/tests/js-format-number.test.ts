@@ -7,7 +7,7 @@ import { describe, it, expect } from '@rstest/core';
 import { jsFormatNumber } from '../render-common';
 
 // Mirror of the Rust contract in
-// `src/simlin-engine/src/diagram/common.rs::test_js_format_number*`. The two
+// `src/simlin-diagram/src/common.rs::test_js_format_number*`. The two
 // formatters MUST agree byte-for-byte so the cross-language SVG parity at
 // `svg-rendering.test.ts` (and the Rust regression guard
 // `diagram::connector::tests::test_render_arc_svg_byte_identical`) holds.

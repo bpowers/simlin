@@ -8,10 +8,10 @@
 //! `db/tests.rs` under the per-file line cap.
 
 use super::*;
-use crate::common::IdentMap;
-use crate::datamodel;
 use crate::db::{SimlinDb, sync_from_datamodel};
 use crate::test_common::TestProject;
+use simlin_base::common::IdentMap;
+use simlin_base::datamodel;
 
 // ── dt-phase cycle introspection ────────────────────────────────────────
 //
@@ -334,10 +334,10 @@ fn dt_cycle_sccs_two_node_cycle_matches_circular_diagnostic() {
     // (reported SCC <=> engine CircularDependency) is enforced inside
     // the accessor; reaching here means it held.
     let sccs = dt_cycle_sccs_engine_consistent(&db, model, result.project);
-    let expected: Vec<BTreeSet<crate::common::Ident<crate::common::Canonical>>> = vec![
+    let expected: Vec<BTreeSet<simlin_base::common::Ident<simlin_base::common::Canonical>>> = vec![
         [
-            crate::common::Ident::new("a"),
-            crate::common::Ident::new("b"),
+            simlin_base::common::Ident::new("a"),
+            simlin_base::common::Ident::new("b"),
         ]
         .into_iter()
         .collect(),
@@ -359,7 +359,8 @@ fn dt_cycle_sccs_self_reference_is_a_self_loop() {
     // -- was already enforced inside the accessor.)
     assert!(sccs.multi.is_empty(), "a self-loop is not a >=2 SCC");
     assert!(
-        sccs.self_loops.contains(&crate::common::Ident::new("a")),
+        sccs.self_loops
+            .contains(&simlin_base::common::Ident::new("a")),
         "direct self-reference must be reported as a self-loop"
     );
 }
@@ -484,7 +485,8 @@ fn dt_cycle_sccs_resolved_self_recurrence_has_no_circular() {
     let sccs = dt_cycle_sccs_engine_consistent(&db, model, result.project);
     // The whole-variable dt relation flags `ecc` as a self-loop...
     assert!(
-        sccs.self_loops.contains(&crate::common::Ident::new("ecc")),
+        sccs.self_loops
+            .contains(&simlin_base::common::Ident::new("ecc")),
         "the single-variable self-recurrence must still be an \
          instrumented dt self-loop (the whole-variable relation is \
          unchanged)"
@@ -513,7 +515,7 @@ fn dt_cycle_sccs_resolved_self_recurrence_has_no_circular() {
     );
     assert_eq!(
         dep_graph.resolved_sccs[0].members,
-        [crate::common::Ident::new("ecc")]
+        [simlin_base::common::Ident::new("ecc")]
             .into_iter()
             .collect::<BTreeSet<_>>()
     );
@@ -532,10 +534,10 @@ fn dt_cycle_sccs_genuine_two_cycle_still_circular() {
     let result = sync_from_datamodel(&db, &project);
     let model = result.models["main"].source;
     let sccs = dt_cycle_sccs_engine_consistent(&db, model, result.project);
-    let expected: Vec<BTreeSet<crate::common::Ident<crate::common::Canonical>>> = vec![
+    let expected: Vec<BTreeSet<simlin_base::common::Ident<simlin_base::common::Canonical>>> = vec![
         [
-            crate::common::Ident::new("a"),
-            crate::common::Ident::new("b"),
+            simlin_base::common::Ident::new("a"),
+            simlin_base::common::Ident::new("b"),
         ]
         .into_iter()
         .collect(),
@@ -574,20 +576,20 @@ fn dt_cycle_sccs_genuine_two_cycle_still_circular() {
 // missed cycle), and a `ResolvedScc` whose members the instrumentation
 // never surfaced (the shared dt relation drifted from the refinement).
 
-fn multi_ab() -> Vec<BTreeSet<crate::common::Ident<crate::common::Canonical>>> {
+fn multi_ab() -> Vec<BTreeSet<simlin_base::common::Ident<simlin_base::common::Canonical>>> {
     vec![
         [
-            crate::common::Ident::new("a"),
-            crate::common::Ident::new("b"),
+            simlin_base::common::Ident::new("a"),
+            simlin_base::common::Ident::new("b"),
         ]
         .into_iter()
         .collect(),
     ]
 }
 
-fn self_loop_a() -> BTreeSet<crate::common::Ident<crate::common::Canonical>> {
+fn self_loop_a() -> BTreeSet<simlin_base::common::Ident<simlin_base::common::Canonical>> {
     let mut s = BTreeSet::new();
-    s.insert(crate::common::Ident::new("a"));
+    s.insert(simlin_base::common::Ident::new("a"));
     s
 }
 
@@ -596,7 +598,7 @@ fn self_loop_a() -> BTreeSet<crate::common::Ident<crate::common::Canonical>> {
 fn resolved_a() -> Vec<crate::db::ResolvedScc> {
     vec![crate::db::ResolvedScc {
         members: self_loop_a(),
-        element_order: vec![(crate::common::Ident::new("a"), 0usize)],
+        element_order: vec![(simlin_base::common::Ident::new("a"), 0usize)],
         phase: crate::db::SccPhase::Dt,
     }]
 }
@@ -730,10 +732,10 @@ fn consistency_violation_none_for_init_only_resolved_scc_not_dt_instrumented() {
         self_loops: BTreeSet::new(),
     };
     let init_only: Vec<crate::db::ResolvedScc> = vec![crate::db::ResolvedScc {
-        members: [crate::common::Ident::new("s")].into_iter().collect(),
+        members: [simlin_base::common::Ident::new("s")].into_iter().collect(),
         element_order: vec![
-            (crate::common::Ident::new("s"), 0usize),
-            (crate::common::Ident::new("s"), 1usize),
+            (simlin_base::common::Ident::new("s"), 0usize),
+            (simlin_base::common::Ident::new("s"), 1usize),
         ],
         phase: crate::db::SccPhase::Initial,
     }];
@@ -756,7 +758,7 @@ fn consistency_violation_none_for_init_only_resolved_scc_not_dt_instrumented() {
 // that sourced only `AssignCurr` would find neither, and one narrowed to a
 // particular nesting depth would find one. The shape guards below assert that
 // -- the `App` in an `AssignTemp` and NOT in an `AssignCurr` -- for both.
-// VEM shapes are the known-good `tests/integration/compiler_vector.rs` fixtures
+// VEM shapes are the known-good `simlin-tests/tests/integration/compiler_vector.rs` fixtures
 // (`vector_elm_map(source[*], offsets[*])` and the nested
 // `max(vector_elm_map(...), 15)` hoisting form) so the model compiles and
 // the only thing under test is the membership set.
@@ -789,9 +791,9 @@ fn array_producing_vars_flags_exactly_the_two_positive_cases() {
 
     let got = array_producing_vars(&db, model, result.project);
 
-    let expected: BTreeSet<crate::common::Ident<crate::common::Canonical>> = [
-        crate::common::Ident::new("case1_vem"),
-        crate::common::Ident::new("case2_hoisted"),
+    let expected: BTreeSet<simlin_base::common::Ident<simlin_base::common::Canonical>> = [
+        simlin_base::common::Ident::new("case1_vem"),
+        simlin_base::common::Ident::new("case2_hoisted"),
     ]
     .into_iter()
     .collect();
@@ -872,8 +874,13 @@ fn array_producing_vars_flags_exactly_the_two_positive_cases() {
 // element-sourceable / multi-variable SCC => unresolved (loud-safe, keep
 // `CircularDependency`).
 
-fn ecc(i: usize) -> (crate::common::Ident<crate::common::Canonical>, usize) {
-    (crate::common::Ident::new("ecc"), i)
+fn ecc(
+    i: usize,
+) -> (
+    simlin_base::common::Ident<simlin_base::common::Canonical>,
+    usize,
+) {
+    (simlin_base::common::Ident::new("ecc"), i)
 }
 
 #[test]
@@ -905,7 +912,7 @@ fn resolve_dt_forward_recurrence_is_resolved_in_declared_order() {
     assert_eq!(scc.phase, SccPhase::Dt);
     assert_eq!(
         scc.members,
-        [crate::common::Ident::new("ecc")]
+        [simlin_base::common::Ident::new("ecc")]
             .into_iter()
             .collect::<BTreeSet<_>>()
     );
@@ -1157,7 +1164,7 @@ fn model_dependency_graph_resolved_sccs_is_byte_stable_across_runs() {
 /// `inflow` (a stock breaks the dt chain), so there is NO dt cycle. The
 /// induced per-element INIT graph `(s,0)->(s,1)->(s,2)` is acyclic.
 fn arrayed_init_recurrence_stock_project(init_eqs: Vec<(&str, &str)>) -> datamodel::Project {
-    use crate::datamodel::{Dimension, Equation, Flow, Stock, Variable};
+    use simlin_base::datamodel::{Dimension, Equation, Flow, Stock, Variable};
     let dims = vec!["t".to_string()];
     let arrayed = init_eqs
         .into_iter()
@@ -1261,7 +1268,7 @@ fn resolve_init_forward_recurrence_behind_stock_is_resolved() {
     );
     assert_eq!(
         scc.members,
-        [crate::common::Ident::new("s")]
+        [simlin_base::common::Ident::new("s")]
             .into_iter()
             .collect::<BTreeSet<_>>()
     );
@@ -1270,9 +1277,9 @@ fn resolve_init_forward_recurrence_behind_stock_is_resolved() {
     assert_eq!(
         scc.element_order,
         vec![
-            (crate::common::Ident::new("s"), 0usize),
-            (crate::common::Ident::new("s"), 1usize),
-            (crate::common::Ident::new("s"), 2usize),
+            (simlin_base::common::Ident::new("s"), 0usize),
+            (simlin_base::common::Ident::new("s"), 1usize),
+            (simlin_base::common::Ident::new("s"), 2usize),
         ],
         "init element_order must be the per-element topological order"
     );
@@ -1317,7 +1324,7 @@ fn init_recurrence_behind_stock_model_dep_graph_resolves_no_circular() {
     );
     assert_eq!(
         dep_graph.resolved_sccs[0].members,
-        [crate::common::Ident::new("s")]
+        [simlin_base::common::Ident::new("s")]
             .into_iter()
             .collect::<BTreeSet<_>>()
     );
@@ -1437,7 +1444,7 @@ fn dt_self_recurrence_not_double_resolved_as_init_scc() {
 // cycle is init-ONLY (no dt SCC). This is the empirical confirmation that
 // the chosen fixture shape produces a `phase: Initial` `ResolvedScc` with
 // >= 2 members (the precondition the `init_recurrence.mdl` end-to-end
-// simulation test in `tests/integration/simulate.rs` relies on), and a permanent
+// simulation test in `simlin-tests/tests/integration/simulate.rs` relies on), and a permanent
 // regression guard at the datamodel/verdict level.
 
 /// Two arrayed stocks `cs[t]` / `ecs[t]` over a 3-element named dimension
@@ -1463,7 +1470,7 @@ fn two_stock_init_recurrence_project(
     cs_init: Vec<(&str, &str)>,
     ecs_init: Vec<(&str, &str)>,
 ) -> datamodel::Project {
-    use crate::datamodel::{Dimension, Equation, Flow, Stock, Variable};
+    use simlin_base::datamodel::{Dimension, Equation, Flow, Stock, Variable};
     let dims = vec!["t".to_string()];
     let arrayed = |eqs: Vec<(&str, &str)>| {
         Equation::Arrayed(
@@ -1581,8 +1588,8 @@ fn two_stock_init_recurrence_is_resolved_init_only_multi_member() {
     assert_eq!(
         scc.members,
         [
-            crate::common::Ident::new("cs"),
-            crate::common::Ident::new("ecs"),
+            simlin_base::common::Ident::new("cs"),
+            simlin_base::common::Ident::new("ecs"),
         ]
         .into_iter()
         .collect::<BTreeSet<_>>(),
@@ -1603,12 +1610,12 @@ fn two_stock_init_recurrence_is_resolved_init_only_multi_member() {
     assert_eq!(
         scc.element_order,
         vec![
-            (crate::common::Ident::new("cs"), 0usize),
-            (crate::common::Ident::new("ecs"), 0usize),
-            (crate::common::Ident::new("cs"), 1usize),
-            (crate::common::Ident::new("ecs"), 1usize),
-            (crate::common::Ident::new("cs"), 2usize),
-            (crate::common::Ident::new("ecs"), 2usize),
+            (simlin_base::common::Ident::new("cs"), 0usize),
+            (simlin_base::common::Ident::new("ecs"), 0usize),
+            (simlin_base::common::Ident::new("cs"), 1usize),
+            (simlin_base::common::Ident::new("ecs"), 1usize),
+            (simlin_base::common::Ident::new("cs"), 2usize),
+            (simlin_base::common::Ident::new("ecs"), 2usize),
         ],
         "init element_order must be the per-element topological interleave"
     );
@@ -1660,8 +1667,8 @@ fn two_stock_init_recurrence_model_dep_graph_resolves_no_circular() {
     assert_eq!(
         dep_graph.resolved_sccs[0].members,
         [
-            crate::common::Ident::new("cs"),
-            crate::common::Ident::new("ecs"),
+            simlin_base::common::Ident::new("cs"),
+            simlin_base::common::Ident::new("ecs"),
         ]
         .into_iter()
         .collect::<BTreeSet<_>>()
@@ -1741,8 +1748,8 @@ fn two_stock_init_genuine_element_cycle_is_unresolved() {
 /// `SccPhase` variants.
 #[test]
 fn resolved_scc_constructs_and_phase_distinguishes() {
-    use crate::common::Ident;
     use crate::db::{ResolvedScc, SccPhase};
+    use simlin_base::common::Ident;
 
     let members: BTreeSet<Ident<_>> = [Ident::new("ecc")].into_iter().collect();
     let element_order = vec![
@@ -1777,8 +1784,8 @@ fn resolved_scc_constructs_and_phase_distinguishes() {
 /// salsa cache invalidation reacts to a change in the resolved-SCC set.
 #[test]
 fn model_dep_graph_result_equality_observes_resolved_sccs() {
-    use crate::common::Ident;
     use crate::db::{ModelDepGraphResult, ResolvedScc, SccPhase};
+    use simlin_base::common::Ident;
 
     let base = ModelDepGraphResult {
         dt_dependencies: IdentMap::default(),
@@ -1885,8 +1892,8 @@ fn resolve_dt_two_member_ref_shaped_scc_resolves_interleaved() {
     assert_eq!(
         scc.members,
         [
-            crate::common::Ident::new("ce"),
-            crate::common::Ident::new("ecc"),
+            simlin_base::common::Ident::new("ce"),
+            simlin_base::common::Ident::new("ecc"),
         ]
         .into_iter()
         .collect::<BTreeSet<_>>(),
@@ -1896,7 +1903,7 @@ fn resolve_dt_two_member_ref_shaped_scc_resolves_interleaved() {
     // in-SCC reader; ecc[0] reads ce[0]; ce[1] reads ecc[0]; ecc[1] reads
     // ce[1]; ce[2] reads ecc[1]; ecc[2] reads ce[2]. Kahn tie-break sorts
     // ce before ecc, so the unique order is the strict interleave.
-    let ce = |i: usize| (crate::common::Ident::new("ce"), i);
+    let ce = |i: usize| (simlin_base::common::Ident::new("ce"), i);
     assert_eq!(
         scc.element_order,
         vec![ce(0), ecc(0), ce(1), ecc(1), ce(2), ecc(2)],
@@ -2016,7 +2023,7 @@ fn resolve_dt_single_var_recurrence_byte_identical_to_phase1() {
     assert_eq!(scc.phase, SccPhase::Dt);
     assert_eq!(
         scc.members,
-        [crate::common::Ident::new("ecc")]
+        [simlin_base::common::Ident::new("ecc")]
             .into_iter()
             .collect::<BTreeSet<_>>()
     );
@@ -2059,8 +2066,8 @@ fn resolve_dt_interleaved_shaped_element_acyclic_through_two_cycle_resolves() {
     assert_eq!(
         scc.members,
         [
-            crate::common::Ident::new("a"),
-            crate::common::Ident::new("y"),
+            simlin_base::common::Ident::new("a"),
+            simlin_base::common::Ident::new("y"),
         ]
         .into_iter()
         .collect::<BTreeSet<_>>()
@@ -2071,9 +2078,9 @@ fn resolve_dt_interleaved_shaped_element_acyclic_through_two_cycle_resolves() {
     assert_eq!(
         scc.element_order,
         vec![
-            (crate::common::Ident::new("a"), 0usize),
-            (crate::common::Ident::new("y"), 0usize),
-            (crate::common::Ident::new("a"), 1usize),
+            (simlin_base::common::Ident::new("a"), 0usize),
+            (simlin_base::common::Ident::new("y"), 0usize),
+            (simlin_base::common::Ident::new("a"), 1usize),
         ],
         "element_order must be the interleaved per-element topological \
          order a[0],y[0],a[1]"
@@ -2259,7 +2266,7 @@ fn unsourceable_in_scc_node_falls_back_to_circular_no_panic() {
     assert!(
         diags.iter().any(|d| d.is(
             crate::db::DiagnosticCategory::Model,
-            crate::common::ErrorCode::CircularDependency
+            simlin_base::common::ErrorCode::CircularDependency
         )),
         "the recorded cycle must reach collect_all_diagnostics: {diags:?}"
     );
@@ -2418,9 +2425,9 @@ fn synthetic_helper_symbolic_fragment_is_parent_sourced() {
     // sourced exactly like a real member). RED before Task 2: the helper
     // fragment is `None`, so the `?` at the member loop short-circuits the
     // whole builder to `None` (SCC unresolved).
-    let members: BTreeSet<crate::common::Ident<crate::common::Canonical>> = [
-        crate::common::Ident::new("ecc"),
-        crate::common::Ident::new(helper.as_str()),
+    let members: BTreeSet<simlin_base::common::Ident<simlin_base::common::Canonical>> = [
+        simlin_base::common::Ident::new("ecc"),
+        simlin_base::common::Ident::new(helper.as_str()),
     ]
     .into_iter()
     .collect();
@@ -2433,7 +2440,7 @@ fn synthetic_helper_symbolic_fragment_is_parent_sourced() {
          helper fragment None -> `?` -> None -> SCC unresolved)"
     );
     let order = order.unwrap();
-    let helper_ident = crate::common::Ident::new(helper.as_str());
+    let helper_ident = simlin_base::common::Ident::new(helper.as_str());
     assert!(
         order.iter().any(|(m, _)| *m == helper_ident),
         "the helper node {helper:?} must be present in the SCC's \
@@ -2442,7 +2449,7 @@ fn synthetic_helper_symbolic_fragment_is_parent_sourced() {
     // The order is well-founded: the helper (reading only the external
     // `seed`) precedes every `ecc` element; the forward recurrence then
     // orders ecc[0] < ecc[1] < ecc[2].
-    let ecc_ident = crate::common::Ident::new("ecc");
+    let ecc_ident = simlin_base::common::Ident::new("ecc");
     let helper_pos = order
         .iter()
         .position(|(m, _)| *m == helper_ident)
@@ -2549,8 +2556,8 @@ fn model_dep_graph_two_member_ref_scc_resolves_with_external_deps() {
     assert_eq!(
         dep_graph.resolved_sccs[0].members,
         [
-            crate::common::Ident::new("ce"),
-            crate::common::Ident::new("ecc"),
+            simlin_base::common::Ident::new("ce"),
+            simlin_base::common::Ident::new("ecc"),
         ]
         .into_iter()
         .collect::<BTreeSet<_>>(),
@@ -2700,8 +2707,8 @@ fn model_dep_graph_scc_members_contiguous_with_interposing_external_var() {
     assert_eq!(
         dep_graph.resolved_sccs[0].members,
         [
-            crate::common::Ident::new("aaa"),
-            crate::common::Ident::new("zzz"),
+            simlin_base::common::Ident::new("aaa"),
+            simlin_base::common::Ident::new("zzz"),
         ]
         .into_iter()
         .collect::<BTreeSet<_>>()
@@ -2752,8 +2759,8 @@ fn model_dep_graph_two_member_ref_scc_resolves_no_external_deps() {
     assert_eq!(
         dep_graph.resolved_sccs[0].members,
         [
-            crate::common::Ident::new("ce"),
-            crate::common::Ident::new("ecc"),
+            simlin_base::common::Ident::new("ce"),
+            simlin_base::common::Ident::new("ecc"),
         ]
         .into_iter()
         .collect::<BTreeSet<_>>()
@@ -2802,8 +2809,8 @@ fn model_dep_graph_interleaved_shaped_multi_member_scc_resolves() {
     assert_eq!(
         dep_graph.resolved_sccs[0].members,
         [
-            crate::common::Ident::new("a"),
-            crate::common::Ident::new("y"),
+            simlin_base::common::Ident::new("a"),
+            simlin_base::common::Ident::new("y"),
         ]
         .into_iter()
         .collect::<BTreeSet<_>>()
@@ -2963,7 +2970,7 @@ fn model_dep_graph_single_var_self_recurrence_byte_identical_to_phase1() {
     assert_eq!(scc.phase, crate::db::SccPhase::Dt);
     assert_eq!(
         scc.members,
-        [crate::common::Ident::new("ecc")]
+        [simlin_base::common::Ident::new("ecc")]
             .into_iter()
             .collect::<BTreeSet<_>>()
     );
@@ -3096,8 +3103,8 @@ fn resolve_dt_sample_if_true_shaped_scc_resolves_despite_previous_self_read() {
     assert_eq!(
         scc.members,
         [
-            crate::common::Ident::new("closer"),
-            crate::common::Ident::new("sit_x"),
+            simlin_base::common::Ident::new("closer"),
+            simlin_base::common::Ident::new("sit_x"),
         ]
         .into_iter()
         .collect::<BTreeSet<_>>(),
@@ -3109,8 +3116,8 @@ fn resolve_dt_sample_if_true_shaped_scc_resolves_despite_previous_self_read() {
     // sit_x[0] -> closer[0] -> sit_x[1] -> closer[1] (the unique order;
     // the encoded-key tie-break never has to choose -- the frontier is a
     // single node at every step).
-    let closer = |i: usize| (crate::common::Ident::new("closer"), i);
-    let sit_x = |i: usize| (crate::common::Ident::new("sit_x"), i);
+    let closer = |i: usize| (simlin_base::common::Ident::new("closer"), i);
+    let sit_x = |i: usize| (simlin_base::common::Ident::new("sit_x"), i);
     assert_eq!(
         scc.element_order,
         vec![sit_x(0), closer(0), sit_x(1), closer(1)],
@@ -3224,8 +3231,8 @@ fn resolve_dt_self_loop_subsumed_by_multi_scc_resolves_no_duplicate() {
     assert_eq!(
         scc.members,
         [
-            crate::common::Ident::new("a"),
-            crate::common::Ident::new("b"),
+            simlin_base::common::Ident::new("a"),
+            simlin_base::common::Ident::new("b"),
         ]
         .into_iter()
         .collect::<BTreeSet<_>>(),
@@ -3272,10 +3279,10 @@ fn dt_cycle_sccs_subsumes_a_self_loop_inside_a_multi_scc() {
     let model = result.models["main"].source;
 
     let sccs = dt_cycle_sccs_engine_consistent(&db, model, result.project);
-    let expected: Vec<BTreeSet<crate::common::Ident<crate::common::Canonical>>> = vec![
+    let expected: Vec<BTreeSet<simlin_base::common::Ident<simlin_base::common::Canonical>>> = vec![
         [
-            crate::common::Ident::new("a"),
-            crate::common::Ident::new("b"),
+            simlin_base::common::Ident::new("a"),
+            simlin_base::common::Ident::new("b"),
         ]
         .into_iter()
         .collect(),
@@ -3623,7 +3630,7 @@ fn an_init_view_is_an_init_phase_element_edge() {
             && matches!(
                 &d.error,
                 crate::db::DiagnosticError::Model(e)
-                    if e.code == crate::common::ErrorCode::CircularDependency
+                    if e.code == simlin_base::common::ErrorCode::CircularDependency
             )
     });
     assert!(
@@ -3739,7 +3746,7 @@ fn a_recurrence_through_a_computed_index_is_refused_not_misordered() {
                 .iter()
                 .find_map(|d| match &d.error {
                     crate::db::DiagnosticError::Model(e)
-                        if e.code == crate::common::ErrorCode::CircularDependency =>
+                        if e.code == simlin_base::common::ErrorCode::CircularDependency =>
                     {
                         e.details.clone()
                     }
@@ -3801,7 +3808,8 @@ fn a_prologue_reading_an_scc_member_refuses_the_recurrence() {
         )
     };
     let compiles = |operand: &str| -> bool {
-        let datamodel = crate::open_vensim(&model(operand)).expect("the fixture MDL parses");
+        let datamodel =
+            simlin_formats::open_vensim(&model(operand)).expect("the fixture MDL parses");
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, &datamodel);
         crate::db::compile_project_incremental(
@@ -3922,8 +3930,8 @@ fn a_shared_default_reading_an_override_element_runs_the_override_first() {
 // path asks this question (the materializer reads the signature table at the
 // position it materializes), so the predicates live with their one consumer.
 
-use crate::builtins::ResultKind;
 use crate::compiler::Expr;
+use simlin_base::builtins::ResultKind;
 
 /// Check if an expression is an array-producing builtin that needs whole-array
 /// evaluation rather than per-element scalar evaluation
@@ -4019,8 +4027,8 @@ fn array_producing_vars(
 
 mod exprs_contain_array_producing_builtin_tests {
     use super::*;
-    use crate::ast::{ArrayView, Loc};
     use crate::compiler::{BuiltinFn, VarRef};
+    use simlin_base::ast::{ArrayView, Loc};
 
     fn vr(name: &str) -> VarRef {
         VarRef::base(Ident::new(name))

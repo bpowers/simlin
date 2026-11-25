@@ -2,18 +2,19 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use crate::ast::{ArrayView, Expr3, IndexExpr3, SparseInfo};
-use crate::common::{CanonicalDimensionName, CanonicalElementName, ErrorCode, ErrorKind, Result};
-use crate::dimensions::{
+use simlin_base::ast::{ArrayView, Expr3, IndexExpr3, SparseInfo};
+use simlin_base::common::{
+    CanonicalDimensionName, CanonicalElementName, ErrorCode, ErrorKind, Result,
+};
+use simlin_base::dimensions::{
     Axis, Dimension, DimensionsContext, DirectMappingsOnly, axes_of, match_axes_partial,
 };
-use crate::{Error, sim_err};
+use simlin_base::{Error, sim_err};
 
 /// Represents a subscript operation after parsing but before view construction.
 /// Used to normalize different subscript syntaxes into a uniform representation
 /// that can be processed by build_view_from_ops.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum IndexOp {
     /// Range subscript with start and end (0-based, end exclusive).
     /// Example: `arr[2:5]` becomes `Range { start: 1, end: 5, .. }`.
@@ -106,7 +107,7 @@ impl Subscript3Config<'_> {
     /// naming the dimension `name` reads, or `None` outside an apply-to-all
     /// body or when no active axis corresponds.
     ///
-    /// The correspondence is [`crate::dimensions::match_axes_partial`], the
+    /// The correspondence is [`simlin_base::dimensions::match_axes_partial`], the
     /// engine's one axis-matching precedence, over the single named axis.
     /// Only the DIRECT declared mappings are admitted, because the element
     /// this resolves to is `build_view_from_ops`'s `ActiveDimRef` arm reading

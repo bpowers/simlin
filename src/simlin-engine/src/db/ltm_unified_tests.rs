@@ -3,9 +3,9 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use super::*;
-use crate::datamodel;
 use crate::test_common::TestProject;
 use crate::testutils::{feedback_loop_project, x_aux, x_flow, x_model, x_module, x_stock};
+use simlin_base::datamodel;
 
 #[test]
 fn test_model_ltm_variables_generates_scores() {
@@ -36,7 +36,7 @@ fn test_model_ltm_variables_generates_scores() {
 #[test]
 fn test_model_ltm_variables_stdlib_module() {
     let db = SimlinDb::default();
-    let stdlib_model = crate::stdlib::get("smth1").expect("smth1 stdlib model should exist");
+    let stdlib_model = simlin_base::stdlib::get("smth1").expect("smth1 stdlib model should exist");
 
     let project = datamodel::Project {
         name: "smth1_ltm_test".to_string(),
@@ -3472,8 +3472,8 @@ fn cross_agg_loop_recovery_three_petals_no_truncation() {
 /// keys on the rotation-invariant endpoint set).
 #[test]
 fn cross_agg_two_petal_loops_match_pre_fix_content() {
-    use crate::common::Ident;
     use crate::ltm::LinkPolarity;
+    use simlin_base::common::Ident;
     use std::collections::BTreeSet;
 
     let project = share_reducer_loop_fixture(3);
@@ -3676,7 +3676,7 @@ fn cross_agg_loop_recovery_four_petals_one_loop_per_subset() {
 /// this test only pins the structural recovery.)
 #[test]
 fn cross_agg_loop_recovery_handles_subscripted_agg_node() {
-    use crate::common::Ident;
+    use simlin_base::common::Ident;
 
     let project = TestProject::new("subscripted_agg_recovery")
         .with_sim_time(0.0, 5.0, 1.0)
@@ -4421,7 +4421,7 @@ fn gh780_forced_partial_equation_discovery_pinned_loop_dropped() {
         model.variables.rewrite(|variables| {
             for (i, var) in variables.iter_mut().enumerate() {
                 let uid = (i as i32) + 1;
-                uid_of.insert(crate::canonicalize(var.get_ident()).into_owned(), uid);
+                uid_of.insert(simlin_base::canonicalize(var.get_ident()).into_owned(), uid);
                 match var {
                     datamodel::Variable::Stock(s) => s.uid = Some(uid),
                     datamodel::Variable::Flow(f) => f.uid = Some(uid),
@@ -4673,7 +4673,7 @@ fn gh780_doomed_edge_pinned_revisit_warns_once() {
         model.variables.rewrite(|variables| {
             for (i, var) in variables.iter_mut().enumerate() {
                 let uid = (i as i32) + 1;
-                uid_of.insert(crate::canonicalize(var.get_ident()).into_owned(), uid);
+                uid_of.insert(simlin_base::canonicalize(var.get_ident()).into_owned(), uid);
                 match var {
                     datamodel::Variable::Stock(s) => s.uid = Some(uid),
                     datamodel::Variable::Flow(f) => f.uid = Some(uid),
@@ -4751,7 +4751,7 @@ fn slot_count_for(var: &LtmSyntheticVar, dims: &[datamodel::Dimension]) -> usize
 fn minimal_conveyor_datamodel() -> datamodel::Project {
     use std::io::BufReader;
     let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
-    crate::xmile::project_from_reader(&mut BufReader::new(xml.as_bytes()))
+    simlin_formats::xmile::project_from_reader(&mut BufReader::new(xml.as_bytes()))
         .expect("parse minimal_conveyor.xmile")
 }
 
@@ -4759,8 +4759,8 @@ fn minimal_conveyor_datamodel() -> datamodel::Project {
 /// naming `conveyor_name`.
 #[cfg(test)]
 fn is_conveyor_ltm_degraded(d: &crate::db::Diagnostic, conveyor_name: &str) -> bool {
-    use crate::common::ErrorCode;
     use crate::db::{DiagnosticError, DiagnosticSeverity};
+    use simlin_base::common::ErrorCode;
     d.severity == DiagnosticSeverity::Warning
         && d.variable.as_deref() == Some(conveyor_name)
         && matches!(
@@ -4835,7 +4835,7 @@ fn test_conveyor_still_simulates_despite_ltm_degraded_warning() {
     vm.run_to_end().expect("run conveyor sim");
 
     let students = vm
-        .get_series(&crate::common::Ident::new("students"))
+        .get_series(&simlin_base::common::Ident::new("students"))
         .expect("students series");
     // Steady state: init 1000 == inflow(250) * transit(4), so it holds flat.
     assert!(students.len() > 40, "should have many saved steps");
@@ -4853,7 +4853,7 @@ fn test_conveyor_still_simulates_despite_ltm_degraded_warning() {
 fn queue_drain_datamodel() -> datamodel::Project {
     use std::io::BufReader;
     let xml = include_str!("../../../../test/queues/queue_drain.xmile");
-    crate::xmile::project_from_reader(&mut BufReader::new(xml.as_bytes()))
+    simlin_formats::xmile::project_from_reader(&mut BufReader::new(xml.as_bytes()))
         .expect("parse queue_drain.xmile")
 }
 
@@ -4861,8 +4861,8 @@ fn queue_drain_datamodel() -> datamodel::Project {
 /// `queue_name`.
 #[cfg(test)]
 fn is_queue_ltm_degraded(d: &crate::db::Diagnostic, queue_name: &str) -> bool {
-    use crate::common::ErrorCode;
     use crate::db::{DiagnosticError, DiagnosticSeverity};
+    use simlin_base::common::ErrorCode;
     d.severity == DiagnosticSeverity::Warning
         && d.variable.as_deref() == Some(queue_name)
         && matches!(
@@ -4933,11 +4933,11 @@ fn test_queue_ltm_degraded_warning_absent_without_ltm() {
 /// Discovery mode scores every edge, so no loop is needed to reach them.
 #[test]
 fn a_target_whose_lowering_failed_is_declined_not_scored() {
-    use crate::common::ErrorCode;
     use crate::db::{
         DiagnosticError, DiagnosticSeverity, compile_project_incremental,
         set_project_ltm_discovery_mode,
     };
+    use simlin_base::common::ErrorCode;
 
     let tp = TestProject::new("ltm_failed_target")
         .with_sim_time(0.0, 3.0, 1.0)
@@ -5056,7 +5056,7 @@ fn a_frozen_whole_reducer_over_a_bare_arrayed_argument_lowers_per_element() {
     let results = vm.into_results();
     let steps = results.data.len() / results.step_size;
     let series = |name: &str| -> Vec<f64> {
-        let off = compiled.offsets[&crate::common::Ident::new(name)];
+        let off = compiled.offsets[&simlin_base::common::Ident::new(name)];
         (0..steps)
             .map(|step| results.data[step * results.step_size + off])
             .collect()
@@ -5091,7 +5091,7 @@ fn a_frozen_whole_reducer_over_a_bare_arrayed_argument_lowers_per_element() {
             "the capture over [region] holds sum(pop * w[*]) evaluated at {element}"
         );
     }
-    let scores: Vec<&crate::common::Ident<crate::common::Canonical>> = compiled
+    let scores: Vec<&simlin_base::common::Ident<simlin_base::common::Canonical>> = compiled
         .offsets
         .keys()
         .filter(|k| k.as_str().starts_with(score_prefix))

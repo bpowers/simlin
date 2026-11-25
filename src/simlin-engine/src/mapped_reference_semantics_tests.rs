@@ -188,9 +188,9 @@
 //! agreement directly, since it is the thing a change to either route is most
 //! likely to break without noticing.
 
-use crate::common::ErrorCode;
-use crate::datamodel;
 use crate::test_common::TestProject;
+use simlin_base::common::ErrorCode;
+use simlin_base::datamodel;
 
 /// How the reference to the `Region`-declared source is written.
 #[derive(Copy, Clone)]
@@ -534,7 +534,7 @@ fn run_cell(
         .target_elements()
         .iter()
         .map(|elem| {
-            let key = format!("target[{}]", crate::canonicalize(elem));
+            let key = format!("target[{}]", simlin_base::canonicalize(elem));
             *results
                 .get(&key)
                 .unwrap_or_else(|| panic!("no series for {key}"))
@@ -842,7 +842,7 @@ fn assert_no_mapping_cases(
                 let got: Vec<f64> = target_elements
                     .iter()
                     .map(|elem| {
-                        *results[&format!("target[{}]", crate::canonicalize(elem))]
+                        *results[&format!("target[{}]", simlin_base::canonicalize(elem))]
                             .last()
                             .expect("empty series")
                     })
@@ -1104,7 +1104,7 @@ fn verdict(project: &TestProject, target_elements: &[&str]) -> Verdict {
             target_elements
                 .iter()
                 .map(|elem| {
-                    *results[&format!("target[{}]", crate::canonicalize(elem))]
+                    *results[&format!("target[{}]", simlin_base::canonicalize(elem))]
                         .last()
                         .expect("empty series")
                 })
@@ -1858,7 +1858,7 @@ TIME STEP = 1 ~~|
 SAVEPER = 1 ~~|
 \\\\\\---///
 ";
-    let project = crate::open_vensim(mdl).expect("the model imports");
+    let project = simlin_formats::open_vensim(mdl).expect("the model imports");
     let target = project.models[0]
         .variables
         .iter()
@@ -1959,7 +1959,7 @@ fn a_subrange_on_both_sides_reads_by_name_and_on_the_right_alone_through_its_map
              INITIAL TIME = 0 ~~|\nFINAL TIME = 1 ~~|\nTIME STEP = 1 ~~|\nSAVEPER = 1 ~~|\n\
              \\\\\\---///\n"
         );
-        let project = crate::open_vensim(&mdl).expect("imports");
+        let project = simlin_formats::open_vensim(&mdl).expect("imports");
         TestProject::from_datamodel(project).run_vm().expect("runs")
     };
     let last = |r: &std::collections::HashMap<String, Vec<f64>>, key: &str| {

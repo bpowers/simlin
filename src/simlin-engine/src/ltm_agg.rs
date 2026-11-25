@@ -124,13 +124,13 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::{Ast, Expr0, Expr2, IndexExpr2};
-use crate::builtins::BuiltinFn;
-use crate::common::{Canonical, Ident, canonicalize};
 use crate::db::{
     Db, LtmLinkId, SourceModel, SourceProject, model_lowered_variables, project_datamodel_dims,
     project_dimensions_context,
 };
+use simlin_base::ast::{Ast, Expr0, Expr2, IndexExpr2};
+use simlin_base::builtins::BuiltinFn;
+use simlin_base::common::{Canonical, Ident, canonicalize};
 
 /// Prefix for synthetic aggregate-node names: `$⁚ltm⁚agg⁚{n}`.
 ///
@@ -452,7 +452,7 @@ pub enum AxisRead {
     /// the axis's dimension (`SUM(arr[*:Sub])`, GH #766): only the
     /// subdimension's elements (canonical names, in subdimension-declared
     /// order, resolved at enumeration time via
-    /// [`crate::dimensions::SubdimensionRelation`]) feed the slot.
+    /// [`simlin_base::dimensions::SubdimensionRelation`]) feed the slot.
     /// Invariant I3: a `Some` subset is non-empty and a proper subset of
     /// the axis's elements -- a subdimension covering the whole axis
     /// normalizes to `None` so the full-extent representation is unique.
@@ -496,7 +496,7 @@ pub enum AxisRead {
 /// - Literal case (`target_dim == source_dim`): the identity -- slot
 ///   coordinate == source element.
 /// - Foreign-axis case (GH #534): the PREIMAGE inversion of
-///   [`crate::dimensions::DimensionsContext::executed_read_correspondence`]
+///   [`simlin_base::dimensions::DimensionsContext::executed_read_correspondence`]
 ///   `(target_dim, source_dim)` -- that helper is indexed by TARGET element
 ///   position and yields the source element read for it, so the slot for a
 ///   given source element is the target element whose correspondence entry
@@ -520,9 +520,9 @@ pub(crate) fn iterated_axis_slot_elements(
     target_dim: &str,
     source_dim: &str,
     source_axis_elems: &[String],
-    dim_ctx: &crate::dimensions::DimensionsContext,
+    dim_ctx: &simlin_base::dimensions::DimensionsContext,
 ) -> Option<Vec<Option<String>>> {
-    use crate::common::CanonicalDimensionName;
+    use simlin_base::common::CanonicalDimensionName;
     if target_dim == source_dim {
         return Some(source_axis_elems.iter().cloned().map(Some).collect());
     }
@@ -530,8 +530,8 @@ pub(crate) fn iterated_axis_slot_elements(
     let s = CanonicalDimensionName::from_raw(source_dim);
     let corr = dim_ctx.executed_read_correspondence(&t, &s)?;
     let target_named = match dim_ctx.get(&t)? {
-        crate::dimensions::Dimension::Named(_, named) => named,
-        crate::dimensions::Dimension::Indexed(_, _) => return None,
+        simlin_base::dimensions::Dimension::Named(_, named) => named,
+        simlin_base::dimensions::Dimension::Indexed(_, _) => return None,
     };
     // `corr` is indexed by target element position (declared order), so it
     // is parallel to `target_named.elements` by construction.
@@ -604,10 +604,10 @@ fn spell_bare_sources(expr: Expr2, sources: &[AggSource]) -> Expr2 {
                 AxisRead::Iterated { dim, .. } => Some(IndexExpr2::Expr(Expr2::Var(
                     Ident::new(dim),
                     None,
-                    crate::ast::Loc::default(),
+                    simlin_base::ast::Loc::default(),
                 ))),
                 AxisRead::Reduced { subset: None } => {
-                    Some(IndexExpr2::Wildcard(crate::ast::Loc::default()))
+                    Some(IndexExpr2::Wildcard(simlin_base::ast::Loc::default()))
                 }
                 // A bare reference's slice has no other axis kind (a subrange,
                 // a literal element and a mapped-read spelling all come from
@@ -648,8 +648,7 @@ fn spell_bare_sources(expr: Expr2, sources: &[AggSource]) -> Expr2 {
 }
 
 /// One aggregate node: the stand-in for a maximal reducer subexpression.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AggNode {
     /// The aggregate node's name. For a synthetic agg this is
     /// `$⁚ltm⁚agg⁚{n}`; for a variable-backed agg this is the owning
@@ -732,7 +731,7 @@ pub struct AggNode {
     ///   make *which occurrence won the dedup* observable and would stop
     ///   `enumerate_agg_nodes` backdating across an edit that only moves an
     ///   equation's byte offsets. Neither reader looks at a `Loc`
-    ///   ([`crate::patch::expr2_to_expr0`] carries them along unread; the
+    ///   ([`simlin_base::ast::expr2_to_expr0`] carries them along unread; the
     ///   polarity analyzer matches on none), so removing them changes no answer.
     ///   Pinned by `the_carried_reducer_is_normalized_so_offset_only_edits_backdate`.
     /// * `ArrayBounds` -- removed, and load-bearing: the ASTs this enumerator
@@ -746,7 +745,7 @@ pub struct AggNode {
     /// * The float literal on `Expr2::Const` -- **not normalized here, and not
     ///   normalizable here:** dropping a `nan` literal would change what the
     ///   equation means. It is closed at the ROOT instead. The literal is an
-    ///   [`crate::ast::Literal`], compared by BIT PATTERN, so a model whose
+    ///   [`simlin_base::ast::Literal`], compared by BIT PATTERN, so a model whose
     ///   hoisted reducer contains a `nan` (`out = 1 + SUM(pop[*] * nan)`)
     ///   enumerates to a value equal to an identical rebuild and backdates like
     ///   any other. With a bare `f64` it could not (`NaN != NaN`), and every
@@ -772,15 +771,15 @@ pub struct AggNode {
 impl AggNode {
     /// The reducer as the typed `Expr0` the equation generators consume -- the
     /// agg's own equation and the frozen re-evaluation of the feeder link
-    /// scores. A projection of [`AggNode::reducer`] (`patch::builtin_to_untyped`,
+    /// scores. A projection of [`AggNode::reducer`] (`ast::builtin_to_untyped`,
     /// the same map `expr2_to_expr0` applies to every lowered subtree the
     /// generators wrap), so it never goes through the lexer. It prints as
     /// `reducer_key` except that a bare arrayed source is spelled (see the
     /// field).
     pub(crate) fn reducer_expr0(&self) -> Expr0 {
         Expr0::App(
-            crate::patch::builtin_to_untyped(&self.reducer),
-            crate::ast::Loc::default(),
+            simlin_base::ast::builtin_to_untyped(&self.reducer),
+            simlin_base::ast::Loc::default(),
         )
     }
 
@@ -890,8 +889,7 @@ impl AggNode {
 /// text (which would otherwise be filtered out by the `is_synthetic` checks
 /// downstream, leaving the inline reducer on the conservative direct-scoring
 /// path -- a name-ordering bug).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AggNodesResult {
     /// Aggregate nodes in first-encounter (deterministic) order.
     pub aggs: Vec<AggNode>,
@@ -1072,9 +1070,9 @@ struct AggWalkCtx<'a> {
     /// scalar owners that share its identity, and the slot's own edge through
     /// it is declined loudly (`unhoisted_reducer_source_read`'s per-element
     /// arm, `reducer_reads_source_bare`), never scored against it.
-    target_dims: &'a [crate::dimensions::Dimension],
-    dm_dims: &'a [crate::datamodel::Dimension],
-    dim_ctx: &'a crate::dimensions::DimensionsContext,
+    target_dims: &'a [simlin_base::dimensions::Dimension],
+    dm_dims: &'a [simlin_base::datamodel::Dimension],
+    dim_ctx: &'a simlin_base::dimensions::DimensionsContext,
 }
 
 /// Walk the whole-RHS expression of a `Scalar` / `ApplyToAll` variable.
@@ -1124,7 +1122,7 @@ fn walk_var_equation(
         // it is broadcast to an arrayed variable (every element holds the same
         // value); a partial reduce keyed by the active A2A dimension
         // (`rowsum[D1] = SUM(matrix[D1, *])`) keeps `[D1]` as its result dims.
-        let key = crate::patch::expr2_to_string(expr);
+        let key = simlin_base::ast::expr2_to_string(expr);
         let result_dims = candidate.result_dims;
         let reducer = candidate.reducer;
         // DECLINE the degenerate square-source shape (repeated result dim,
@@ -1349,7 +1347,7 @@ fn walk_subexpr_for_aggs(
                 // not-statically-describable carve-outs.
                 && let Some(sources) = agg_sources(candidate.source_vars, &candidate.slices, ctx)
             {
-                let key = crate::patch::expr2_to_string(expr);
+                let key = simlin_base::ast::expr2_to_string(expr);
                 register_agg(
                     result,
                     next_synthetic_n,
@@ -1567,7 +1565,7 @@ fn rank_result_dims_from_read_slice(
 }
 
 fn rank_reduced_axis_result_dim(
-    source_dim: &crate::dimensions::Dimension,
+    source_dim: &simlin_base::dimensions::Dimension,
     subset: Option<&[String]>,
     ctx: &AggWalkCtx<'_>,
 ) -> String {
@@ -1577,7 +1575,7 @@ fn rank_reduced_axis_result_dim(
     let source_elems = crate::ltm_augment::dimension_element_names(source_dim);
     let source_canon = source_dim.canonical_name();
     for dm_dim in ctx.dm_dims {
-        let candidate = crate::common::CanonicalDimensionName::from_raw(dm_dim.name());
+        let candidate = simlin_base::common::CanonicalDimensionName::from_raw(dm_dim.name());
         let Some(rel) = ctx
             .dim_ctx
             .get_subdimension_relation(&candidate, source_canon)
@@ -1691,10 +1689,10 @@ fn register_agg(
             let reducer = reducer.map(|e| spell_bare_sources(e, &sources));
             // The node's identity is the SPELLED reducer, not the owner's
             // text `key`: see `AggNodesResult`.
-            let identity = crate::patch::expr2_to_string(&Expr2::App(
+            let identity = simlin_base::ast::expr2_to_string(&Expr2::App(
                 reducer.clone(),
                 None,
-                crate::ast::Loc::default(),
+                simlin_base::ast::Loc::default(),
             ));
             if let Some(&existing) = result.synthetic_by_key.get(&identity) {
                 existing
@@ -1809,7 +1807,7 @@ fn reducer_source_vars(
 /// hoists).
 fn compute_read_slice(arg_expr: &Expr2, ctx: &AggWalkCtx<'_>) -> Option<Vec<AxisRead>> {
     let variables = ctx.variables;
-    let source_dims = |ident: &Ident<Canonical>| -> Option<&[crate::dimensions::Dimension]> {
+    let source_dims = |ident: &Ident<Canonical>| -> Option<&[simlin_base::dimensions::Dimension]> {
         let dims = variables.get(ident).and_then(|v| v.get_dimensions())?;
         if dims.is_empty() { None } else { Some(dims) }
     };
@@ -1832,10 +1830,10 @@ fn compute_read_slice(arg_expr: &Expr2, ctx: &AggWalkCtx<'_>) -> Option<Vec<Axis
             // is declined rather than scored against this node (see
             // `AggWalkCtx::target_dims`).
             let dims = source_dims(ident)?;
-            let pairing = crate::dimensions::match_axes_partial(
-                &crate::dimensions::axes_of(dims),
-                &crate::dimensions::axes_of(ctx.target_dims),
-                &crate::dimensions::DirectMappingsOnly(ctx.dim_ctx),
+            let pairing = simlin_base::dimensions::match_axes_partial(
+                &simlin_base::dimensions::axes_of(dims),
+                &simlin_base::dimensions::axes_of(ctx.target_dims),
+                &simlin_base::dimensions::DirectMappingsOnly(ctx.dim_ctx),
             );
             let slice: Vec<AxisRead> = dims
                 .iter()
@@ -1882,7 +1880,7 @@ fn compute_read_slice(arg_expr: &Expr2, ctx: &AggWalkCtx<'_>) -> Option<Vec<Axis
 /// correspondence from the target side).
 fn slots_remap_every_foreign_axis(
     slice: &[AxisRead],
-    dims: &[crate::dimensions::Dimension],
+    dims: &[simlin_base::dimensions::Dimension],
     ctx: &AggWalkCtx<'_>,
 ) -> bool {
     slice.iter().zip(dims).all(|(ax, axis_dim)| match ax {
@@ -1913,7 +1911,7 @@ fn slots_remap_every_foreign_axis(
 ///   ⇒ `Reduced{subset: None}` (full extent, byte-identical to `*`); `D` a
 ///   PROPER subdimension of the axis's dimension ⇒ `Reduced{subset:
 ///   Some(elems)}`, the subdimension's elements resolved via
-///   [`crate::dimensions::DimensionsContext::get_subdimension_relation`]
+///   [`simlin_base::dimensions::DimensionsContext::get_subdimension_relation`]
 ///   (a subdimension that covers the whole axis normalizes back to
 ///   `subset: None`, invariant I3); `D` neither ⇒ **decline** -- such a
 ///   subscript is at best a mid-edit inconsistency and must not silently
@@ -1921,7 +1919,7 @@ fn slots_remap_every_foreign_axis(
 /// - `IndexExpr2::Expr(Expr2::Var(d, ..))` where `d` (canonical) is one of
 ///   the *target equation's* iterated dimensions AND the source's axis
 ///   dimension either IS `d` or corresponds to it under
-///   [`crate::dimensions::DimensionsContext::executed_read_correspondence`]
+///   [`simlin_base::dimensions::DimensionsContext::executed_read_correspondence`]
 ///   -- shared element names, or a mapping declared in EITHER direction
 ///   (GH #757), an explicit element map included and followed (GH #997) --
 ///   ⇒ [`AxisRead::Iterated`] carrying the `(d, src)` pair (GH #534). The
@@ -1947,7 +1945,7 @@ fn slots_remap_every_foreign_axis(
 ///   execution pairs it with exactly one of the target's iterated dims
 ///   through a declared mapping ⇒ [`AxisRead::MappedRead`] carrying the
 ///   `(partner, src)` pair. The pairing and its usability gate are
-///   [`crate::dimensions::DimensionsContext::mapped_read_partner`], mirroring
+///   [`simlin_base::dimensions::DimensionsContext::mapped_read_partner`], mirroring
 ///   `compiler::subscript::normalize_subscripts3` and the
 ///   `executed_read_correspondence` every consumer derives the rows from.
 ///   Declined (⇒ `None`, conservative): no partner, an AMBIGUOUS pairing (two
@@ -1960,9 +1958,9 @@ fn slots_remap_every_foreign_axis(
 ///   `Var`/`Const` that resolves to none of the above) ⇒ `None`.
 pub(crate) fn classify_axis_access(
     idx: &IndexExpr2,
-    axis_dim: &crate::dimensions::Dimension,
+    axis_dim: &simlin_base::dimensions::Dimension,
     target_iterated_dims: &[String],
-    dim_ctx: &crate::dimensions::DimensionsContext,
+    dim_ctx: &simlin_base::dimensions::DimensionsContext,
 ) -> Option<AxisRead> {
     match idx {
         IndexExpr2::Wildcard(_) => Some(AxisRead::Reduced { subset: None }),
@@ -2005,15 +2003,17 @@ pub(crate) fn classify_axis_access(
             // `ltm_augment_post_transform::pin_dimension_name_indices` reads
             // too, so the two rules cannot disagree about which row a colliding
             // name selects.
-            match crate::dimensions::resolve_axis_index_name(name_str, axis_dim, |n| {
+            match simlin_base::dimensions::resolve_axis_index_name(name_str, axis_dim, |n| {
                 target_iterated_dims.iter().any(|t| t == n)
             }) {
-                crate::dimensions::AxisIndexName::Element(elem) => Some(AxisRead::Pinned(elem)),
+                simlin_base::dimensions::AxisIndexName::Element(elem) => {
+                    Some(AxisRead::Pinned(elem))
+                }
                 // An iterated-dimension index: the axis is iterated over the
                 // target's dimension space (and the agg result varies per
                 // element of it) iff it lines up with the source's axis dim by
                 // name or by a positional mapping (GH #534).
-                crate::dimensions::AxisIndexName::IteratedDim => {
+                simlin_base::dimensions::AxisIndexName::IteratedDim => {
                     if name_str == src_dim_name {
                         Some(AxisRead::Iterated {
                             dim: name_str.to_string(),
@@ -2029,7 +2029,7 @@ pub(crate) fn classify_axis_access(
                         // explicit element map included (GH #997). An undeclared
                         // pair with disjoint names declines, keeping the
                         // reference on the conservative path (GH #527).
-                        let t = crate::common::CanonicalDimensionName::from_raw(name_str);
+                        let t = simlin_base::common::CanonicalDimensionName::from_raw(name_str);
                         dim_ctx
                             .executed_read_correspondence(&t, axis_dim.canonical_name())
                             .map(|_| AxisRead::Iterated {
@@ -2050,8 +2050,8 @@ pub(crate) fn classify_axis_access(
                 // per-element correspondence is not usable or not the one
                 // execution reads -- in which case the reference keeps the
                 // conservative shape it had before.
-                crate::dimensions::AxisIndexName::Unresolved => {
-                    let index_dim = crate::common::CanonicalDimensionName::from_raw(name_str);
+                simlin_base::dimensions::AxisIndexName::Unresolved => {
+                    let index_dim = simlin_base::common::CanonicalDimensionName::from_raw(name_str);
                     let partner = dim_ctx.mapped_read_partner(
                         &index_dim,
                         target_iterated_dims,
@@ -2081,7 +2081,7 @@ pub(crate) fn classify_axis_access(
 /// The same two-spelling split applies. An `Expr2::Var` is a bare element name
 /// and resolves BY NAME against this axis. An `Expr2::Const` is a numeric
 /// literal or a constified qualified `dimension·element` reference, and resolves
-/// POSITIONALLY via [`crate::dimensions::resolve_axis_index_position`] --
+/// POSITIONALLY via [`simlin_base::dimensions::resolve_axis_index_position`] --
 /// see that function for why by-name would describe a row the simulation never
 /// reads.
 ///
@@ -2089,24 +2089,24 @@ pub(crate) fn classify_axis_access(
 /// here, because every caller knows which axis it is classifying.
 fn resolve_literal_axis_index(
     idx: &IndexExpr2,
-    dim: &crate::dimensions::Dimension,
+    dim: &simlin_base::dimensions::Dimension,
 ) -> Option<String> {
     let canonical = match idx {
         IndexExpr2::Expr(Expr2::Var(ident, _, _)) => ident.as_str().to_string(),
         IndexExpr2::Expr(Expr2::Const(_, value, _)) => {
-            return crate::dimensions::resolve_axis_index_position(value.value(), dim);
+            return simlin_base::dimensions::resolve_axis_index_position(value.value(), dim);
         }
         _ => return None,
     };
     match dim {
-        crate::dimensions::Dimension::Named(_, named) => {
+        simlin_base::dimensions::Dimension::Named(_, named) => {
             if named.elements.iter().any(|e| e.as_str() == canonical) {
                 Some(canonical)
             } else {
                 None
             }
         }
-        crate::dimensions::Dimension::Indexed(_, size) => {
+        simlin_base::dimensions::Dimension::Indexed(_, size) => {
             if let Ok(n) = canonical.parse::<u32>()
                 && n >= 1
                 && n <= *size
@@ -2326,7 +2326,7 @@ fn collect_arrayed_source_slices(
             // the whole array, as it is outside an iteration.
             let inner = if matches!(
                 builtin.result_kind(),
-                crate::builtins::ResultKind::Array { .. }
+                simlin_base::builtins::ResultKind::Array { .. }
             ) {
                 AggWalkCtx {
                     target_dims: &[],
@@ -2357,7 +2357,7 @@ fn collect_arrayed_source_slices(
 /// [Iterated(d1), Reduced]`) yields `["D1"]`.
 fn result_dims_from_read_slice(
     read_slice: &[AxisRead],
-    dm_dims: &[crate::datamodel::Dimension],
+    dm_dims: &[simlin_base::datamodel::Dimension],
 ) -> Vec<String> {
     read_slice
         .iter()
@@ -2493,7 +2493,7 @@ pub(crate) fn rank_output_slot_parts_for_row(
 }
 
 /// `true` when `name` is a synthetic aggregate-node name (`$⁚ltm⁚agg⁚{n}`).
-pub(crate) fn is_synthetic_agg_name(name: &str) -> bool {
+pub fn is_synthetic_agg_name(name: &str) -> bool {
     name.starts_with(AGG_NAME_PREFIX)
 }
 
@@ -2573,7 +2573,7 @@ pub(crate) fn variable_backed_reduce_agg<'a>(
     aggs: &'a AggNodesResult,
     from: &str,
     to: &str,
-    to_dims: &[crate::dimensions::Dimension],
+    to_dims: &[simlin_base::dimensions::Dimension],
 ) -> Option<&'a AggNode> {
     aggs.aggs_in_var(to).find(|a| {
         if a.is_synthetic || a.name != to || !a.reads_var(from) {
@@ -2649,7 +2649,7 @@ pub(crate) fn scalar_feeder_of_variable_backed_agg<'a>(
     aggs: &'a AggNodesResult,
     from: &str,
     to: &str,
-    to_dims: &[crate::dimensions::Dimension],
+    to_dims: &[simlin_base::dimensions::Dimension],
 ) -> Option<&'a AggNode> {
     let agg = variable_backed_reduce_agg(aggs, from, to, to_dims)?;
     // `from` must be a SCALAR source: an empty read slice. A non-source's
@@ -3053,7 +3053,7 @@ fn collect_from_read_slices_in_reducers(
 ) {
     match expr {
         Expr2::App(builtin, _, _) if !in_reducer && reducer_is_hoistable(builtin) => {
-            let key = crate::patch::expr2_to_string(expr);
+            let key = simlin_base::ast::expr2_to_string(expr);
             let reducer_is_synthetic_hoisted = hoisted_synthetic_keys.contains(&key);
             // A maximal residual reducer: collect every read of `from` among
             // its args unless a synthetic agg already represents this reducer.
@@ -3240,7 +3240,10 @@ fn collect_var_refs(expr: &Expr2, out: &mut Vec<String>) {
 
 /// Map a canonical dimension name back to its datamodel casing, falling back
 /// to the canonical form if no datamodel dimension matches.
-fn canonical_dim_to_datamodel(canonical: &str, dm_dims: &[crate::datamodel::Dimension]) -> String {
+fn canonical_dim_to_datamodel(
+    canonical: &str,
+    dm_dims: &[simlin_base::datamodel::Dimension],
+) -> String {
     dm_dims
         .iter()
         .find(|dm| canonicalize(dm.name()).as_ref() == canonical)

@@ -15,13 +15,12 @@ import Button from './components/Button';
 import { canonicalize } from '@simlin/core/canonicalize';
 
 import { Project as EngineProject } from '@simlin/engine';
-import type { JsonProjectPatch, JsonModelOperation, JsonSimSpecs, JsonArrayedEquation } from '@simlin/engine';
+import type { JsonProjectPatch, JsonModelOperation, JsonSimSpecs } from '@simlin/engine';
 import {
   Project,
   Model,
   Variable,
   UID,
-  Aux,
   ViewElement,
   NamedViewElement,
   StockFlowView,
@@ -32,7 +31,7 @@ import {
   flowToJson,
   auxToJson,
   moduleToJson,
-  arrayedEquationToJson,
+  graphicalFunctionToJson,
   stockFlowViewToJson,
   type ModuleReference,
 } from '@simlin/core/datamodel';
@@ -197,6 +196,27 @@ export function detailsPanelKey(
   return `${JSON.stringify(content)}-r${restoreSeq}${readOnly ? '-ro' : ''}`;
 }
 
+// The text fields of a details panel; undefined where a submission holds none.
+type PanelFields = Partial<Record<'equation' | 'units' | 'docs', string | undefined>>;
+
+// The operations of a details-panel submission: one per field it holds, each
+// naming that field alone. Never an upsert: that re-sends the whole variable,
+// and the panel has one equation's text, not an arrayed variable's dimensions
+// and elements.
+function panelFieldOps(ident: string, fields: PanelFields): JsonModelOperation[] {
+  const ops: JsonModelOperation[] = [];
+  if (fields.equation !== undefined) {
+    ops.push({ type: 'setEquation', payload: { ident, equation: fields.equation } });
+  }
+  if (fields.units !== undefined) {
+    ops.push({ type: 'setUnits', payload: { ident, units: fields.units } });
+  }
+  if (fields.docs !== undefined) {
+    ops.push({ type: 'setNotes', payload: { ident, notes: fields.docs } });
+  }
+  return ops;
+}
+
 // The project/engine coordination state lives in the ProjectController and is
 // mirrored here as a single immutable `controllerSnapshot` field (replaced
 // wholesale on every controller change, so a new snapshot identity drives a
@@ -315,20 +335,20 @@ interface EditorPropsBase {
   // turns it off for production builds while keeping it on in development).
   moduleCreationEnabled?: boolean;
   // Optional selection callback fired after each selection change. Hosts
-  // (e.g. simlin-serve's EditorHost) use this to forward selection state
-  // to backend listeners; HostedWebEditor in src/app does not subscribe.
+  // (e.g. the notebook widget's WidgetApp) use this to forward selection
+  // state to backend listeners; HostedWebEditor in src/app does not subscribe.
   onSelectionChanged?: (idents: string[]) => void;
   // When provided (and the editor is not read-only), the model-properties
   // drawer offers a destructive "Delete project" action that calls
   // Resolving means the host has navigated away; rejecting surfaces the
   // error in the confirmation dialog. Hosts without a deletable backing
-  // project (the local file-backed viewer, embeds) leave this undefined.
+  // project (the notebook widget, embeds) leave this undefined.
   onDeleteProject?: () => Promise<void>;
   // Whether the model-properties drawer shows its "Exit" link to "/" (the
-  // project list in the app and simlin-serve). Defaults to true. Hosts that
-  // embed the Editor in a page they own (a notebook cell) pass false: there is
-  // no route to go to, and the link would pushState on the host page. No
-  // router is required to mount the Editor either way.
+  // project list in the app). Defaults to true. Hosts that embed the Editor in
+  // a page they own (a notebook cell) pass false: there is no route to go to,
+  // and the link would pushState on the host page. No router is required to
+  // mount the Editor either way.
   showHomeLink?: boolean;
   // Where the Editor's overlay surfaces (the model-properties drawer, dialogs,
   // menus, the autocomplete listbox) render. Default: document.body, where
@@ -350,9 +370,9 @@ interface EditorPropsBase {
   // pan or zoom is never persisted by itself (only the next edit's save
   // carries it), so a remount on the stored bytes would silently reset the
   // user's viewport; the host reads the live one through `onViewportChange`
-  // and hands it back here. Hosts that mount once per project (the app,
-  // simlin-serve) leave it unset. Ignored when the view is absent or the
-  // viewport is unusable (a non-finite coordinate, a non-positive zoom).
+  // and hands it back here. Hosts that mount once per project (the app) leave
+  // it unset. Ignored when the view is absent or the viewport is unusable (a
+  // non-finite coordinate, a non-positive zoom).
   initialViewport?: Viewport;
   // Fires from a post-commit effect with the model name and the COMMITTED
   // viewport of the model being viewed whenever that viewport changes by value:
@@ -643,9 +663,9 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       // disposing, so a final controller notification can't setState on an
       // unmounting component), dispose the controller (releasing the WASM
       // EngineProject handle -- the Editor mounts/unmounts on every wouter
-      // route change in src/app and every EditorHost path swap in
-      // src/simlin-serve; without this every navigation away leaks ~several MB
-      // of WASM linear memory plus salsa caches), and revoke the snapshot URL.
+      // route change in src/app and on kernel-originated remounts in the
+      // notebook widget; without this every unmount leaks ~several MB of WASM
+      // linear memory plus salsa caches), and revoke the snapshot URL.
       // dispose() is best-effort and latches the controller's `disposed` flag
       // so any in-flight open/undo releases its own engine. Symmetric with the
       // setup above so a StrictMode mount/unmount/mount cycle builds a fresh
@@ -1869,29 +1889,6 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     );
   };
 
-  // Returns the equation fields for a JSON patch operation.
-  // For scalar equations, returns { equation: string }.
-  // For arrayed equations, returns { arrayedEquation: JsonArrayedEquation }.
-  const getEquationFields = (variable: Variable): { equation?: string; arrayedEquation?: JsonArrayedEquation } => {
-    const eq = variable.type === 'module' ? undefined : variable.equation;
-    if (!eq || eq.type === 'scalar') {
-      return { equation: eq?.equation ?? '' };
-    } else if (eq.type === 'applyToAll') {
-      return {
-        arrayedEquation: {
-          dimensions: [...eq.dimensionNames],
-          equation: eq.equation,
-        },
-      };
-    } else if (eq.type === 'arrayed') {
-      // Use the shared serializer so per-element graphical functions, per-element
-      // ACTIVE INITIAL equations, and the EXCEPT default round-trip through the
-      // upsert (a hand-rolled mapping here previously dropped them).
-      return { arrayedEquation: arrayedEquationToJson(eq) };
-    }
-    return { equation: '' };
-  };
-
   const handleEquationChange = React.useCallback(
     (
       ident: string,
@@ -1902,15 +1899,16 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       if (isReadOnly()) {
         return Promise.resolve(false);
       }
+      const fields: PanelFields = { equation: newEquation, units: newUnits, docs: newDocs };
       const landed = enqueueVariableEdit(
         'equation update',
         ident,
         [newEquation, newUnits, newDocs],
         (variable, _committed, mName) => ({
-          models: [{ name: mName, ops: [equationChangeOp(variable, newEquation, newUnits, newDocs)] }],
+          models: [{ name: mName, ops: panelFieldOps(variable.ident, fields) }],
         }),
       );
-      recordPanelSubmission(ident, { equation: newEquation, units: newUnits, docs: newDocs }, landed);
+      recordPanelSubmission(ident, fields, landed);
       return landed;
     },
     [],
@@ -1919,11 +1917,7 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
   // Record a details-panel submission as the element's pending one (see
   // EditorRefs.pendingPanelSubmissions). Each field's entry is removed once its
   // edit settles, unless a newer submission for that field replaced it.
-  const recordPanelSubmission = (
-    ident: string,
-    fields: Partial<Record<'equation' | 'units' | 'docs', string | undefined>>,
-    landed: Promise<boolean>,
-  ): void => {
+  const recordPanelSubmission = (ident: string, fields: PanelFields, landed: Promise<boolean>): void => {
     const uid = renderedElementUid(ident);
     if (uid === undefined) {
       return;
@@ -1958,135 +1952,23 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
     });
   };
 
-  // The full upsert for an equation/units/docs change of `variable` (the
-  // committed variable, at dequeue). The *ToJson serializers preserve every
-  // field (compat flags included); the edited fields override.
-  const equationChangeOp = (
-    variable: Variable,
-    newEquation: string | undefined,
-    newUnits: string | undefined,
-    newDocs: string | undefined,
-  ): JsonModelOperation => {
-    // When newEquation is provided, use it as a scalar equation.
-    // Otherwise, preserve the existing equation structure (including arrayed equations).
-    const existingEqFields = getEquationFields(variable);
-
-    let op: JsonModelOperation;
-    if (variable.type === 'stock') {
-      // Use stockToJson to preserve all fields (including compat flags
-      // like nonNegative, canBeModuleInput, isPublic), then override
-      // the fields being edited.
-      const base = stockToJson(variable);
-      op = {
-        type: 'upsertStock',
-        payload: {
-          stock: {
-            ...base,
-            initialEquation: newEquation ?? existingEqFields.equation,
-            arrayedEquation: newEquation !== undefined ? undefined : existingEqFields.arrayedEquation,
-            units: newUnits ?? variable.units ?? undefined,
-            documentation: newDocs ?? variable.documentation ?? undefined,
-          },
-        },
-      };
-    } else if (variable.type === 'flow') {
-      const base = flowToJson(variable);
-      op = {
-        type: 'upsertFlow',
-        payload: {
-          flow: {
-            ...base,
-            equation: newEquation ?? existingEqFields.equation,
-            arrayedEquation: newEquation !== undefined ? undefined : existingEqFields.arrayedEquation,
-            units: newUnits ?? variable.units ?? undefined,
-            documentation: newDocs ?? variable.documentation ?? undefined,
-          },
-        },
-      };
-    } else if (variable.type === 'module') {
-      // Modules have no equations or graphical functions -- only units and docs.
-      // Use moduleToJson to preserve all fields (including compat flags
-      // canBeModuleInput, isPublic, dataSource), then override edited fields.
-      const base = moduleToJson(variable);
-      op = {
-        type: 'upsertModule',
-        payload: {
-          module: {
-            ...base,
-            units: newUnits ?? variable.units ?? undefined,
-            documentation: newDocs ?? variable.documentation ?? undefined,
-          },
-        },
-      };
-    } else {
-      const auxVar = variable as Aux;
-      const base = auxToJson(auxVar);
-      op = {
-        type: 'upsertAux',
-        payload: {
-          aux: {
-            ...base,
-            equation: newEquation ?? existingEqFields.equation,
-            arrayedEquation: newEquation !== undefined ? undefined : existingEqFields.arrayedEquation,
-            units: newUnits ?? auxVar.units ?? undefined,
-            documentation: newDocs ?? auxVar.documentation ?? undefined,
-          },
-        },
-      };
-    }
-    return op;
-  };
-
   const handleTableChange = React.useCallback((ident: string, newTable: GraphicalFunction | null): void => {
     if (isReadOnly()) {
       return;
     }
-    enqueueVariableEdit('table update', ident, newTable, (variable, _committed, mName) => {
-      const gf = newTable
-        ? {
-            yPoints: [...newTable.yPoints],
-            kind: newTable.kind,
-            xScale: newTable.xScale ? { min: newTable.xScale.min, max: newTable.xScale.max } : undefined,
-            yScale: newTable.yScale ? { min: newTable.yScale.min, max: newTable.yScale.max } : undefined,
-          }
-        : undefined;
-
-      // Preserve the existing equation structure when updating the graphical function
-      const existingEqFields = getEquationFields(variable);
-
-      // Use *ToJson to preserve all fields (including compat flags),
-      // then override the graphical function.
-      let op: JsonModelOperation;
-      if (variable.type === 'flow') {
-        const base = flowToJson(variable);
-        op = {
-          type: 'upsertFlow',
-          payload: {
-            flow: {
-              ...base,
-              equation: existingEqFields.equation,
-              arrayedEquation: existingEqFields.arrayedEquation,
-              graphicalFunction: gf,
+    enqueueVariableEdit('table update', ident, newTable, (variable, _committed, mName) => ({
+      models: [
+        {
+          name: mName,
+          ops: [
+            {
+              type: 'setLookup',
+              payload: { ident: variable.ident, lookup: newTable ? graphicalFunctionToJson(newTable) : null },
             },
-          },
-        };
-      } else {
-        const auxVar = variable as Aux;
-        const base = auxToJson(auxVar);
-        op = {
-          type: 'upsertAux',
-          payload: {
-            aux: {
-              ...base,
-              equation: existingEqFields.equation,
-              arrayedEquation: existingEqFields.arrayedEquation,
-              graphicalFunction: gf,
-            },
-          },
-        };
-      }
-      return { models: [{ name: mName, ops: [op] }] };
-    });
+          ],
+        },
+      ],
+    }));
   }, []);
 
   // The module variable an edit builder reads; a variable that changed kind
@@ -2127,22 +2009,16 @@ export const Editor = React.memo(function Editor(props: EditorProps): React.Reac
       if (isReadOnly()) {
         return Promise.resolve(false);
       }
-      const landed = enqueueVariableEdit('module update', ident, [newUnits, newDocs], (variable, _committed, mName) => {
-        const module = asModule(variable, 'module update');
-        // Preserve all fields (including compat) via moduleToJson; override units/docs.
-        const op: JsonModelOperation = {
-          type: 'upsertModule',
-          payload: {
-            module: {
-              ...moduleToJson(module),
-              units: newUnits ?? module.units ?? undefined,
-              documentation: newDocs ?? module.documentation ?? undefined,
-            },
-          },
-        };
-        return { models: [{ name: mName, ops: [op] }] };
-      });
-      recordPanelSubmission(ident, { units: newUnits, docs: newDocs }, landed);
+      const fields: PanelFields = { units: newUnits, docs: newDocs };
+      const landed = enqueueVariableEdit(
+        'module update',
+        ident,
+        [newUnits, newDocs],
+        (variable, _committed, mName) => ({
+          models: [{ name: mName, ops: panelFieldOps(asModule(variable, 'module update').ident, fields) }],
+        }),
+      );
+      recordPanelSubmission(ident, fields, landed);
       return landed;
     },
     [],

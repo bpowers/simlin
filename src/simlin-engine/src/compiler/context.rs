@@ -6,28 +6,28 @@ use std::collections::BTreeSet;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::ast::{
-    self, ArrayView, BinaryOp, Expr3, Expr3LowerContext, IndexExpr3, Loc, TempAllocator,
+use crate::variable::{ElementScope, VarKind, Variable};
+use simlin_base::ast::{
+    self, ArrayView, BinaryOp, DepKind, DepShape, Expr3, Expr3LowerContext, IndexExpr3, Loc,
+    ModelShape, TempAllocator,
 };
-use crate::common::{
+use simlin_base::common::{
     Canonical, CanonicalDimensionName, CanonicalElementName, ErrorCode, ErrorKind, Ident, IdentMap,
     MismatchedRead, Result, canonicalize,
 };
-use crate::dimensions::{
+use simlin_base::dimensions::{
     Axis, AxisMatch, Dimension, DimensionsContext, DirectMappingsOnly, SubdimensionRelations,
     axes_of, match_axes_partial,
 };
-use crate::variable::{ElementScope, VarKind, Variable};
-use crate::{Error, sim_err};
+use simlin_base::{Error, sim_err};
 
 use super::dimensions::{UnaryOp, allocate_implicit_axes, axis_reordering};
 use super::expr::{BuiltinFn, Expr, SubscriptIndex, VarRef};
-use super::fragment::{DepKind, DepShape, ModelShape};
 use super::subscript::{
     IndexOp, Subscript3Config, ViewBuildConfig, ViewBuildResult, build_view_from_ops,
     normalize_subscripts3,
 };
-use crate::builtins::ArgKind;
+use simlin_base::builtins::ArgKind;
 
 /// The reason a reference is refused `MismatchedDimensions` when no narrower
 /// one is at hand: its dimensions do not line up with the equation reading it.
@@ -79,8 +79,7 @@ fn no_such_position(ident: &str, position: usize, len: usize) -> String {
     format!("@{position} is out of range for '{ident}', whose dimension has {len} elements")
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub(crate) struct Context<'a> {
     pub(crate) core: ContextCore<'a>,
     pub(crate) active_dimension: Option<Arc<[Dimension]>>,
@@ -108,8 +107,7 @@ pub(crate) struct Context<'a> {
     pub(crate) positional_reads: Rc<std::cell::RefCell<Vec<super::PositionalRead>>>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct ContextCore<'a> {
     pub(crate) dimensions: &'a [Dimension],
     pub(crate) dimensions_ctx: &'a DimensionsContext,
@@ -607,7 +605,7 @@ impl Context<'_> {
                 .resolve_mapped_read(dim, active_dim, element)
                 .and_then(|resolved| dim.get_offset(&resolved));
             let element_off = element_off.ok_or_else(|| {
-                crate::Error::new(
+                simlin_base::Error::new(
                     ErrorKind::Model,
                     ErrorCode::MismatchedDimensions,
                     Some(format!(
@@ -966,7 +964,7 @@ impl Context<'_> {
                 code: e.code,
                 details: e.details,
                 place: (e.element.is_some() || read.is_some()).then(|| {
-                    Box::new(crate::common::ErrorPlace {
+                    Box::new(simlin_base::common::ErrorPlace {
                         element: e.element,
                         read,
                     })
@@ -1824,7 +1822,7 @@ impl Context<'_> {
     /// before this one is asked, so what is left is the two-mapping case.
     /// Reading the PAIRING rather than re-deriving the relation is what keeps
     /// the element step from resolving through a rung
-    /// [`crate::dimensions::match_axes_partial`] did not use: an axis the
+    /// [`simlin_base::dimensions::match_axes_partial`] did not use: an axis the
     /// matcher left unpaired is read positionally, and must not pick up a
     /// mapping the matcher declined to apply.
     fn common_mapping_target(
@@ -1848,7 +1846,7 @@ impl Context<'_> {
     /// Two questions, in this order.
     ///
     /// WHICH ACTIVE AXIS supplies each view axis is
-    /// [`crate::dimensions::match_axes_partial`], the engine's one axis-matching
+    /// [`simlin_base::dimensions::match_axes_partial`], the engine's one axis-matching
     /// precedence, run over the view's `(name, length)` axes. An axis it does
     /// not pair is read POSITIONALLY, and positional reading requires the
     /// lengths to agree -- except for a range-derived axis, which is allowed
@@ -2347,9 +2345,9 @@ impl Context<'_> {
     /// the snapshot addresses.
     fn lower_builtin_expr3(
         &self,
-        builtin: &crate::builtins::BuiltinFn<Expr3>,
+        builtin: &simlin_base::builtins::BuiltinFn<Expr3>,
     ) -> Result<BuiltinFn> {
-        use crate::builtins::BuiltinFn as B;
+        use simlin_base::builtins::BuiltinFn as B;
 
         let snapshot_slot = match builtin {
             B::Previous(arg, _) | B::Init(arg) => match arg.as_ref() {
@@ -2413,7 +2411,7 @@ impl Context<'_> {
         // ptype"), so the lowered profile is re-expanded to the variable's
         // full requester x XPriority array.
         if let (
-            crate::builtins::BuiltinFn::AllocateAvailable(_, pp, _),
+            simlin_base::builtins::BuiltinFn::AllocateAvailable(_, pp, _),
             BuiltinFn::AllocateAvailable(_, lowered_pp, _),
         ) = (builtin, &mut lowered)
         {
@@ -2492,7 +2490,7 @@ impl Context<'_> {
                 let dim = &dims[i];
 
                 // Check if this is the full dimension or a subdimension
-                let parent_name = crate::common::CanonicalDimensionName::from_raw(dim.name());
+                let parent_name = simlin_base::common::CanonicalDimensionName::from_raw(dim.name());
 
                 if subdim_name.as_str() == parent_name.as_str() {
                     // Full dimension - find matching active dimension
@@ -2611,7 +2609,7 @@ impl Context<'_> {
 
                     // First check if it's a named dimension element
                     if let Some(offset) = dim.get_offset(
-                        &crate::common::CanonicalElementName::from_raw(ident.as_str()),
+                        &simlin_base::common::CanonicalElementName::from_raw(ident.as_str()),
                     ) {
                         return Ok(SubscriptIndex::Single(Expr::Const(
                             (offset + 1) as f64,
@@ -2682,7 +2680,7 @@ impl Context<'_> {
                 // An element name that happens to match a dimension name should be
                 // resolved as an element, not as an A2A dimension reference.
                 if let Some(offset) = dim.get_offset(
-                    &crate::common::CanonicalElementName::from_raw(name.as_str()),
+                    &simlin_base::common::CanonicalElementName::from_raw(name.as_str()),
                 ) {
                     return Ok(SubscriptIndex::Single(Expr::Const(
                         (offset + 1) as f64,
@@ -2780,7 +2778,7 @@ fn test_context<'a>(
 
 #[test]
 fn test_lower() {
-    use crate::common::{Canonical, Ident};
+    use simlin_base::common::{Canonical, Ident};
     let lower_if = |op: ast::BinaryOp| {
         use ast::Expr2::*;
         Box::new(If(
@@ -2793,12 +2791,12 @@ fn test_lower() {
             )),
             Box::new(Const(
                 "1".to_string(),
-                crate::ast::Literal::new(1.0),
+                simlin_base::ast::Literal::new(1.0),
                 Loc::default(),
             )),
             Box::new(Const(
                 "0".to_string(),
-                crate::ast::Literal::new(0.0),
+                simlin_base::ast::Literal::new(0.0),
                 Loc::default(),
             )),
             None,
@@ -2844,7 +2842,7 @@ fn test_lower() {
 
 #[test]
 fn test_with_active_subscripts_reuses_dimension_storage() {
-    use crate::common::CanonicalDimensionName;
+    use simlin_base::common::CanonicalDimensionName;
 
     let dims_ctx = DimensionsContext::default();
     let dims = vec![Dimension::Indexed(
@@ -2870,15 +2868,15 @@ fn test_with_active_subscripts_reuses_dimension_storage() {
 
 #[test]
 fn test_get_implicit_subscript_off_translates_through_mapping_parent() {
-    let dim_a = crate::datamodel::Dimension::named(
+    let dim_a = simlin_base::datamodel::Dimension::named(
         "dima".to_string(),
         vec!["a1".to_string(), "a2".to_string(), "a3".to_string()],
     );
-    let sub_a = crate::datamodel::Dimension::named(
+    let sub_a = simlin_base::datamodel::Dimension::named(
         "suba".to_string(),
         vec!["a2".to_string(), "a3".to_string()],
     );
-    let mut dim_b = crate::datamodel::Dimension::named(
+    let mut dim_b = simlin_base::datamodel::Dimension::named(
         "dimb".to_string(),
         vec!["b1".to_string(), "b2".to_string(), "b3".to_string()],
     );
@@ -2907,15 +2905,15 @@ fn test_get_implicit_subscript_off_translates_through_mapping_parent() {
 
 #[test]
 fn test_positional_fallback_ignores_unrelated_mapping() {
-    let mut source = crate::datamodel::Dimension::named(
+    let mut source = simlin_base::datamodel::Dimension::named(
         "source".to_string(),
         vec!["s1".to_string(), "s2".to_string()],
     );
-    let target = crate::datamodel::Dimension::named(
+    let target = simlin_base::datamodel::Dimension::named(
         "target".to_string(),
         vec!["t1".to_string(), "t2".to_string()],
     );
-    let other = crate::datamodel::Dimension::named(
+    let other = simlin_base::datamodel::Dimension::named(
         "other".to_string(),
         vec!["o1".to_string(), "o2".to_string()],
     );
@@ -2968,8 +2966,8 @@ fn test_positional_fallback_ignores_unrelated_mapping() {
 /// name and the variable's slot inside it.
 #[test]
 fn resolve_walks_module_shapes_and_refuses_loudly_off_the_chain() {
-    use super::fragment::{ModelShape, ShapeEntry};
-    use crate::common::CanonicalDimensionName;
+    use simlin_base::ast::{ModelShape, ShapeEntry};
+    use simlin_base::common::CanonicalDimensionName;
 
     let d = Dimension::Indexed(CanonicalDimensionName::from_raw("d"), 3);
     // `inner`: `x` at 0 (scalar), `arr[d]` at 1.

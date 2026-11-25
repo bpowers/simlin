@@ -47,10 +47,10 @@ echo "Using target: $TARGET"
 # engine refuses a run with. ASan's default aborts the process instead.
 STATUS=0
 
-echo "Testing simlin-engine..."
+echo "Testing simlin-engine and simlin-tests..."
 RUST_BACKTRACE=1 \
 ASAN_OPTIONS="allocator_may_return_null=1:detect_leaks=1:check_initialization_order=1:strict_init_order=1:verbosity=0:print_stats=1" \
-cargo +"$NIGHTLY_TOOLCHAIN" test -Zbuild-std --target "$TARGET" -p simlin-engine --features file_io --no-fail-fast 2>&1 | tee asan-test.log || STATUS=$?
+cargo +"$NIGHTLY_TOOLCHAIN" test -Zbuild-std --target "$TARGET" -p simlin-base -p simlin-diagram -p simlin-formats -p simlin-edit -p simlin-engine -p simlin-wasmgen -p simlin-layout -p simlin-save-check -p simlin-tools -p simlin-tests --no-fail-fast 2>&1 | tee asan-test.log || STATUS=$?
 
 echo ""
 echo "=== ASAN Summary ==="

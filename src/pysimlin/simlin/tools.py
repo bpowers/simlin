@@ -3,7 +3,7 @@
 A :class:`ToolSession` is one agent's work on one model: call a tool of the
 engine's catalog by name with JSON-shaped input and read its JSON-shaped
 output back, exactly as a native host's agent does. What each tool answers is
-the engine's decision (``simlin_engine::tools``); this module only carries the
+the engine's decision (``simlin_tools``); this module only carries the
 calls. A refusal -- input the tool's schema does not allow, an edit the
 engine's gate refuses -- is output the agent reads (``ToolOutput.is_error``,
 set exactly when the call did not do what was asked), never an exception;
@@ -118,7 +118,7 @@ def catalog() -> dict[str, Any]:
 
 def _cancelled() -> ToolOutput:
     """The engine's answer to a call its host cancelled before it began its
-    work (``simlin_engine::tools::ToolOutput::cancelled``), for an edit
+    work (``simlin_tools::ToolOutput::cancelled``), for an edit
     cancelled while it waited for the project's locks: the same refusal, so
     a host tells the two apart by nothing. ``tests/test_tools.py`` holds it
     equal to the engine's."""

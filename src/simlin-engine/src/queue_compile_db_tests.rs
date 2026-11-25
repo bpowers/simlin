@@ -13,13 +13,13 @@
 //! included via `#[path]` so `use super::*` still resolves private items.
 
 use super::*;
-use crate::common::{ErrorCode, Ident};
 use crate::db::{ModuleInputSet, SimlinDb, collect_all_diagnostics, compile_var_fragment};
 use salsa::plumbing::AsId;
+use simlin_base::common::{ErrorCode, Ident};
 use std::io::BufReader;
 
 fn parse(xml: &str) -> datamodel::Project {
-    crate::xmile::project_from_reader(&mut BufReader::new(xml.as_bytes())).unwrap()
+    simlin_formats::xmile::project_from_reader(&mut BufReader::new(xml.as_bytes())).unwrap()
 }
 
 /// The steady-state conveyor fixture plus two ordinary auxes: `unrelated` is
@@ -111,27 +111,6 @@ fn overflow_marker_without_queue_is_rejected_by_compile_sim() {
         .err()
         .expect("stray <overflow/> rejected");
     assert_eq!(err.code, ErrorCode::QueueOverflowNotOnQueue);
-}
-
-/// `wasmgen::compile_datamodel_to_artifact` is a production path
-/// (`simlin_model_compile_to_wasm`) that never touches `compile_sim`: its own
-/// up-front reject scans for special-stock STOCKS, then it calls
-/// `compile_project_incremental` directly. Validating markers in the dispatch would
-/// have left the wasm backend silently accepting a stray overflow while the VM
-/// rejected it -- a backend divergence. Both must reject.
-#[test]
-fn overflow_marker_without_queue_is_rejected_by_the_wasm_backend() {
-    let project = parse(OVERFLOW_WITHOUT_QUEUE);
-    let main = project.models[0].name.clone();
-
-    let err = crate::wasmgen::compile_datamodel_to_artifact(&project, &main, false, false)
-        .err()
-        .expect("the wasm backend must reject a stray <overflow/> too");
-    let crate::wasmgen::WasmGenError::Unsupported(msg) = err;
-    assert!(
-        msg.contains("QueueOverflowNotOnQueue"),
-        "the wasm compile error must carry the marker-placement rejection: {msg}"
-    );
 }
 
 /// A stray `<overflow/>` in a NON-main model. Conveyor/queue support is main-model

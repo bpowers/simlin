@@ -10,7 +10,7 @@
 
 use std::collections::HashSet;
 
-use crate::common::{Canonical, Ident, IdentMap, IdentSet};
+use simlin_base::common::{Canonical, Ident, IdentMap, IdentSet};
 
 /// Compact integer-indexed view of an adjacency list used to accelerate the
 /// core DFS circuit enumeration.  Swapping `Ident<Canonical>` (heap-allocated
@@ -177,7 +177,7 @@ const CIRCUIT_HASH_SEED: u64 = 0xabcdef0123456789;
 /// `docs/design-plans/2026-05-06-ltm-308-canonical-cycle-dedup.md`.
 #[inline]
 fn hash_u32_slice(vals: &[u32]) -> u64 {
-    crate::rapidhash::hash_u32_slice(vals, CIRCUIT_HASH_SEED)
+    simlin_base::rapidhash::hash_u32_slice(vals, CIRCUIT_HASH_SEED)
 }
 
 /// Strongly-connected components of an arbitrary `Ident`-keyed adjacency

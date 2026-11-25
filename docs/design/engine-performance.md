@@ -15,7 +15,7 @@ set of larger proposals grounded in the measured data.
 
 ## Methodology
 
-- Harness: `src/simlin-engine/examples/clearn_profile.rs` — times each pipeline
+- Harness: `src/simlin-tests/examples/clearn_profile.rs` — times each pipeline
   stage (parse → compile-via-salsa → `Vm::new` → `run_to_end`) and, with
   `CLEARN_COUNT_ALLOCS=1`, reports allocation counts / peak live bytes per stage
   via a gated counting global allocator (`CLEARN_ALLOC_HIST=1` adds a size
@@ -96,7 +96,7 @@ sweep cannot see a changed runlist order that happens to produce the same
 numbers, so the per-model runlists, cycle verdict, resolved SCCs,
 dependency-graph edge multiset, run-invariant prefix length and (LTM on, both
 modes) LTM variable set and detected loops are dumped on both trees and
-diffed (`examples/depgraph_dump.rs` dumps the runlists, cycle verdict,
+diffed (`src/simlin-tests/examples/depgraph_dump.rs` dumps the runlists, cycle verdict,
 resolved SCCs and both dependency maps for every corpus model; the rest is
 still ad hoc).
 
@@ -297,7 +297,7 @@ Compile is allocation-bound, so a faster allocator pays off directly:
 | compile | 2450 ms | 1459 ms | **−40%** |
 | run | 168 ms | 167 ms | none (run is allocation-free post-win #1) |
 
-Wiring: the binaries (`simlin-cli`, `simlin-serve`, `simlin-mcp`) set
+Wiring: the binaries (`simlin-cli`, `simlin-mcp`) set
 `#[global_allocator] mimalloc::MiMalloc` in their `main.rs` (native binaries,
 never wasm) and depend on the `mimalloc` crate directly.
 `libsimlin` (the cdylib
@@ -306,7 +306,7 @@ an opt-in `mimalloc` feature that is additionally `cfg(not(target_arch =
 "wasm32"))`; pysimlin's build (`Makefile`, `scripts/build_wheels.py`) enables
 `--features mimalloc`.
 The feature is off by default.
-None of the three binaries
+Neither binary
 depends on `libsimlin`: the CLI deliberately does not, so its dependency closure
 holds no cdylib/staticlib crate. libsimlin's fixed-name (unhashed) rlib cannot
 coexist with the workspace's feature-unified variant of itself, so depending on
@@ -749,7 +749,7 @@ Against that, each would cost one of three things the engine relies on:
 If handle-keyed lookups ever do show up, the design that keeps all three is a content hash computed once at interning and stored in the payload, with `Borrow<str>` replaced by a `&str` probe type whose `Hash` writes the same number.
 
 **The debug-build hasher is random on purpose.**
-The determinism suites (`db::fragment_determinism_tests`, `db::diagnostic_determinism_tests`, `tests/integration/build_determinism.rs`) detect an iteration order that reached a cached value by building twice and comparing, which only works if the order differs between builds.
+The determinism suites (`db::fragment_determinism_tests`, `db::diagnostic_determinism_tests`, `src/simlin-tests/tests/integration/build_determinism.rs`) detect an iteration order that reached a cached value by building twice and comparing, which only works if the order differs between builds.
 Under an unkeyed hasher it does not: `multi_table_fragment_is_stable_across_fresh_databases` passes with the sort it pins deleted.
 So builds with debug assertions (the test suite, the `gates` profile) key each map randomly, and a release build keeps FxHash and an order that cannot vary run to run even where a sort is missing.
 Never make a test-visible `IdentMap` unkeyed to "fix" a flaky test: the flake is the detector working, and the fix is a sort.
@@ -987,7 +987,7 @@ Whole-process cold plain compile
 The
 dependency graphs of every model under `test/`, under the empty wiring and
 under every bound-port set an instance of it binds, are byte-identical
-across that change (`examples/depgraph_dump.rs`, which is the sweep
+across that change (`src/simlin-tests/examples/depgraph_dump.rs`, which is the sweep
 "Measuring a change" asks for when a change touches runlists or the
 dependency relation).
 What remains in the graph is

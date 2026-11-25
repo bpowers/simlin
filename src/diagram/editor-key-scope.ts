@@ -8,9 +8,9 @@
 // document-level keydown listener because the canvas is an <svg> that cannot
 // hold focus (the Canvas focuses its container div after a click, but keys can
 // still arrive with focus elsewhere). That is fine while one Editor owns the
-// page (src/app, simlin-serve) and wrong the moment several share it (a
-// notebook with an Editor per output cell): every instance would act on every
-// key. Each instance therefore asks `editorOwnsKeyEvent` before acting.
+// page (src/app) and wrong the moment several share it (a notebook with an
+// Editor per output cell): every instance would act on every key. Each
+// instance therefore asks `editorOwnsKeyEvent` before acting.
 //
 // The decision is a pure function of the event's composed path and one piece
 // of shared state -- which Editor root most recently saw pointer or focus

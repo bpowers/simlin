@@ -11,7 +11,7 @@
 //! gives their names; a field with no row fails its test.
 
 use super::*;
-use crate::datamodel::{
+use simlin_base::datamodel::{
     Aux, Compat, Dimension, DimensionElements, DimensionMapping, Dt, Equation, Flow,
     GraphicalFunction, GraphicalFunctionKind, GraphicalFunctionScale, LoopMetadata, MacroSpec,
     Model, Module, ModuleReference, Project, SimMethod, SimSpecs, Stock, Unit, Variable,

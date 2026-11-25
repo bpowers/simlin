@@ -1,0 +1,36 @@
+[package]
+name = "simlin-edit"
+version = "0.1.0"
+authors = ["Bobby Powers <bobbypowers@gmail.com>"]
+license = "Apache-2.0"
+edition = "2024"
+description = "Edits to a system dynamics project: patches, diagram gestures, equation views"
+
+[lib]
+crate-type = ["rlib"]
+
+[features]
+schema = ["dep:schemars"]
+# The checker of a diagram edit's invariants, which simlin-layout's eval harness
+# charges a layout with.
+invariants = []
+# Compiles in the test helpers other crates' tests use. Consumers add it through
+# a `[dev-dependencies]` edge, so a normal `cargo build` never sees it.
+test-support = ["invariants"]
+
+[dependencies]
+simlin-base = { version = "0.1", path = "../simlin-base" }
+simlin-diagram = { version = "0.1", path = "../simlin-diagram" }
+simlin-formats = { version = "0.1", path = "../simlin-formats", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+smallvec = { version = "1", features = [ "union" ] }
+rustc-hash = "2"
+schemars = { version = "1.2.3", features = ["preserve_order"], optional = true }
+
+[dev-dependencies]
+simlin-base = { path = "../simlin-base", features = ["test-support"] }
+simlin-diagram = { path = "../simlin-diagram", features = ["test-support"] }
+simlin-engine = { path = "../simlin-engine", features = ["test-support"] }
+simlin-formats = { path = "../simlin-formats", features = ["test-support"] }
+rayon = "1"

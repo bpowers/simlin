@@ -5,10 +5,10 @@
 //! `FormattedError`: the one presentation of a `Diagnostic`, shared by the
 //! terminal (the CLI), libsimlin and the MCP servers.
 
-use crate::builtins::Loc;
-use crate::common::{Error, ErrorCode, UnitError};
-use crate::datamodel::{Equation, Project as DatamodelProject, Variable};
 use crate::db::{self, DiagnosticCategory, DiagnosticError, DiagnosticSeverity};
+use simlin_base::builtins::Loc;
+use simlin_base::common::{Error, ErrorCode, UnitError, join_quoted_names};
+use simlin_base::datamodel::{Equation, Project as DatamodelProject, Variable};
 
 /// Categorisation of the formatted error used for presentation purposes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,11 +78,11 @@ pub struct FormattedError {
     pub element: Option<String>,
     /// For a read that runs off a dimension, the dimension and which end
     /// (`Diagnostic::read_past`); `None` otherwise.
-    pub read_past: Option<crate::common::ReadPast>,
+    pub read_past: Option<simlin_base::common::ReadPast>,
     /// For a reference whose dimensions disagree with its reader's, the
     /// variable read and the dimensions that disagree
     /// (`Diagnostic::mismatched_read`); `None` otherwise.
-    pub mismatched_read: Option<crate::common::MismatchedRead>,
+    pub mismatched_read: Option<simlin_base::common::MismatchedRead>,
 }
 
 /// Collection of formatted errors plus bookkeeping flags that mirror previous CLI output
@@ -149,26 +149,10 @@ pub fn format_simulation_error(model_name: &str, error: &Error) -> FormattedErro
 /// One helper, so the equation and unit arms cannot drift on how a reason is
 /// joined to its code -- the joiner is the ` -- ` every summary in this module
 /// uses.
-pub(crate) fn code_and_reason(code: ErrorCode, details: Option<&str>) -> String {
+pub fn code_and_reason(code: ErrorCode, details: Option<&str>) -> String {
     match details {
         Some(details) => format!("{code} -- {details}"),
         None => code.to_string(),
-    }
-}
-
-/// Join variable names for a user-facing sentence: `'a'`, `'a' and 'b'`,
-/// `'a', 'b', and 'c'`. Long lists are truncated to the first three names
-/// plus a count, so a macro-instantiated conflict with dozens of sources
-/// stays readable.
-pub(crate) fn join_quoted_names(names: &[&str]) -> String {
-    match names {
-        [] => String::new(),
-        [a] => format!("'{a}'"),
-        [a, b] => format!("'{a}' and '{b}'"),
-        [a, b, c] => format!("'{a}', '{b}', and '{c}'"),
-        [a, b, c, rest @ ..] => {
-            format!("'{a}', '{b}', '{c}', and {} more", rest.len())
-        }
     }
 }
 
@@ -392,7 +376,7 @@ fn variable_equation_text(var: &Variable, element: Option<&str>) -> Option<Strin
         Some(Equation::Arrayed(_, arms, default, _)) => {
             let own = element.and_then(|element| {
                 arms.iter().find(|(subscript, ..)| {
-                    crate::common::CanonicalElementName::from_subscript(subscript).as_str()
+                    simlin_base::common::CanonicalElementName::from_subscript(subscript).as_str()
                         == element
                 })
             });
@@ -430,9 +414,9 @@ fn combine_snippet_and_summary(snippet: Option<String>, summary: String) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::{EquationError, ErrorCode};
     use crate::db::{Diagnostic, SimlinDb, collect_all_diagnostics, sync_from_datamodel};
     use crate::test_common::TestProject;
+    use simlin_base::common::{EquationError, ErrorCode};
 
     /// A unit diagnostic as `db/units.rs` files one, for the formatter arms
     /// that no small production fixture reaches at every source shape.
@@ -623,8 +607,8 @@ mod tests {
     /// locations is two sources and one name.
     #[test]
     fn an_inference_row_names_each_involved_variable_once() {
-        use crate::builtins::Loc;
-        use crate::common::UnitError;
+        use simlin_base::builtins::Loc;
+        use simlin_base::common::UnitError;
 
         let formatted = format_diagnostic(&unit_diagnostic(
             "main",
@@ -656,8 +640,8 @@ mod tests {
 
     #[test]
     fn inference_error_formats_correctly() {
-        use crate::builtins::Loc;
-        use crate::common::UnitError;
+        use simlin_base::builtins::Loc;
+        use simlin_base::common::UnitError;
 
         let error = UnitError::InferenceError {
             code: ErrorCode::UnitMismatch,
@@ -742,8 +726,8 @@ mod tests {
 
     #[test]
     fn inference_error_details_are_user_facing() {
-        use crate::builtins::Loc;
-        use crate::common::UnitError;
+        use simlin_base::builtins::Loc;
+        use simlin_base::common::UnitError;
 
         // A multi-line constraint dump (what units_infer produces) is
         // replaced in `details` by a plain-language sentence naming the
@@ -840,18 +824,6 @@ mod tests {
     }
 
     #[test]
-    fn join_quoted_names_truncates_long_lists() {
-        assert_eq!(join_quoted_names(&[]), "");
-        assert_eq!(join_quoted_names(&["a"]), "'a'");
-        assert_eq!(join_quoted_names(&["a", "b"]), "'a' and 'b'");
-        assert_eq!(join_quoted_names(&["a", "b", "c"]), "'a', 'b', and 'c'");
-        assert_eq!(
-            join_quoted_names(&["a", "b", "c", "d", "e"]),
-            "'a', 'b', 'c', and 2 more"
-        );
-    }
-
-    #[test]
     fn collect_formatted_errors_accepts_filtered_iterator() {
         let datamodel = TestProject::new("filter-iter")
             .aux("ok_var", "42", None)
@@ -881,7 +853,7 @@ mod tests {
     /// Build a `Diagnostic` for the four `DiagnosticError` arms at a chosen
     /// severity, so each arm's severity word can be checked in both states.
     fn diagnostic_arms(severity: DiagnosticSeverity) -> Vec<db::Diagnostic> {
-        use crate::common::{Error as CommonError, ErrorKind, UnitError};
+        use simlin_base::common::{Error as CommonError, ErrorKind, UnitError};
 
         let arm = |error| Diagnostic {
             model: "main".to_string(),
@@ -969,7 +941,7 @@ mod tests {
     /// unconditionally an error.
     #[test]
     fn simulation_error_is_always_error_severity() {
-        use crate::common::{Error as CommonError, ErrorKind};
+        use simlin_base::common::{Error as CommonError, ErrorKind};
         let fe = format_simulation_error(
             "main",
             &CommonError::new(ErrorKind::Simulation, ErrorCode::NotSimulatable, None),
@@ -993,7 +965,7 @@ mod tests {
     /// severity wording, so this is what holds the mapping itself.
     #[test]
     fn format_diagnostic_maps_every_arm() {
-        use crate::common::{Error as CommonError, ErrorKind, UnitError};
+        use simlin_base::common::{Error as CommonError, ErrorKind, UnitError};
 
         // (label, error, expected code/kind/category/offsets)
         type ArmRow = (
@@ -1104,7 +1076,7 @@ mod tests {
     /// raising site's reason, for terminals and language-model clients.
     #[test]
     fn details_is_always_the_bare_reason() {
-        use crate::common::{Error as CommonError, ErrorKind, UnitError};
+        use simlin_base::common::{Error as CommonError, ErrorKind, UnitError};
 
         let model_error = |code, details: Option<&str>| {
             DiagnosticError::Model(CommonError {
@@ -1228,7 +1200,7 @@ mod tests {
     /// named `<unknown>`.
     #[test]
     fn format_diagnostic_falls_back_to_unknown_variable() {
-        use crate::common::UnitError;
+        use simlin_base::common::UnitError;
 
         let arms = [
             DiagnosticError::Equation(EquationError::new(ErrorCode::EmptyEquation, 0, 5)),

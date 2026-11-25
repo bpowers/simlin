@@ -14,11 +14,11 @@ because the file carries enough metadata to map variable names to time series.
 This document describes that metadata and the deterministic procedure that
 reconstructs a `Results` struct (variable names -> time series) from a VDF
 alone.
-The implementation is in `src/simlin-engine/src/vdf.rs` and its
+The implementation is in `src/simlin-formats/src/vdf.rs` and its
 submodules; `tools/vdf_xray.py` is a structural inspector for the same format.
 The two implementations are pinned together by a differential parity harness
 (`parity_python_and_rust_vdf_extraction_agree` in
-`src/simlin-engine/tests/integration/vdf_parity.rs`): it walks every run-file
+`src/simlin-tests/tests/integration/vdf_parity.rs`): it walks every run-file
 VDF under `test/`, extracts named results with both readers via the tool's
 `--extract-json` mode, and requires identical name sets and bitwise-identical
 values -- so a behavior change in one reader without the other fails CI.
@@ -881,7 +881,7 @@ construction) and the Python inspector (`VDF_ALT_RESULT_MAGIC`).
 The zambaqui
 0x53 fixtures are validated end-to-end against the section-6 final-values
 oracle by `sensitivity_run_files_parse_and_match_final_values_oracle` in
-`src/simlin-engine/tests/integration/vdf_sensitivity.rs`.
+`src/simlin-tests/tests/integration/vdf_sensitivity.rs`.
 Two 0x53-visible
 behaviors to know about: unsaved OT slots (an optimization run saves only a
 subset of variables) carry class code 0, a zero offset-table word, and the

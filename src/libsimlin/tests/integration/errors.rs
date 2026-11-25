@@ -7,7 +7,6 @@ use std::ptr;
 
 use simlin::*;
 use simlin_engine::test_common::TestProject;
-use simlin_engine::{self as engine};
 
 use crate::common::open_project_from_datamodel;
 
@@ -292,7 +291,7 @@ fn test_error_str() {
 /// "discovery mode" Warning diagnostic.
 ///
 /// Chain: `cap_stock -> aux_{N-3} -> ... -> aux_0 -> cap_flow -> cap_stock`.
-fn build_chain_scc_datamodel(name: &str, total_nodes: usize) -> engine::datamodel::Project {
+fn build_chain_scc_datamodel(name: &str, total_nodes: usize) -> simlin_base::datamodel::Project {
     assert!(total_nodes >= 3, "chain SCC needs >= 3 nodes");
     let aux_count = total_nodes - 2;
     let mut builder = TestProject::new(name);
@@ -341,7 +340,7 @@ unsafe fn any_detail_message_contains(all_errors: *const SimlinError, needle: &s
 #[test]
 fn test_get_errors_queue_model_reports_none() {
     let xml = include_str!("../../../../test/queues/queue_drain.xmile");
-    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+    let datamodel = simlin_formats::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
         .expect("parse queue_drain.xmile");
     let proj = open_project_from_datamodel(&datamodel);
 
@@ -370,7 +369,7 @@ fn test_get_errors_queue_model_reports_none() {
 #[test]
 fn test_get_errors_conveyor_model_has_no_not_expanded() {
     let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
-    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+    let datamodel = simlin_formats::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
         .expect("parse minimal_conveyor.xmile");
     let proj = open_project_from_datamodel(&datamodel);
 
@@ -431,7 +430,7 @@ const CONVEYOR_IN_SUBMODEL_XMILE: &str = r#"<?xml version="1.0" encoding="utf-8"
 /// never a panic or a silent success).
 #[test]
 fn test_submodel_conveyor_surfaces_clear_error() {
-    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(
+    let datamodel = simlin_formats::open_xmile(&mut std::io::BufReader::new(
         CONVEYOR_IN_SUBMODEL_XMILE.as_bytes(),
     ))
     .expect("parse conveyor-in-submodel xmile");
@@ -712,8 +711,8 @@ fn test_get_errors_ltm_warning_survives_subsequent_non_ltm_sim() {
 /// with the requested integration method.
 fn build_feedback_loop_datamodel(
     name: &str,
-    method: engine::datamodel::SimMethod,
-) -> engine::datamodel::Project {
+    method: simlin_base::datamodel::SimMethod,
+) -> simlin_base::datamodel::Project {
     TestProject::new(name)
         .with_sim_method(method)
         .stock("population", "100", &["births"], &[], None)
@@ -731,8 +730,10 @@ fn build_feedback_loop_datamodel(
 /// has no failing fragments).
 #[test]
 fn test_get_errors_after_an_rk4_ltm_sim_stays_clean() {
-    let datamodel =
-        build_feedback_loop_datamodel("rk4_ltm_overlay", engine::datamodel::SimMethod::RungeKutta4);
+    let datamodel = build_feedback_loop_datamodel(
+        "rk4_ltm_overlay",
+        simlin_base::datamodel::SimMethod::RungeKutta4,
+    );
     let proj = open_project_from_datamodel(&datamodel);
 
     unsafe {
@@ -847,7 +848,7 @@ fn test_get_errors_auto_flip_warning_has_warning_severity() {
 #[test]
 fn test_get_errors_surfaces_conveyor_ltm_degraded_warning_after_ltm_sim() {
     let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
-    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+    let datamodel = simlin_formats::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
         .expect("parse minimal_conveyor.xmile");
     let proj = open_project_from_datamodel(&datamodel);
 
@@ -902,7 +903,7 @@ fn test_get_errors_surfaces_conveyor_ltm_degraded_warning_after_ltm_sim() {
 #[test]
 fn test_get_errors_surfaces_queue_ltm_degraded_warning_after_ltm_sim() {
     let xml = include_str!("../../../../test/queues/queue_drain.xmile");
-    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+    let datamodel = simlin_formats::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
         .expect("parse queue_drain.xmile");
     let proj = open_project_from_datamodel(&datamodel);
 
@@ -943,7 +944,7 @@ fn test_get_errors_surfaces_queue_ltm_degraded_warning_after_ltm_sim() {
 #[test]
 fn test_get_errors_no_conveyor_ltm_degraded_when_ltm_not_requested() {
     let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
-    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+    let datamodel = simlin_formats::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
         .expect("parse minimal_conveyor.xmile");
     let proj = open_project_from_datamodel(&datamodel);
 
@@ -1030,7 +1031,7 @@ fn test_get_errors_surfaces_conveyor_spec_warnings() {
     </variables>
   </model>
 </xmile>"#;
-    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+    let datamodel = simlin_formats::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
         .expect("parse conveyor spec-warning fixture");
     let proj = open_project_from_datamodel(&datamodel);
 
@@ -1107,7 +1108,7 @@ fn test_conveyor_and_queue_ltm_sim_report_disabled_ltm_mode() {
             "queue",
         ),
     ] {
-        let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+        let datamodel = simlin_formats::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
             .unwrap_or_else(|_| panic!("parse {label} fixture"));
         let proj = open_project_from_datamodel(&datamodel);
 
@@ -1495,7 +1496,7 @@ fn a_read_past_a_dimension_names_the_dimension_and_the_end() {
 /// is the only detail: no project-wide row repeats it.
 #[test]
 fn a_mismatched_read_names_the_variable_and_the_dimensions() {
-    let details_of = |datamodel: &simlin_engine::datamodel::Project| unsafe {
+    let details_of = |datamodel: &simlin_base::datamodel::Project| unsafe {
         let proj = open_project_from_datamodel(datamodel);
         let mut err: *mut SimlinError = ptr::null_mut();
         let all_errors = simlin_project_get_errors(proj, &mut err as *mut *mut SimlinError);

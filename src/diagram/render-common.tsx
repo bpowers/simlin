@@ -21,7 +21,7 @@ import { renderStyles } from './drawing/render-styles';
  * zeros) and additionally **quantizes the value to 6 decimal places** so
  * 1-ULP f64 differences from compiler/hardware variation cannot leak into
  * the SVG bytes. The Rust counterpart is `js_format_number` in
- * `src/simlin-engine/src/diagram/common.rs`; the two must stay in sync
+ * `src/simlin-diagram/src/common.rs`; the two must stay in sync
  * because `src/diagram/tests/svg-rendering.test.ts` asserts the two
  * renderers' outputs are byte-identical. Sub-micropixel precision is far
  * above any visible rendering threshold and well below the ~7e-14 ULP at

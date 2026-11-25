@@ -15,11 +15,11 @@
 use std::collections::BTreeSet;
 
 use super::*;
-use crate::common::{Canonical, ErrorCode, Ident};
 use crate::db::exec_probe::ProbedDb;
 use crate::test_common::TestProject;
 use crate::testutils::{x_aux, x_flow, x_model, x_module_named, x_stock};
 use crate::variable::DepLag;
+use simlin_base::common::{Canonical, ErrorCode, Ident};
 
 /// The input-agnostic dependency memo of one variable of `main`.
 fn deps<'db>(db: &'db SimlinDb, sync: &SyncResult, var: &str) -> &'db VariableDeps {

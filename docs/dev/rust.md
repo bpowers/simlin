@@ -29,7 +29,7 @@ Beyond the link time and disk cost, macOS imposes a first-exec security scan on 
 Conventions inside a harness:
 
 - Feature-gated modules use `#[cfg(feature = ...)]` on the `mod` declaration in `main.rs` (equivalent to the old per-target `required-features`, without skipping the whole harness).
-- A test that mutates process-global state (e.g. installs a `#[global_allocator]`, like `simlin-engine/tests/vm_alloc.rs`) is the one valid reason for a separate top-level `tests/*.rs` binary; document why in the file.
+- A test that mutates process-global state (e.g. installs a `#[global_allocator]`, like `simlin-tests/tests/vm_alloc.rs`) is the one valid reason for a separate top-level `tests/*.rs` binary; document why in the file.
 - Tests from different former files now share one process and interleave on libtest threads -- don't add tests that set env vars, change the working directory, or bind fixed ports.
 - Run one module's tests with a name filter: `cargo test -p <crate> --test integration -- <module>::`.
 
@@ -50,7 +50,7 @@ The suite has little room left (the capped step takes 56 to 127 s across CI runn
   Measure CPU, not wall, with the test alone in its process:
 
   ```bash
-  # from the crate directory (src/simlin-engine), where fixture paths resolve
+  # from a crate's directory (src/simlin-tests, say), where fixture paths resolve
   /usr/bin/time -f '%e s wall, %U s cpu' ../../target/debug/deps/<binary> --exact <module>::<test>
   ```
 
@@ -75,7 +75,7 @@ For PER-TEST durations, run the compiled test binary directly with libtest's
 (nightly-gated, but stable-toolchain-accessible) report-time flag:
 
 ```bash
-# run from the crate directory (src/simlin-engine), NOT the repo root --
+# run from the crate's directory (src/simlin-tests, say), NOT the repo root --
 # several packages have a tests/integration/main.rs with the same file name,
 # and fixture paths resolve relative to the crate
 RUSTC_BOOTSTRAP=1 ../../target/debug/deps/<binary> -Z unstable-options --report-time \
@@ -119,13 +119,11 @@ The rules:
   It builds with the `ext_data` feature on and also runs that feature's own tests (`data_provider::`), which no other run compiles.
   To give another crate gates, add it to `PACKAGES` in that script.
 
-The simlin-serve smoke test is ignored for a different reason (it spawns the built binary with its embedded SPA) and has a CI job of its own, `serve-smoke`.
-
 **`#[ignore]` for runtime is a judgement about today's engine, so re-take it after the engine gets faster.** Time the ignored set on a debug build and un-ignore what now fits the default suite's budget:
 
 ```bash
-cargo test -p simlin-engine --test integration --no-run
-RUSTC_BOOTSTRAP=1 cargo test -p simlin-engine --test integration -- --ignored \
+cargo test -p simlin-tests --test integration --no-run
+RUSTC_BOOTSTRAP=1 cargo test -p simlin-tests --test integration -- --ignored \
   -Z unstable-options --report-time 2>&1 | grep 'ok <' | sort -t'<' -k2 -rn
 ```
 

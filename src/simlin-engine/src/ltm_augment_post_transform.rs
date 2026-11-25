@@ -43,9 +43,9 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{Expr0, IndexExpr0, print_eqn};
-use crate::builtins::UntypedBuiltinFn;
-use crate::common::{Canonical, Ident, IdentMap, RawIdent};
+use simlin_base::ast::{Expr0, IndexExpr0, print_eqn};
+use simlin_base::builtins::UntypedBuiltinFn;
+use simlin_base::common::{Canonical, Ident, IdentMap, RawIdent};
 
 use super::{DepElementPin, OccurrenceLookup, qualify_element_csv};
 use crate::db::ltm_ir::{OccurrenceAxis, OccurrenceSite};
@@ -53,7 +53,7 @@ use crate::db::ltm_ir::{OccurrenceAxis, OccurrenceSite};
 #[cfg(test)]
 use super::PartialEquationError;
 #[cfg(test)]
-use crate::lexer::LexerType;
+use simlin_base::lexer::LexerType;
 
 /// Read-only context for the `PerElement` row-pinning lowering: everything it
 /// needs to substitute the live source's subscript indices for one
@@ -77,24 +77,24 @@ pub(super) struct PerElementRefCtx<'a> {
     /// it prints as the historical `from[<row>]`.
     pub(super) row_parts_bare: &'a [String],
     /// The source's declared dimensions (for index qualification).
-    pub(super) from_dims: &'a [crate::dimensions::Dimension],
+    pub(super) from_dims: &'a [simlin_base::dimensions::Dimension],
     /// The target equation's dimensions, in axis order and WITH duplicates --
     /// the positional twin of `target_elem_by_dim`, which a repeated dimension
     /// makes unrepresentable. [`dep_row_for_target`] consumes these.
-    pub(super) target_dims: &'a [crate::dimensions::Dimension],
+    pub(super) target_dims: &'a [simlin_base::dimensions::Dimension],
     /// This instantiation's target element, one bare name per axis of
     /// `target_dims`.
     pub(super) target_elements: &'a [String],
     /// Target-iterated dim (canonical) -> (element of `e` for that dim,
     /// its index within the dim) -- the projection data `e` supplies.
     pub(super) target_elem_by_dim: &'a HashMap<String, (String, usize)>,
-    pub(super) dim_ctx: &'a crate::dimensions::DimensionsContext,
+    pub(super) dim_ctx: &'a simlin_base::dimensions::DimensionsContext,
 }
 
 /// Qualify one element of one axis (`"nyc"` over `Region` ->
 /// `"region\u{B7}nyc"`), via the same defensive rules as
 /// [`qualify_element_csv`].
-pub(super) fn qualify_axis_element(elem: &str, dim: &crate::dimensions::Dimension) -> String {
+pub(super) fn qualify_axis_element(elem: &str, dim: &simlin_base::dimensions::Dimension) -> String {
     qualify_element_csv(elem, std::slice::from_ref(dim))
 }
 
@@ -122,10 +122,10 @@ pub(super) fn qualify_axis_element(elem: &str, dim: &crate::dimensions::Dimensio
 pub(crate) fn per_element_row_for_target(
     axes: &[crate::ltm_agg::AxisRead],
     target_elem_by_dim: &HashMap<String, (String, usize)>,
-    dim_ctx: &crate::dimensions::DimensionsContext,
+    dim_ctx: &simlin_base::dimensions::DimensionsContext,
 ) -> Option<Vec<String>> {
-    use crate::common::CanonicalDimensionName;
     use crate::ltm_agg::AxisRead;
+    use simlin_base::common::CanonicalDimensionName;
     axes.iter()
         .map(|ax| match ax {
             AxisRead::Pinned(e) => Some(e.clone()),
@@ -187,13 +187,13 @@ pub(crate) fn per_element_row_for_target(
 /// dimension name is what produced GH #986's wrong row, so the rule is asked
 /// for rather than restated.
 fn dep_axis_elements(
-    dep_dims: &[crate::dimensions::Dimension],
-    target_dims: &[crate::dimensions::Dimension],
+    dep_dims: &[simlin_base::dimensions::Dimension],
+    target_dims: &[simlin_base::dimensions::Dimension],
     target_elements: &[String],
-    dim_ctx: &crate::dimensions::DimensionsContext,
+    dim_ctx: &simlin_base::dimensions::DimensionsContext,
 ) -> Vec<Option<String>> {
-    use crate::common::CanonicalElementName;
     use crate::db::BareAxis;
+    use simlin_base::common::CanonicalElementName;
     if target_dims.len() != target_elements.len() {
         return vec![None; dep_dims.len()];
     }
@@ -223,10 +223,10 @@ fn dep_axis_elements(
 /// dimension does not project, because a BARE reference has to be spelled at
 /// the dep's full arity or not at all.
 pub(crate) fn dep_row_for_target(
-    dep_dims: &[crate::dimensions::Dimension],
-    target_dims: &[crate::dimensions::Dimension],
+    dep_dims: &[simlin_base::dimensions::Dimension],
+    target_dims: &[simlin_base::dimensions::Dimension],
     target_elements: &[String],
-    dim_ctx: &crate::dimensions::DimensionsContext,
+    dim_ctx: &simlin_base::dimensions::DimensionsContext,
 ) -> Option<Vec<String>> {
     dep_axis_elements(dep_dims, target_dims, target_elements, dim_ctx)
         .into_iter()
@@ -273,12 +273,12 @@ pub(crate) fn dep_row_for_target(
 /// `pinnable` carries each dep's declared `Dimension`s, resolved ONCE per
 /// target equation by the caller; only the projection is per element.
 pub(crate) fn dep_element_pins(
-    pinnable: &[(Ident<Canonical>, Vec<crate::dimensions::Dimension>)],
-    target_dims: &[crate::dimensions::Dimension],
+    pinnable: &[(Ident<Canonical>, Vec<simlin_base::dimensions::Dimension>)],
+    target_dims: &[simlin_base::dimensions::Dimension],
     target_elements: &[String],
-    dim_ctx: &crate::dimensions::DimensionsContext,
+    dim_ctx: &simlin_base::dimensions::DimensionsContext,
 ) -> IdentMap<Ident<Canonical>, DepElementPin> {
-    use crate::common::CanonicalElementName;
+    use simlin_base::common::CanonicalElementName;
     pinnable
         .iter()
         .filter_map(|(ident, dep_dims)| {
@@ -385,7 +385,7 @@ fn qualified_row_indices(row: &[String], ctx: &PerElementRefCtx<'_>) -> Vec<Inde
         .map(|(part, dim)| {
             IndexExpr0::Expr(Expr0::Var(
                 RawIdent::new_from_str(&qualify_axis_element(part, dim)),
-                crate::ast::Loc::default(),
+                simlin_base::ast::Loc::default(),
             ))
         })
         .collect()
@@ -436,7 +436,7 @@ pub(super) fn pin_source_subscript_indices(
                 .map(|p| {
                     IndexExpr0::Expr(Expr0::Var(
                         RawIdent::new_from_str(p),
-                        crate::ast::Loc::default(),
+                        simlin_base::ast::Loc::default(),
                     ))
                 })
                 .collect();
@@ -484,7 +484,7 @@ pub(super) fn pin_source_subscript_indices(
             match substituted {
                 Some(part) => IndexExpr0::Expr(Expr0::Var(
                     RawIdent::new_from_str(&part),
-                    crate::ast::Loc::default(),
+                    simlin_base::ast::Loc::default(),
                 )),
                 None => recurse_index(i, idx),
             }
@@ -558,10 +558,10 @@ enum IndexVerdict {
 /// `AxisRead` only to hand to the shared row derivation; it decides no shape.
 fn mapped_read_axis(
     index_dim: &str,
-    axis_dim: &crate::dimensions::Dimension,
+    axis_dim: &simlin_base::dimensions::Dimension,
     ctx: &PerElementRefCtx<'_>,
 ) -> Option<crate::ltm_agg::AxisRead> {
-    use crate::common::CanonicalDimensionName;
+    use simlin_base::common::CanonicalDimensionName;
     let target_iterated: Vec<String> = ctx.target_elem_by_dim.keys().cloned().collect();
     let index_canon = CanonicalDimensionName::from_raw(index_dim);
     let partner = ctx.dim_ctx.mapped_read_partner(
@@ -596,7 +596,7 @@ fn mapped_read_axis(
 ///   already-`dim·elem`-qualified one) is a literal selector, qualified with that
 ///   axis (`old` -> `age·old`). Elements are tried FIRST, and that precedence is
 ///   not this rule's to choose: it is the shared
-///   [`crate::dimensions::resolve_axis_index_name`], which
+///   [`simlin_base::dimensions::resolve_axis_index_name`], which
 ///   `ltm_agg::classify_axis_access` reads too (GH #986 closed the divergence),
 ///   and which follows the compiler's own `normalize_subscripts3`. See that
 ///   function for why element-first is the right order and what the XMILE spec
@@ -700,7 +700,10 @@ fn pin_dimension_name_indices(
             let IndexExpr0::Expr(Expr0::Var(name, loc)) = &idx else {
                 return idx;
             };
-            let (name, loc) = (crate::common::canonicalize(name.as_str()).to_string(), *loc);
+            let (name, loc) = (
+                simlin_base::common::canonicalize(name.as_str()).to_string(),
+                *loc,
+            );
             let Some(dim) = ctx.from_dims.get(i) else {
                 // Over-arity: no axis owns this index, so nothing names its owner
                 // and there is nothing to resolve it against.
@@ -713,12 +716,12 @@ fn pin_dimension_name_indices(
             let verdict = if ctx.dim_ctx.lookup(&name).is_some() {
                 IndexVerdict::Keep
             } else {
-                match crate::dimensions::resolve_axis_index_name(&name, dim, |n| {
+                match simlin_base::dimensions::resolve_axis_index_name(&name, dim, |n| {
                     ctx.target_elem_by_dim.contains_key(n)
                 }) {
                     // A literal element selector of THIS axis, qualified with that
                     // axis (`old` -> `age·old`).
-                    crate::dimensions::AxisIndexName::Element(elem) => {
+                    simlin_base::dimensions::AxisIndexName::Element(elem) => {
                         IndexVerdict::Pinned(qualify_axis_element(&elem, dim))
                     }
                     // The index names one of the TARGET's ITERATED dimensions, so this
@@ -728,7 +731,7 @@ fn pin_dimension_name_indices(
                     // derivation's answer, not this rule's: it declines an undeclared
                     // disjoint-name pair, and a name-directed pin therefore accepts
                     // exactly the pairs the occurrence-driven one does.
-                    crate::dimensions::AxisIndexName::IteratedDim => {
+                    simlin_base::dimensions::AxisIndexName::IteratedDim => {
                         let axis = crate::ltm_agg::AxisRead::Iterated {
                             dim: name.clone(),
                             source_dim: dim.name().to_string(),
@@ -742,7 +745,7 @@ fn pin_dimension_name_indices(
                             None => IndexVerdict::Unspellable,
                         }
                     }
-                    crate::dimensions::AxisIndexName::Unresolved => {
+                    simlin_base::dimensions::AxisIndexName::Unresolved => {
                         if !ctx.dim_ctx.is_dimension_name(&name) {
                             // Neither an element of this axis nor a dimension: a
                             // variable read selecting the element at runtime,
@@ -1026,7 +1029,7 @@ pub(super) fn pin_only_source_refs(
 /// (quoted) reference to its aggregate node.
 ///
 /// `reducers` maps the canonical reducer-subexpression text (exactly as
-/// `crate::patch::expr2_to_string` / `print_eqn` renders it -- lowercased,
+/// `simlin_base::ast::expr2_to_string` / `print_eqn` renders it -- lowercased,
 /// whitespace-normalized) to the agg node's name. `equation_text` is parsed
 /// to `Expr0`, and any subexpression of it whose `print_eqn` equals one of
 /// those keys is replaced by a `Var(agg_name)` node, then the whole tree is
@@ -1090,8 +1093,8 @@ pub(super) fn substitute_reducers_in_expr0(
     // argument.
     if let Some(agg_name) = reducers.get(&print_eqn(&expr)) {
         return Expr0::Var(
-            crate::common::RawIdent::new_from_str(agg_name),
-            crate::ast::Loc::default(),
+            simlin_base::common::RawIdent::new_from_str(agg_name),
+            simlin_base::ast::Loc::default(),
         );
     }
     match expr {

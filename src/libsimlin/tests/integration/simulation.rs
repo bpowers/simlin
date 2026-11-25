@@ -8,10 +8,9 @@ use std::ptr;
 use std::sync::atomic::Ordering;
 
 use simlin::*;
-use simlin_engine::buffa::{Message, MessageField};
-use simlin_engine::serde as engine_serde;
 use simlin_engine::test_common::TestProject;
-use simlin_engine::{self as engine};
+use simlin_formats::buffa::{Message, MessageField};
+use simlin_formats::serde as engine_serde;
 
 use crate::common::{expect_error_code, expect_no_error, open_project_from_datamodel};
 
@@ -478,7 +477,7 @@ fn test_stress_ref_counting() {
 
 /// Returns (proj, model, sim) — caller is responsible for unref'ing all three.
 unsafe fn create_test_sim(
-    datamodel: &engine::datamodel::Project,
+    datamodel: &simlin_base::datamodel::Project,
 ) -> (*mut SimlinProject, *mut SimlinModel, *mut SimlinSim) {
     let proj = open_project_from_datamodel(datamodel);
     let mut err: *mut SimlinError = ptr::null_mut();
@@ -564,7 +563,7 @@ unsafe fn get_offset(sim: *mut SimlinSim, name: &str) -> usize {
     off
 }
 
-fn build_population_datamodel() -> engine::datamodel::Project {
+fn build_population_datamodel() -> simlin_base::datamodel::Project {
     // birth_rate and lifespan feed into initial_pop, which is the stock
     // initial, so all three are "initial variables" and can be overridden.
     TestProject::new("pop_test")
@@ -933,7 +932,7 @@ fn test_set_value_by_offset_gates_on_constant() {
 #[test]
 fn test_set_value_by_offset_rejects_pass_driven_flow() {
     let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
-    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+    let datamodel = simlin_formats::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
         .expect("parse minimal_conveyor.xmile");
     unsafe {
         let (proj, model, sim) = create_test_sim(&datamodel);
@@ -1084,29 +1083,30 @@ fn test_sim_get_var_count_and_names() {
 #[test]
 fn test_sim_lifecycle() {
     // Create a minimal valid protobuf project
-    let project = engine::project_io::Project {
-        name: "test".to_string(),
-        sim_specs: MessageField::some(engine::project_io::SimSpecs {
-            start: 0.0,
-            stop: 10.0,
-            dt: MessageField::some(engine::project_io::Dt {
-                value: 1.0,
-                is_reciprocal: false,
+    let project =
+        simlin_formats::project_io::Project {
+            name: "test".to_string(),
+            sim_specs: MessageField::some(simlin_formats::project_io::SimSpecs {
+                start: 0.0,
+                stop: 10.0,
+                dt: MessageField::some(simlin_formats::project_io::Dt {
+                    value: 1.0,
+                    is_reciprocal: false,
+                }),
+                save_step: MessageField::none(),
+                sim_method: simlin_formats::project_io::SimMethod::Euler.into(),
+                time_units: None,
             }),
-            save_step: MessageField::none(),
-            sim_method: engine::project_io::SimMethod::Euler.into(),
-            time_units: None,
-        }),
-        models: vec![engine::project_io::Model {
-            name: "main".to_string(),
-            variables: vec![engine::project_io::Variable {
-                v: Some(engine::project_io::variable::V::Aux(
-                    engine::project_io::variable::Aux {
+            models: vec![simlin_formats::project_io::Model {
+                name: "main".to_string(),
+                variables: vec![simlin_formats::project_io::Variable {
+                v: Some(simlin_formats::project_io::variable::V::Aux(
+                    simlin_formats::project_io::variable::Aux {
                         ident: "time".to_string(),
-                        equation: MessageField::some(engine::project_io::variable::Equation {
+                        equation: MessageField::some(simlin_formats::project_io::variable::Equation {
                             equation: Some(
-                                engine::project_io::variable::equation::Equation::Scalar(
-                                    engine::project_io::variable::ScalarEquation {
+                                simlin_formats::project_io::variable::equation::Equation::Scalar(
+                                    simlin_formats::project_io::variable::ScalarEquation {
                                         equation: "time".to_string(),
                                         initial_equation: None,
                                     },
@@ -1117,22 +1117,22 @@ fn test_sim_lifecycle() {
                         units: String::new(),
                         gf: MessageField::none(),
                         can_be_module_input: false,
-                        visibility: engine::project_io::variable::Visibility::Private.into(),
+                        visibility: simlin_formats::project_io::variable::Visibility::Private.into(),
                         uid: 0,
                         compat: MessageField::none(),
                     },
                 )),
             }],
-            views: vec![],
-            loop_metadata: vec![],
-            groups: vec![],
-            macro_spec: MessageField::none(),
-            sim_specs: MessageField::none(),
-        }],
-        dimensions: vec![],
-        units: vec![],
-        source: MessageField::none(),
-    };
+                views: vec![],
+                loop_metadata: vec![],
+                groups: vec![],
+                macro_spec: MessageField::none(),
+                sim_specs: MessageField::none(),
+            }],
+            dimensions: vec![],
+            units: vec![],
+            source: MessageField::none(),
+        };
     let buf = project.encode_to_vec();
     unsafe {
         let mut err: *mut SimlinError = ptr::null_mut();
@@ -1253,7 +1253,7 @@ fn test_ltm_enabled_sim() {
 fn test_ltm_non_euler_sim_runs() {
     let datamodel = TestProject::new("ltm_rk4")
         .with_sim_time(0.0, 10.0, 1.0)
-        .with_sim_method(engine::datamodel::SimMethod::RungeKutta4)
+        .with_sim_method(simlin_base::datamodel::SimMethod::RungeKutta4)
         .stock("population", "100", &["births"], &[], None)
         .flow("births", "population * 0.02", None)
         .build_datamodel();
@@ -1337,14 +1337,14 @@ fn test_mark2_mdl_simulates_through_ffi() {
 fn test_systems_format_module_var_get_series() {
     let hiring_txt =
         std::fs::read_to_string("testdata/hiring.txt").expect("hiring.txt fixture must exist");
-    let datamodel = engine::open_systems(&hiring_txt).unwrap();
+    let datamodel = simlin_formats::open_systems(&hiring_txt).unwrap();
 
     // Round-trip through JSON (same path as the web UI: server stores
     // sd.json, browser opens it via Project.openJson)
-    let json_project: engine::json::Project = (&datamodel).into();
+    let json_project: simlin_formats::json::Project = (&datamodel).into();
     let json_bytes = serde_json::to_vec(&json_project).unwrap();
-    let reopened: engine::json::Project = serde_json::from_slice(&json_bytes).unwrap();
-    let reopened_dm: engine::datamodel::Project = reopened.into();
+    let reopened: simlin_formats::json::Project = serde_json::from_slice(&json_bytes).unwrap();
+    let reopened_dm: simlin_base::datamodel::Project = reopened.into();
 
     let proj = open_project_from_datamodel(&reopened_dm);
 
@@ -1417,7 +1417,7 @@ fn test_systems_format_module_var_get_series() {
 #[test]
 fn test_conveyor_model_simulates_via_ffi() {
     let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
-    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+    let datamodel = simlin_formats::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
         .expect("parse minimal_conveyor.xmile");
     unsafe {
         let (proj, model, sim) = create_test_sim(&datamodel);
@@ -1460,7 +1460,7 @@ fn test_conveyor_model_simulates_via_ffi() {
 #[test]
 fn test_queue_model_simulates_via_ffi() {
     let xml = include_str!("../../../../test/queues/queue_drain.xmile");
-    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+    let datamodel = simlin_formats::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
         .expect("parse queue_drain.xmile");
     unsafe {
         let (proj, model, sim) = create_test_sim(&datamodel);
@@ -1503,7 +1503,7 @@ fn test_queue_model_simulates_via_ffi() {
 fn test_mid_run_get_value_reads_pass_driven_rates() {
     // Conveyor: minimal_conveyor is at steady state (init 1000 == 250 * 4).
     let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
-    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+    let datamodel = simlin_formats::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
         .expect("parse minimal_conveyor.xmile");
     unsafe {
         let (proj, model, sim) = create_test_sim(&datamodel);
@@ -1519,7 +1519,7 @@ fn test_mid_run_get_value_reads_pass_driven_rates() {
 
     // Queue: queue_drain is a faithful pass-through (into_service == 10).
     let xml = include_str!("../../../../test/queues/queue_drain.xmile");
-    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+    let datamodel = simlin_formats::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
         .expect("parse queue_drain.xmile");
     unsafe {
         let (proj, model, sim) = create_test_sim(&datamodel);
@@ -1543,7 +1543,7 @@ fn test_mid_run_get_value_reads_pass_driven_rates() {
 #[test]
 fn test_set_value_on_conveyor_driven_flow_rejected() {
     let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
-    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+    let datamodel = simlin_formats::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
         .expect("parse minimal_conveyor.xmile");
     unsafe {
         let (proj, model, sim) = create_test_sim(&datamodel);
@@ -1614,7 +1614,7 @@ fn test_set_value_on_conveyor_driven_flow_rejected() {
 #[test]
 fn test_set_value_on_queue_driven_outflow_rejected() {
     let xml = include_str!("../../../../test/queues/queue_drain.xmile");
-    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+    let datamodel = simlin_formats::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
         .expect("parse queue_drain.xmile");
     unsafe {
         let (proj, model, sim) = create_test_sim(&datamodel);
@@ -1694,7 +1694,7 @@ fn test_stock_with_both_conveyor_and_queue_rejected_via_ffi() {
     <stock name="done"><eqn>0</eqn><inflow>out</inflow></stock>
   </variables></model>
 </xmile>"#;
-    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+    let datamodel = simlin_formats::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
         .expect("parse both-markers xmile");
     unsafe {
         let proj = open_project_from_datamodel(&datamodel);

@@ -7,7 +7,7 @@
 //! Functions for inspecting models: reference counting, listing variables,
 //! querying dependencies, retrieving causal links, and getting LaTeX equations.
 
-use simlin_engine::{self as engine, canonicalize, datamodel};
+use simlin_base::{canonicalize, datamodel};
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use std::ptr;
@@ -142,20 +142,28 @@ pub unsafe extern "C" fn simlin_model_compile_to_wasm(
             // Restore before inspecting the result so compilation errors cannot
             // leak the override into VM creation, analysis, or diagnostics.
             let prior_discovery = source_project.ltm_discovery_mode(&*db);
-            engine::db::set_project_ltm_discovery_mode(&mut db, source_project, ltm_discovery_mode);
-            let build = engine::queue_compile::compile_sim(
+            simlin_engine::db::set_project_ltm_discovery_mode(
+                &mut db,
+                source_project,
+                ltm_discovery_mode,
+            );
+            let build = simlin_engine::queue_compile::compile_sim(
                 &mut db,
                 source_project,
                 &datamodel,
                 model_ref.model_name.as_str(),
-                engine::db::LtmOverlay::from(ltm_enabled),
+                simlin_engine::db::LtmOverlay::from(ltm_enabled),
             );
-            engine::db::set_project_ltm_discovery_mode(&mut db, source_project, prior_discovery);
+            simlin_engine::db::set_project_ltm_discovery_mode(
+                &mut db,
+                source_project,
+                prior_discovery,
+            );
             build
         } else {
-            Err(engine::Error {
-                kind: engine::ErrorKind::Simulation,
-                code: engine::ErrorCode::NotSimulatable,
+            Err(simlin_base::Error {
+                kind: simlin_base::ErrorKind::Simulation,
+                code: simlin_base::ErrorCode::NotSimulatable,
                 details: Some("incremental compilation: no sync state available".to_string()),
                 place: None,
             })
@@ -165,12 +173,12 @@ pub unsafe extern "C" fn simlin_model_compile_to_wasm(
     // release the project locks before doing this independent work.
     let artifact = match build
         .map_err(|e| {
-            engine::wasmgen::WasmGenError::Unsupported(format!(
+            simlin_wasmgen::WasmGenError::Unsupported(format!(
                 "wasmgen: incremental compile failed: {e}"
             ))
         })
         .and_then(|build| {
-            engine::wasmgen::compile_simulation_with_plans(
+            simlin_wasmgen::compile_simulation_with_plans(
                 &build.compiled,
                 &build.conveyor_plans,
                 &build.queue_plans,
@@ -554,8 +562,8 @@ pub unsafe extern "C" fn simlin_model_get_incoming_links(
     // The input-agnostic dependency set: no module instance is in hand here,
     // and this is the memo the compiler's own dependency graph reads for an
     // uninstantiated model.
-    let empty_inputs = engine::db::ModuleInputSet::empty(&*db_locked);
-    let var_deps = engine::db::variable_direct_dependencies(
+    let empty_inputs = simlin_engine::db::ModuleInputSet::empty(&*db_locked);
+    let var_deps = simlin_engine::db::variable_direct_dependencies(
         &*db_locked,
         source_var,
         source_project,
@@ -691,8 +699,13 @@ pub unsafe extern "C" fn simlin_model_get_links(
 
     // Structural-only call into the shared links core: no Results (so no
     // scores), synthetic nodes collapsed.
-    let owned =
-        engine::analysis::model_links(&*db_locked, source_model, source_project, None, false);
+    let owned = simlin_engine::analysis::model_links(
+        &*db_locked,
+        source_model,
+        source_project,
+        None,
+        false,
+    );
     drop(db_locked);
 
     crate::analysis::owned_links_to_ffi(owned, out_error)
@@ -771,14 +784,14 @@ pub unsafe extern "C" fn simlin_model_get_latex_equation(
     // click-to-caret ranges mapped into the placeholder text -- would be
     // confidently wrong. Return NULL instead (no preview beats a wrong one).
     if source_var.compat(&*db_locked).conveyor.is_some()
-        && engine::conveyor_compile::equation_has_explicit_init_list(
+        && simlin_engine::conveyor_compile::equation_has_explicit_init_list(
             source_var.equation(&*db_locked),
         )
     {
         return ptr::null_mut();
     }
 
-    let parsed = engine::db::parse_source_variable(&*db_locked, source_var, source_project);
+    let parsed = simlin_engine::db::parse_source_variable(&*db_locked, source_var, source_project);
     let ast = match parsed.variable.ast() {
         Some(a) => a,
         None => return ptr::null_mut(),
@@ -868,7 +881,7 @@ pub unsafe extern "C" fn simlin_model_get_equation(
     };
     let contents = (*model_ref.project).datamodel.lock().unwrap().shared();
     let Some(view) =
-        engine::equation_view::variable_equation(&contents, &model_ref.model_name, ident)
+        simlin_edit::equation_view::variable_equation(&contents, &model_ref.model_name, ident)
     else {
         store_error(
             out_error,
@@ -978,7 +991,7 @@ pub unsafe extern "C" fn simlin_model_get_var_json(
         }
     };
 
-    let tagged: engine::json::TaggedVariable = dm_var.clone().into();
+    let tagged: simlin_formats::json::TaggedVariable = dm_var.clone().into();
     let bytes = match serde_json::to_vec(&tagged) {
         Ok(b) => b,
         Err(err) => {
@@ -1034,7 +1047,7 @@ pub unsafe extern "C" fn simlin_model_get_sim_specs_json(
         .and_then(|m| m.sim_specs.as_ref())
         .unwrap_or(&datamodel_locked.sim_specs);
 
-    let json_sim_specs: engine::json::SimSpecs = dm_sim_specs.clone().into();
+    let json_sim_specs: simlin_formats::json::SimSpecs = dm_sim_specs.clone().into();
 
     let bytes = match serde_json::to_vec(&json_sim_specs) {
         Ok(b) => b,

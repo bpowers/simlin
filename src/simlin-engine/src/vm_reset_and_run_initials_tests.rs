@@ -8,8 +8,8 @@
 //! body, included via `#[path]` so `use super::*` still resolves `vm`'s private
 //! items.
 use super::*;
-use crate::canonicalize;
 use crate::test_common::TestProject;
+use simlin_base::canonicalize;
 
 fn pop_model() -> TestProject {
     TestProject::new("pop_model")
@@ -209,9 +209,9 @@ fn test_fused_global_and_const_binops_preserve_operand_order() {
 /// produce different numbers.
 #[test]
 fn test_global_operand_binop_reads_global_not_module_relative() {
-    use crate::datamodel;
     use crate::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
     use crate::testutils::{x_aux, x_model, x_module, x_project};
+    use simlin_base::datamodel;
 
     let sim_specs = datamodel::SimSpecs {
         start: 10.0,

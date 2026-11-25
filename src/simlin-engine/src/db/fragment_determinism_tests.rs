@@ -24,7 +24,6 @@
 //! must be reviewable (and revertable) apart from each other.
 
 use crate::compiler::symbolic::PerVarBytecodes;
-use crate::datamodel;
 use crate::db::{
     ModuleInputSet, SimlinDb, assemble_simulation, collect_all_diagnostics,
     compile_implicit_var_fragment, compile_project_incremental, compile_var_fragment,
@@ -32,6 +31,7 @@ use crate::db::{
 };
 use crate::test_common::TestProject;
 use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_module, x_project};
+use simlin_base::datamodel;
 
 /// Independent compiles per assertion. Twelve makes a missed ordering defect a
 /// 1-in-2048 event while costing a few milliseconds.
@@ -457,10 +457,14 @@ fn describe_implicit(v: &crate::capture::ImplicitVar) -> String {
             "{} = capture[{}] {}",
             c.ident(),
             c.dims().join(","),
-            crate::ast::print_eqn(c.arg())
+            simlin_base::ast::print_eqn(c.arg())
         ),
         ImplicitVar::HoistedArg(a) => {
-            format!("{} = arg {}", a.ident(), crate::ast::print_eqn(a.arg()))
+            format!(
+                "{} = arg {}",
+                a.ident(),
+                simlin_base::ast::print_eqn(a.arg())
+            )
         }
         ImplicitVar::Module(m) => {
             let refs: Vec<String> = m
@@ -895,7 +899,7 @@ fn undimensioned_arrayed_project() -> datamodel::Project {
         </variables>
     </model>
 </xmile>"#;
-    let project = crate::compat::open_xmile(&mut xmile.as_bytes())
+    let project = simlin_formats::compat::open_xmile(&mut xmile.as_bytes())
         .expect("the fixture document must parse as XMILE");
     let arr = project.models[0]
         .variables
@@ -993,7 +997,7 @@ fn a_submodel_reading_a_bound_port_through_previous_parses_once_and_compiles() {
     let mut vm = crate::vm::Vm::new(compiled).expect("vm");
     vm.run_to_end().expect("runs");
     let results = vm.into_results();
-    let out = results.offsets[&crate::common::Ident::new("out")];
+    let out = results.offsets[&simlin_base::common::Ident::new("out")];
     let series: Vec<f64> = (0..results.step_count)
         .map(|step| results.data[step * results.step_size + out])
         .collect();

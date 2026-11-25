@@ -10,9 +10,9 @@
 //! call or beside a read of every element, the ends written as exceptions or
 //! as a guard on the element's position.
 
-use crate::datamodel::{self, Equation, Project, Variable};
 use crate::ltm_loop_scores_test_support::loop_scores;
 use crate::test_common::TestProject;
+use simlin_base::datamodel::{self, Equation, Project, Variable};
 
 type Arm = (
     String,

@@ -17,7 +17,7 @@ use std::collections::HashMap;
 
 use super::*;
 use crate::capture::CaptureKind;
-use crate::common::{Canonical, Ident, IdentMap};
+use simlin_base::common::{Canonical, Ident, IdentMap};
 
 #[salsa::tracked(returns(ref))]
 pub fn compute_layout(
@@ -118,7 +118,8 @@ pub fn compute_layout(
                     .dimensions
                     .iter()
                     .map(|dim_name| {
-                        let canonical = crate::common::CanonicalDimensionName::from_raw(dim_name);
+                        let canonical =
+                            simlin_base::common::CanonicalDimensionName::from_raw(dim_name);
                         dim_context.get(&canonical).map(|d| d.len()).unwrap_or(1)
                     })
                     .product()
@@ -201,7 +202,7 @@ enum Flatten {
     /// An arrayed variable -- explicit, or a structural capture helper (GH
     /// #1033) -- whose storage these dimensions describe: one key per
     /// element, row-major.
-    Elements(Vec<crate::dimensions::Dimension>),
+    Elements(Vec<simlin_base::dimensions::Dimension>),
     /// One key at the entry's base slot.
     Series,
 }
@@ -296,7 +297,8 @@ fn flatten_model(
             }
             Flatten::Module(None) | Flatten::Hidden => {}
             Flatten::Elements(dims) => {
-                for (j, subscripts) in crate::dimensions::SubscriptIterator::new(&dims).enumerate()
+                for (j, subscripts) in
+                    simlin_base::dimensions::SubscriptIterator::new(&dims).enumerate()
                 {
                     let element = format!("{name}[{}]", subscripts.join(","));
                     offsets.insert(
@@ -343,12 +345,12 @@ pub(crate) fn model_shape(
     model: SourceModel,
     project: SourceProject,
     overlay: LtmOverlay,
-) -> std::sync::Arc<crate::compiler::fragment::ModelShape> {
-    use crate::compiler::fragment::{DepShape, ModelShape, ShapeEntry};
+) -> std::sync::Arc<simlin_base::ast::ModelShape> {
+    use simlin_base::ast::{DepShape, ModelShape, ShapeEntry};
 
     let layout = compute_layout(db, model, project, overlay);
     let source_vars = model.variables(db);
-    let mut vars: crate::common::IdentMap<Ident<Canonical>, ShapeEntry> = Default::default();
+    let mut vars: simlin_base::common::IdentMap<Ident<Canonical>, ShapeEntry> = Default::default();
 
     for (name, svar) in source_vars.iter() {
         let Some(entry) = layout.get(name.as_str()) else {
@@ -420,8 +422,8 @@ pub(crate) fn module_dep_shape(
     project: SourceProject,
     model_name: &str,
     overlay: LtmOverlay,
-) -> crate::compiler::fragment::DepShape {
-    use crate::compiler::fragment::{DepShape, ModelShape};
+) -> simlin_base::ast::DepShape {
+    use simlin_base::ast::{DepShape, ModelShape};
 
     let sub_canonical = canonicalize(model_name);
     let shape = match project.models(db).get(sub_canonical.as_ref()) {

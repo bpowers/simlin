@@ -18,13 +18,14 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::common::{Canonical, Ident, IdentMap, IdentSet};
 use crate::db::{
     CycleClass, Db, LoopCircuitsResult, ModuleInputSet, SourceModel, SourceProject, SourceVariable,
-    SourceVariableKind, causal_graph_with_modules, classify_cycle, model_edge_shapes,
-    model_element_causal_edges, project_datamodel_dims, variable_direct_dependencies,
+    causal_graph_with_modules, classify_cycle, model_edge_shapes, model_element_causal_edges,
+    project_datamodel_dims, variable_direct_dependencies,
 };
 use crate::ltm::{Loop, strip_subscript};
+use crate::variable::SourceVariableKind;
+use simlin_base::common::{Canonical, Ident, IdentMap, IdentSet};
 
 use super::endpoint_dimensions;
 
@@ -35,8 +36,7 @@ use super::loops::{
 
 /// A pinned loop the LTM pipeline must always score, paired with the user's
 /// chosen name so a caller can map the synthetic `pin{n}` id back to a label.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct PinnedLoop {
     /// The fully-annotated scored loop(s) this pin resolves to, with stable
     /// pin-derived ids assigned in declaration order:
@@ -61,8 +61,7 @@ pub struct PinnedLoop {
 /// One model's resolved pinned loops, plus the names of pins that failed
 /// validation so the caller can surface a diagnostic without re-deriving the
 /// failure.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct PinnedLoopsResult {
     pub loops: Vec<PinnedLoop>,
     /// `(name, reason)` for each pinned loop whose variable set did not form a
@@ -132,7 +131,7 @@ impl PinnedLoopsResult {
 /// the `PartialEq`/`Update` salsa caching requires; callers invoke it directly
 /// off the salsa-tracked `causal_graph_with_modules` / `pinned_loops` inputs,
 /// so the underlying graph build is still incrementally cached.
-pub(crate) fn model_pinned_loops(
+pub fn model_pinned_loops(
     db: &dyn Db,
     model: SourceModel,
     project: SourceProject,
@@ -232,7 +231,7 @@ pub(crate) fn model_pinned_loops(
         // dimensions, matching the tiered enumerator's treatment of modules
         // as scalar graph nodes.
         let cycle_strs: Vec<String> = cycle.iter().map(|c| c.as_str().to_string()).collect();
-        let dim_lookup = |name: &str| -> Vec<crate::dimensions::Dimension> {
+        let dim_lookup = |name: &str| -> Vec<simlin_base::dimensions::Dimension> {
             endpoint_dimensions(db, model, project, name).unwrap_or_default()
         };
         let loops = match classify_cycle(&cycle_strs, edge_shapes, &dim_lookup) {
@@ -407,7 +406,7 @@ fn expand_pin_on_element_graph(
     project: SourceProject,
     var_graph: &crate::ltm::CausalGraph,
     cycle: &[Ident<Canonical>],
-    dm_dims: &[crate::datamodel::Dimension],
+    dm_dims: &[simlin_base::datamodel::Dimension],
 ) -> Result<Vec<Loop>, String> {
     let pin_var_set: HashSet<&str> = cycle.iter().map(|c| c.as_str()).collect();
 
@@ -516,7 +515,7 @@ fn build_a2a_pin_loop(
     cycle: &[Ident<Canonical>],
     id: String,
     canonical_dims: &[String],
-    dm_dims: &[crate::datamodel::Dimension],
+    dm_dims: &[simlin_base::datamodel::Dimension],
 ) -> Loop {
     let links = graph.circuit_to_links(cycle);
     let var_stocks = graph.find_stocks_in_loop(cycle);
@@ -526,7 +525,9 @@ fn build_a2a_pin_loop(
         .map(|canonical| {
             dm_dims
                 .iter()
-                .find(|dm| crate::common::canonicalize(dm.name()).as_ref() == canonical.as_str())
+                .find(|dm| {
+                    simlin_base::common::canonicalize(dm.name()).as_ref() == canonical.as_str()
+                })
                 .map(|dm| dm.name().to_string())
                 .unwrap_or_else(|| canonical.to_string())
         })

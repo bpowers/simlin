@@ -37,8 +37,9 @@
 //! (`scripts/lint-project.sh` rule 2); callers in the `db` submodules reach
 //! it via `crate::db::macro_registry::...`.
 
-use crate::datamodel;
-use crate::db::{Db, SourceProject, SourceVariable, SourceVariableKind, variable_source};
+use crate::db::{Db, SourceProject, SourceVariable, variable_source};
+use crate::variable::SourceVariableKind;
+use simlin_base::datamodel;
 
 /// The kind-tagged `datamodel::Variable` form of a macro-marked model's body
 /// variable.
@@ -108,16 +109,12 @@ fn macro_body_variable(db: &dyn Db, var: SourceVariable) -> datamodel::Variable 
 
 /// The result of building the per-project macro registry: the (possibly
 /// empty) resolution registry plus the build error, if any.
-/// Decoupled from `crate::common::Error`: the (typed `ErrorCode`, message)
+/// Decoupled from `simlin_base::common::Error`: the (typed `ErrorCode`, message)
 /// pair is everything the compile entry and the project-level diagnostic need
 /// (`sim_err!(NotSimulatable, msg)` plus the diagnostic's `ErrorCode`).
-// `Debug` is feature-gated to match `module_functions::MacroRegistry`,
-// whose `Debug` is only derived under `debug-derive`; an unconditional
-// `Debug` here would fail the default (non-`debug-derive`) build.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MacroRegistryResult {
-    pub registry: crate::module_functions::MacroRegistry,
+    pub registry: simlin_base::module_functions::MacroRegistry,
     /// `Some((code, message))` when `MacroRegistry::build` rejected the macro
     /// set (duplicate name, macro/model collision, recursion cycle, a module
     /// inside a macro body). `code` is `MacroRegistry::build`'s own typed
@@ -125,7 +122,7 @@ pub(crate) struct MacroRegistryResult {
     /// prose -- so the diagnostic is tagged with the authoritative code. The
     /// registry is then empty, which is REQUIRED, not merely tidy: see the
     /// cycle-safety note on [`project_macro_registry`]'s failure return.
-    pub build_error: Option<(crate::common::ErrorCode, String)>,
+    pub build_error: Option<(simlin_base::common::ErrorCode, String)>,
 }
 
 /// Reconstruct the project's `datamodel::Model` list from salsa inputs in
@@ -169,9 +166,9 @@ pub(crate) struct MacroRegistryResult {
 fn build_error_from_inputs(
     db: &dyn Db,
     project: SourceProject,
-) -> Option<(crate::common::ErrorCode, String)> {
+) -> Option<(simlin_base::common::ErrorCode, String)> {
     let models = reconstruct_project_models(db, project);
-    match crate::module_functions::MacroRegistry::build(&models) {
+    match simlin_base::module_functions::MacroRegistry::build(&models) {
         Ok(_) => None,
         Err(err) => Some((
             err.code,
@@ -312,7 +309,7 @@ pub(crate) fn project_macro_registry(db: &dyn Db, project: SourceProject) -> Mac
         // The full argument is on this function's rustdoc; do not weaken this
         // without reading it.
         return MacroRegistryResult {
-            registry: crate::module_functions::MacroRegistry::default(),
+            registry: simlin_base::module_functions::MacroRegistry::default(),
             build_error: Some((code, message)),
         };
     }
@@ -345,8 +342,8 @@ pub(crate) fn project_macro_registry(db: &dyn Db, project: SourceProject) -> Mac
         });
     }
 
-    let registry = crate::module_functions::MacroRegistry::build(&models)
-        .unwrap_or_else(|_| crate::module_functions::MacroRegistry::default());
+    let registry = simlin_base::module_functions::MacroRegistry::build(&models)
+        .unwrap_or_else(|_| simlin_base::module_functions::MacroRegistry::default());
     MacroRegistryResult {
         registry,
         build_error: None,
@@ -390,18 +387,20 @@ mod tests {
     //! `build_error_from_inputs` -> `MacroRegistry::build`).
 
     use super::project_macro_registry;
-    use crate::common::ErrorCode;
-    use crate::datamodel::{Aux, Equation, MacroSpec, Model, Variable};
     use crate::db::{SimlinDb, sync_from_datamodel, sync_from_datamodel_incremental};
-    use crate::module_functions::MacroRegistry;
     use crate::testutils::x_project;
+    use simlin_base::common::ErrorCode;
+    use simlin_base::datamodel::{Aux, Equation, MacroSpec, Model, Variable};
+    use simlin_base::module_functions::MacroRegistry;
 
     /// Drive the production salsa pipeline -- sync the project into a fresh
     /// `SimlinDb`, then read `project_macro_registry`'s `build_error`. This is
     /// what `compile_project_incremental` and the project-level diagnostic see,
     /// so the oracle locks in the *query*'s observable behavior, not an
     /// internal helper.
-    fn build_error_via_query(project: &crate::datamodel::Project) -> Option<(ErrorCode, String)> {
+    fn build_error_via_query(
+        project: &simlin_base::datamodel::Project,
+    ) -> Option<(ErrorCode, String)> {
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, project);
         project_macro_registry(&db, sync.project)
@@ -419,7 +418,7 @@ mod tests {
             gf: None,
             ai_state: None,
             uid: None,
-            compat: crate::datamodel::Compat::default(),
+            compat: simlin_base::datamodel::Compat::default(),
         })
     }
 
@@ -552,13 +551,13 @@ mod tests {
     fn ac5_7_macro_holding_a_module_propagates_through_the_reconstruction() {
         let mut mac = macro_model("mac", &["p1"], "p1 * 2");
         mac.variables
-            .push(Variable::Module(crate::datamodel::Module {
+            .push(Variable::Module(simlin_base::datamodel::Module {
                 ident: "u_hop".to_string(),
                 model_name: "u".to_string(),
                 documentation: String::new(),
                 units: None,
                 references: vec![],
-                compat: crate::datamodel::Compat::default(),
+                compat: simlin_base::datamodel::Compat::default(),
                 ai_state: None,
                 uid: None,
             }));

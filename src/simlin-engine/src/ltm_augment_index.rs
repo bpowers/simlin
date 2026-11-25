@@ -23,8 +23,8 @@
 //! line-count lint; included via `#[path]`, so `super::*` resolves the parent's
 //! private items and callers keep naming these `crate::ltm_augment::*`.
 
-use crate::ast::{Expr0, IndexExpr0};
-use crate::common::{Canonical, Ident, RawIdent, canonicalize};
+use simlin_base::ast::{Expr0, IndexExpr0};
+use simlin_base::common::{Canonical, Ident, RawIdent, canonicalize};
 
 use super::post_transform::qualify_axis_element;
 use super::{IteratedDimCtx, WrapCtx, WrapOutcome, child_path, wrap_non_matching_in_previous};
@@ -67,7 +67,7 @@ use super::{IteratedDimCtx, WrapCtx, WrapOutcome, child_path, wrap_non_matching_
 /// why each reaches this.
 fn qualify_element_index(
     index: &IndexExpr0,
-    dims_ctx: Option<&crate::dimensions::DimensionsContext>,
+    dims_ctx: Option<&simlin_base::dimensions::DimensionsContext>,
 ) -> Option<IndexExpr0> {
     let ctx = dims_ctx?;
     let IndexExpr0::Expr(Expr0::Var(name, loc)) = index else {
@@ -79,7 +79,7 @@ fn qualify_element_index(
     if ctx.lookup(&canonical).is_some() {
         return Some(index.clone());
     }
-    let elem = crate::common::CanonicalElementName::from_raw(&canonical);
+    let elem = simlin_base::common::CanonicalElementName::from_raw(&canonical);
     let dim_name = ctx.dimension_uniquely_containing_element(&elem)?;
     Some(IndexExpr0::Expr(Expr0::Var(
         RawIdent::new_from_str(&format!("{}\u{B7}{}", dim_name.as_str(), canonical)),
@@ -93,7 +93,7 @@ fn qualify_element_index(
 /// `axis` is the declared `Dimension` at this index's position of the
 /// subscripted variable, looked up in [`axis_dim_at`]. When it is known,
 /// every "is this a selector or a runtime read?" question below is answered by
-/// [`crate::dimensions::resolve_axis_index_name`] -- the SAME predicate
+/// [`simlin_base::dimensions::resolve_axis_index_name`] -- the SAME predicate
 /// `compiler::subscript::normalize_subscripts3` implements and that GH #986
 /// unified `ltm_agg::classify_axis_access` and
 /// `post_transform::pin_dimension_name_indices` onto. The wrap was the third
@@ -131,11 +131,11 @@ fn qualify_element_index(
 /// are named at their call sites and are their own change.
 fn index_axis_verdict(
     name: &str,
-    axis: Option<&crate::dimensions::Dimension>,
+    axis: Option<&simlin_base::dimensions::Dimension>,
     iter_ctx: Option<&IteratedDimCtx<'_>>,
-) -> Option<crate::dimensions::AxisIndexName> {
+) -> Option<simlin_base::dimensions::AxisIndexName> {
     let axis = axis?;
-    Some(crate::dimensions::resolve_axis_index_name(
+    Some(simlin_base::dimensions::resolve_axis_index_name(
         name,
         axis,
         |dim| {
@@ -164,7 +164,7 @@ pub(super) fn axis_dim_at<'a>(
     ctx: &WrapCtx<'a>,
     ident: &Ident<Canonical>,
     pos: usize,
-) -> Option<&'a crate::dimensions::Dimension> {
+) -> Option<&'a simlin_base::dimensions::Dimension> {
     ctx.iter_ctx?.dep_dims?.get(ident.as_str())?.get(pos)
 }
 
@@ -175,7 +175,7 @@ pub(super) fn wrap_index_non_matching_in_previous(
     skip_element_qualification: bool,
     path: &[u16],
     frozen: bool,
-    axis: Option<&crate::dimensions::Dimension>,
+    axis: Option<&simlin_base::dimensions::Dimension>,
 ) -> IndexExpr0 {
     // Only `dims_ctx` (element/dimension recognition) and `iter_ctx` (the
     // iterated-dim-name guard) are read directly here; the full wrap context
@@ -190,7 +190,7 @@ pub(super) fn wrap_index_non_matching_in_previous(
         _ => None,
     };
     if let Some(verdict) = &axis_verdict {
-        use crate::dimensions::AxisIndexName;
+        use simlin_base::dimensions::AxisIndexName;
         match verdict {
             // An element THIS axis declares: a static selector. Qualify it with
             // the axis's own dimension -- the only qualification that is right
@@ -279,7 +279,7 @@ pub(super) fn wrap_index_non_matching_in_previous(
     if axis_unknown
         && let IndexExpr0::Expr(Expr0::Var(name, _)) = &index
         && let Some(ctx) = dims_ctx
-        && ctx.is_element_of_any_dimension(&crate::common::CanonicalElementName::from_raw(
+        && ctx.is_element_of_any_dimension(&simlin_base::common::CanonicalElementName::from_raw(
             &canonicalize(name.as_str()),
         ))
     {

@@ -28,10 +28,10 @@
 //! `(x*2)*3` is left alone -- f64 multiplication is non-associative, so
 //! reassociation would change bits.
 
-use crate::ast::{ArrayView, BinaryOp};
-use crate::builtins::ArgKind;
 use crate::bytecode::Op2;
 use crate::vm::{eval_op2, is_truthy};
+use simlin_base::ast::{ArrayView, BinaryOp};
+use simlin_base::builtins::ArgKind;
 
 use super::dimensions::UnaryOp;
 use super::expr::{Expr, SubscriptIndex};
@@ -213,8 +213,8 @@ pub(crate) fn fold_constants(expr: Expr) -> Expr {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::Loc;
-    use crate::builtins::BuiltinFn;
+    use simlin_base::ast::Loc;
+    use simlin_base::builtins::BuiltinFn;
 
     fn c(v: f64) -> Expr {
         Expr::Const(v, Loc::default())
@@ -232,7 +232,7 @@ mod tests {
     /// a reference beyond copying it, so the tests only need distinguishable
     /// operands.
     fn vref(n: usize) -> crate::compiler::VarRef {
-        crate::compiler::VarRef::base(crate::common::Ident::new(&format!("v{n}")))
+        crate::compiler::VarRef::base(simlin_base::common::Ident::new(&format!("v{n}")))
     }
 
     fn assert_folds_to(expr: Expr, expected: f64) {
@@ -457,8 +457,8 @@ mod tests {
         }
 
         let expr = Expr::EvalModule(
-            crate::common::Ident::new("m"),
-            crate::common::Ident::new("model"),
+            simlin_base::common::Ident::new("m"),
+            simlin_base::common::Ident::new("model"),
             Default::default(),
             vec![op2(BinaryOp::Add, c(1.0), c(1.0)), var(0)],
         );

@@ -26,14 +26,14 @@ use crate::test_common::TestProject;
 use crate::testutils::x_module;
 
 /// The detected loops of `project`'s `main` model.
-fn detected(project: &crate::datamodel::Project) -> DetectedLoopsResult {
+fn detected(project: &simlin_base::datamodel::Project) -> DetectedLoopsResult {
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, project);
     model_detected_loops(&db, sync.models["main"].source, sync.project).clone()
 }
 
 /// `(id, polarity)` of the single detected loop of `project`'s `main` model.
-fn the_loop(project: &crate::datamodel::Project) -> (String, DetectedLoopPolarity) {
+fn the_loop(project: &simlin_base::datamodel::Project) -> (String, DetectedLoopPolarity) {
     let detected = detected(project);
     assert_eq!(
         detected.loops.len(),
@@ -50,7 +50,7 @@ fn the_loop(project: &crate::datamodel::Project) -> (String, DetectedLoopPolarit
 
 /// The static polarity of the parent-model edge `from -> to` as the loop
 /// builders read it.
-fn edge_polarity(project: &crate::datamodel::Project, from: &str, to: &str) -> LinkPolarity {
+fn edge_polarity(project: &simlin_base::datamodel::Project, from: &str, to: &str) -> LinkPolarity {
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, project);
     let graph = causal_graph_with_modules(&db, sync.models["main"].source, sync.project);
@@ -59,7 +59,7 @@ fn edge_polarity(project: &crate::datamodel::Project, from: &str, to: &str) -> L
 
 /// A stock `s` whose inflow `f` is a stdlib module call closed through
 /// `tau = 2 + 0.02 * s`: `s -> tau -> module -> f -> s`.
-fn stdlib_delay_port_project(flow_eqn: &str) -> crate::datamodel::Project {
+fn stdlib_delay_port_project(flow_eqn: &str) -> simlin_base::datamodel::Project {
     TestProject::new("delay_port")
         .with_sim_time(0.0, 30.0, 0.5)
         .stock("s", "50", &["f"], &[], None)
@@ -73,10 +73,10 @@ fn stdlib_delay_port_project(flow_eqn: &str) -> crate::datamodel::Project {
 /// (`x_module` instantiates the model of the same name) whose read output is
 /// `f_eqn`'s reference.
 fn user_module_project(
-    sub_model: crate::datamodel::Model,
+    sub_model: simlin_base::datamodel::Model,
     refs: &[(&str, &str)],
     f_eqn: &str,
-) -> crate::datamodel::Project {
+) -> simlin_base::datamodel::Project {
     let main = x_model(
         "main",
         vec![

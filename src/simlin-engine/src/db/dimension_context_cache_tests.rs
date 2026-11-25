@@ -15,7 +15,7 @@
 //! not testable here -- each query body IS that rebuild.
 
 use super::*;
-use crate::datamodel;
+use simlin_base::datamodel;
 
 /// Build a two-dimension project with a single scalar variable.
 fn two_dim_project() -> datamodel::Project {
@@ -67,7 +67,7 @@ fn test_dimension_context_recomputes_on_dimension_change() {
     let state1 = sync_from_datamodel_incremental(&mut db, &project, None);
     let sync1 = state1.to_sync_result();
 
-    let dim_a = crate::common::CanonicalDimensionName::from_raw("DimA");
+    let dim_a = simlin_base::common::CanonicalDimensionName::from_raw("DimA");
     let len_before = project_dimensions_context(&db, sync1.project)
         .get(&dim_a)
         .map(|d| d.len());
@@ -97,7 +97,7 @@ fn test_dimension_context_recomputes_on_dimension_change() {
     );
 
     // Cross-check against a freshly-built context to pin behavior-preservation.
-    let fresh = crate::dimensions::DimensionsContext::from(
+    let fresh = simlin_base::dimensions::DimensionsContext::from(
         project_datamodel_dims(&db, sync2.project).as_slice(),
     );
     assert_eq!(*project_dimensions_context(&db, sync2.project), fresh);

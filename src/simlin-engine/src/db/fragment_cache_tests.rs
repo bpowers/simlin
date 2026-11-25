@@ -6,13 +6,13 @@ use std::sync::Arc;
 
 use salsa::plumbing::AsId;
 
-use crate::datamodel;
 use crate::db::{
     DiagnosticSeverity, ModuleInputSet, SimlinDb, assemble_module, assemble_simulation,
     collect_all_diagnostics, compile_project_incremental, compile_var_fragment, compute_layout,
     model_dependency_graph, sync_from_datamodel, sync_from_datamodel_incremental,
 };
 use crate::test_common::TestProject;
+use simlin_base::datamodel;
 
 /// Build a minimal `aux` variable with a scalar equation (keeps the test
 /// bodies below readable -- the datamodel `Aux` literal is verbose).
@@ -657,7 +657,7 @@ fn test_init_feedback_does_not_create_dt_cycle() {
     let model = sync.models["main"].source;
     let dep_graph = model_dependency_graph(&db, model, sync.project, ModuleInputSet::empty(&db));
 
-    let b = crate::common::Ident::new("b");
+    let b = simlin_base::common::Ident::new("b");
     assert!(
         deps.deps.reads_local(&b),
         "INIT(b) should remain a read for fragment compilation context"
@@ -1631,7 +1631,7 @@ fn test_is_root_shift_machineries_in_lockstep() {
     // at the implicit-var boundary.
     assert_eq!(
         root_layout.get("aaa").expect("aaa").offset,
-        crate::vm::IMPLICIT_VAR_COUNT,
+        simlin_base::results::IMPLICIT_VAR_COUNT,
         "the first body variable must start at IMPLICIT_VAR_COUNT in the root layout"
     );
 
@@ -1707,10 +1707,13 @@ fn test_is_root_shift_machineries_in_lockstep() {
         root_layout.n_slots,
         "assembled simulation n_slots must equal the root-shifted layout n_slots"
     );
-    assert_eq!(sim.get_offset(&crate::common::Ident::new("time")), Some(0));
     assert_eq!(
-        sim.get_offset(&crate::common::Ident::new("aaa")),
-        Some(crate::vm::IMPLICIT_VAR_COUNT)
+        sim.get_offset(&simlin_base::common::Ident::new("time")),
+        Some(0)
+    );
+    assert_eq!(
+        sim.get_offset(&simlin_base::common::Ident::new("aaa")),
+        Some(simlin_base::results::IMPLICIT_VAR_COUNT)
     );
 }
 
@@ -1729,7 +1732,7 @@ fn test_is_root_shift_machineries_in_lockstep() {
 ///      hit (salsa never re-ran it because none of its stdlib inputs changed).
 #[test]
 fn test_stdlib_inputs_are_one_shot_and_stable_across_syncs() {
-    use crate::canonicalize;
+    use simlin_base::canonicalize;
 
     let mut db = SimlinDb::default();
     let project = datamodel::Project {

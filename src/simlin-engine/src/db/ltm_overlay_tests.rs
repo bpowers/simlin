@@ -11,13 +11,13 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use super::*;
-use crate::common::{Canonical, Ident};
 use crate::db::exec_probe::ProbedDb;
 use crate::db::var_fragment::{
     DeclaredName, fragment_overlay, fragment_reads_module, implicit_fragment_overlay,
     implicit_fragment_reads_module,
 };
 use crate::test_common::TestProject;
+use simlin_base::common::{Canonical, Ident};
 
 /// The overlay keys two kinds of memo: a model's own layout, assembly and
 /// diagnostics, and the shape a cross-module read resolves through

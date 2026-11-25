@@ -61,11 +61,10 @@ describe('package entry loads the global stylesheets', () => {
   // package entry included — is declared pure. A bundler then re-exports
   // Editor without ever *including* index.js, so its bare CSS imports are
   // never walked and reset/theme silently vanish from the consumer's
-  // bundle (this is exactly how simlin-serve shipped black diagrams; the
-  // CSS-module styles survive only because their default-export bindings
-  // are used). Any module whose side-effect-only CSS import is
-  // load-bearing must therefore be listed in `sideEffects` itself, for
-  // both build outputs.
+  // bundle (the diagram then renders black; the CSS-module styles survive
+  // only because their default-export bindings are used). Any module whose
+  // side-effect-only CSS import is load-bearing must therefore be listed in
+  // `sideEffects` itself, for both build outputs.
   it('package.json sideEffects lists the modules that carry bare CSS imports', () => {
     const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8')) as {
       sideEffects: string[];

@@ -1359,7 +1359,7 @@ def _span(rec_idx: int, name: str, start: int, length: int = 1) -> vdf_xray.Deco
 class StandaloneLookupOnlyDescriptorTests(unittest.TestCase):
     """
     Port of the Rust `standalone_descriptor_tests` module
-    (src/simlin-engine/src/vdf/record_results.rs): the pure standalone
+    (src/simlin-formats/src/vdf/record_results.rs): the pure standalone
     lookup-only descriptor detection over synthetic inputs.
     """
 
@@ -2024,7 +2024,7 @@ class DecodedRecordSpanClassCodeGuardTests(unittest.TestCase):
 class ExtractJsonTests(unittest.TestCase):
     """
     Tests for the machine-readable `--extract-json` mode consumed by the Rust
-    differential parity harness (tests/integration/vdf_parity.rs).
+    differential parity harness (src/simlin-tests/tests/integration/vdf_parity.rs).
     """
 
     def _payload(self, relpaths: list[str]) -> dict:

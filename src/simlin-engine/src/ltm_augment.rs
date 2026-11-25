@@ -10,15 +10,15 @@
 //! is expressed explicitly with `TIME <= INITIAL_TIME` and every score's first
 //! value is at the step after the start.
 
-use crate::ast::{Expr0, IndexExpr0, print_eqn};
-use crate::builtins::{BuiltinSig, Invariance, UntypedBuiltinFn};
-use crate::canonicalize;
-use crate::common::{Canonical, Ident, IdentMap, IdentSet, RawIdent};
-use crate::datamodel::{self, Equation};
-#[cfg(test)]
-use crate::lexer::LexerType;
 use crate::ltm::{Loop, normalize_module_ref, split_node_subscript, strip_subscript};
 use crate::variable::{VarKind, Variable, identifier_set};
+use simlin_base::ast::{Expr0, IndexExpr0, print_eqn};
+use simlin_base::builtins::{BuiltinSig, Invariance, UntypedBuiltinFn};
+use simlin_base::canonicalize;
+use simlin_base::common::{Canonical, Ident, IdentMap, IdentSet, RawIdent};
+use simlin_base::datamodel::{self, Equation};
+#[cfg(test)]
+use simlin_base::lexer::LexerType;
 use std::collections::{HashMap, HashSet};
 
 use crate::db::LtmEquation;
@@ -87,7 +87,7 @@ pub(crate) struct IteratedDimCtx<'a> {
     /// implicit/synthetic name with no resolvable declaration) keeps the
     /// historical permissive collapse: declaring an unresolvable dep a
     /// mismatch would loud-skip edges that are correct today.
-    pub dep_dims: Option<&'a HashMap<String, Vec<crate::dimensions::Dimension>>>,
+    pub dep_dims: Option<&'a HashMap<String, Vec<simlin_base::dimensions::Dimension>>>,
 }
 
 /// Does `name` (case-insensitively) name an array-reducing builtin in the
@@ -125,7 +125,11 @@ fn is_time_dependent_builtin(name: &str) -> bool {
 /// arguments make each call its own, and a `TIME` in a subscript index, whose
 /// first-DT value must be the un-lagged index -- is the call lagged whole by
 /// [`freeze_at_previous`], arguments verbatim.
-fn freeze_clock_read(call: Expr0, loc: crate::builtins::Loc, in_subscript_index: bool) -> Expr0 {
+fn freeze_clock_read(
+    call: Expr0,
+    loc: simlin_base::builtins::Loc,
+    in_subscript_index: bool,
+) -> Expr0 {
     if !in_subscript_index
         && let Expr0::App(UntypedBuiltinFn(name, args), _) = &call
         && args.is_empty()
@@ -255,7 +259,7 @@ struct WrapCtx<'a> {
     /// GH #511 iterated-dimension context (`None` for a scalar live source).
     iter_ctx: Option<&'a IteratedDimCtx<'a>>,
     /// Project dims context for [`qualify_element_index`] (GH #587).
-    dims_ctx: Option<&'a crate::dimensions::DimensionsContext>,
+    dims_ctx: Option<&'a simlin_base::dimensions::DimensionsContext>,
     /// The occurrence IR for the slot being wrapped -- the single classifier
     /// family. Every per-occurrence access-shape / iterated-collapse /
     /// other-dep-verdict decision the wrap makes is a lookup here by the
@@ -411,7 +415,7 @@ fn other_dep_verdict(
 /// index-nested read, is not one), in which case the call stays live, clock
 /// included: the isolated input and the clock are then inseparable inside one
 /// call, and the score attributes that call's whole change to the input (the
-/// stated residual, pinned by `tests/integration/ltm_frozen_clock.rs`). Inside
+/// stated residual, pinned by `simlin-tests/tests/integration/ltm_frozen_clock.rs`). Inside
 /// a subtree the wrap is about to lag (`frozen`: a frozen dep's subscript
 /// index) the call is left verbatim, because the enclosing synthesized freeze
 /// already lags it once -- a capture evaluates the whole `arr[TIME]` at `t`
@@ -854,7 +858,7 @@ fn wrap_non_matching_in_previous(
             // `idx`, misattributing its movement to whichever source the partial
             // isolates -- a wrong number with no diagnostic. So the indices go
             // through the wrap's own index pass like any other other-dep.
-            if crate::builtins::BuiltinSig::name_reads_a_table(&name.to_ascii_lowercase())
+            if simlin_base::builtins::BuiltinSig::name_reads_a_table(&name.to_ascii_lowercase())
                 && !args.is_empty()
             {
                 // Child indices match the `Expr2` walk, which counts the skipped
@@ -1165,7 +1169,7 @@ pub(crate) fn build_partial_equation_shaped(
     live_shape: &RefShape,
     source_dim_elements: &[Vec<String>],
     iter_ctx: Option<&IteratedDimCtx<'_>>,
-    dims_ctx: Option<&crate::dimensions::DimensionsContext>,
+    dims_ctx: Option<&simlin_base::dimensions::DimensionsContext>,
 ) -> Result<String, PartialEquationError> {
     build_partial_equation_shaped_with_live_ref(
         equation_text,
@@ -1216,7 +1220,7 @@ pub(crate) fn build_partial_equation_shaped_with_live_ref(
     live_shape: &RefShape,
     source_dim_elements: &[Vec<String>],
     iter_ctx: Option<&IteratedDimCtx<'_>>,
-    dims_ctx: Option<&crate::dimensions::DimensionsContext>,
+    dims_ctx: Option<&simlin_base::dimensions::DimensionsContext>,
 ) -> Result<(String, Option<Expr0>), PartialEquationError> {
     // This is a genuine TEXT entry point (the unit tests spell the target
     // equation as a string), so the parse happens here, once, rather than inside
@@ -1277,8 +1281,8 @@ pub(crate) use wrap_test_support::{
 /// wrap itself.
 ///
 /// `target_expr` is the target equation's own AST, lowered from its `Expr2`
-/// by [`crate::patch::expr2_to_expr0`] -- **not** parsed from printed text.
-/// Track A's generation half deleted that round trip: `patch::expr2_to_string`
+/// by [`simlin_base::ast::expr2_to_expr0`] -- **not** parsed from printed text.
+/// Track A's generation half deleted that round trip: `ast::expr2_to_string`
 /// IS `print_eqn(expr2_to_expr0(..))`, so parsing its output back was a parse of
 /// our own print of the very tree we already had in this shape. Two things
 /// follow, and the second is the load-bearing one:
@@ -1306,7 +1310,7 @@ fn wrap_changed_first_ast(
     live_shape: &RefShape,
     live_reducer_text: Option<&str>,
     iter_ctx: Option<&IteratedDimCtx<'_>>,
-    dims_ctx: Option<&crate::dimensions::DimensionsContext>,
+    dims_ctx: Option<&simlin_base::dimensions::DimensionsContext>,
     occ: &OccurrenceLookup<'_>,
     pin: Option<&PerElementRefCtx<'_>>,
 ) -> (Expr0, WrapOutcome) {
@@ -1674,7 +1678,7 @@ fn shaped_guard_form_text(
     source_dim_elements: &[Vec<String>],
     source_dim_names: &[String],
     iter_ctx: Option<&IteratedDimCtx<'_>>,
-    dims_ctx: Option<&crate::dimensions::DimensionsContext>,
+    dims_ctx: Option<&simlin_base::dimensions::DimensionsContext>,
     target_ref: &str,
     gf_table_ref: Option<&str>,
     occ: &OccurrenceLookup<'_>,
@@ -2204,11 +2208,11 @@ pub(crate) struct DepElementPin {
 /// emit a score computed around a hole.
 pub(crate) fn unresolvable_dimension_index(
     expr: &Expr0,
-    dims_ctx: &crate::dimensions::DimensionsContext,
+    dims_ctx: &simlin_base::dimensions::DimensionsContext,
 ) -> Option<String> {
     fn walk(
         expr: &Expr0,
-        dims_ctx: &crate::dimensions::DimensionsContext,
+        dims_ctx: &simlin_base::dimensions::DimensionsContext,
         found: &mut Option<String>,
     ) {
         if found.is_some() {
@@ -2256,8 +2260,8 @@ pub(crate) fn unresolvable_dimension_index(
 /// The `IndexExpr0` a pin entry's element spelling becomes.
 fn pin_index(elem: &str) -> IndexExpr0 {
     IndexExpr0::Expr(Expr0::Var(
-        crate::common::RawIdent::new_from_str(elem),
-        crate::ast::Loc::default(),
+        simlin_base::common::RawIdent::new_from_str(elem),
+        simlin_base::ast::Loc::default(),
     ))
 }
 
@@ -2355,7 +2359,7 @@ fn subscript_idents_in_expr0(
 ///
 /// `to_elem_eqn` is the target's OWN equation AST for this element (the hoisted
 /// reducers still spelled `SUM(...)`, NOT agg-substituted -- Track A stage 1),
-/// lowered straight from its `Expr2` by [`crate::patch::expr2_to_expr0`]: the
+/// lowered straight from its `Expr2` by [`simlin_base::ast::expr2_to_expr0`]: the
 /// shared A2A body for an `Equation::ApplyToAll` target, or the matching
 /// per-element slot (or the default slot) for an `Equation::Arrayed` one. `reducer_subst` maps each hoisted reducer's
 /// canonical text to its agg name; it is empty for a true scalar `from`. `to_deps`
@@ -2425,10 +2429,10 @@ pub(crate) fn generate_scalar_to_element_equation(
     to_deps_to_subscript: &IdentMap<Ident<Canonical>, DepElementPin>,
     source_ref_override: Option<&str>,
     source_pins: &[(Ident<Canonical>, DepElementPin)],
-    dims_ctx: Option<&crate::dimensions::DimensionsContext>,
+    dims_ctx: Option<&simlin_base::dimensions::DimensionsContext>,
     gf_table_ref: Option<&str>,
     occ: &OccurrenceLookup<'_>,
-    dep_dims: Option<&HashMap<String, Vec<crate::dimensions::Dimension>>>,
+    dep_dims: Option<&HashMap<String, Vec<simlin_base::dimensions::Dimension>>>,
     freeze_helpers: &mut Vec<ArrayFreezeHelper>,
 ) -> Result<String, PartialEquationError> {
     let from_canonical = Ident::new(from);
@@ -2590,12 +2594,12 @@ pub(crate) fn generate_per_element_link_equation(
     to_elem_eqn: &Expr0,
     to_deps: &IdentSet<Ident<Canonical>>,
     to_deps_to_subscript: &IdentMap<Ident<Canonical>, DepElementPin>,
-    from_dims: &[crate::dimensions::Dimension],
+    from_dims: &[simlin_base::dimensions::Dimension],
     target_elem_by_dim: &HashMap<String, (String, usize)>,
-    target_dims: &[crate::dimensions::Dimension],
+    target_dims: &[simlin_base::dimensions::Dimension],
     target_elements: &[String],
     target_iterated_dims: &[String],
-    dims_ctx: &crate::dimensions::DimensionsContext,
+    dims_ctx: &simlin_base::dimensions::DimensionsContext,
     gf_table_ref: Option<&str>,
     occ: &OccurrenceLookup<'_>,
 ) -> Result<String, PartialEquationError> {
@@ -2737,7 +2741,7 @@ pub(crate) fn generate_agg_to_scalar_target_equation(
     to_own_eqn: &Expr0,
     reducer_subst: &HashMap<String, String>,
     to_deps: &IdentSet<Ident<Canonical>>,
-    dims_ctx: Option<&crate::dimensions::DimensionsContext>,
+    dims_ctx: Option<&simlin_base::dimensions::DimensionsContext>,
     gf_table_ref: Option<&str>,
     occ: &OccurrenceLookup<'_>,
 ) -> Result<String, PartialEquationError> {
@@ -2791,7 +2795,7 @@ fn live_reducer_text_for_agg<'a>(
 /// the number `1` then the identifier `stock`), and a name the lexer resolves to
 /// a KEYWORD (`if`, `mod`, `nan`, ...).
 ///
-/// The leading-character and keyword rules are [`crate::ast::needs_quoting`],
+/// The leading-character and keyword rules are [`simlin_base::ast::needs_quoting`],
 /// the same predicate the `print_eqn` path's `print_ident` uses -- so the two
 /// spellings of one name inside a single generated equation cannot disagree.
 /// A test of "every char is alphanumeric or `_`" is not that predicate: a
@@ -2810,8 +2814,8 @@ fn live_reducer_text_for_agg<'a>(
 /// conjunction can only ever add quotes. `quote_ident_needs_both_of_its_conjuncts`
 /// pins each conjunct on the row only it rejects.
 pub(crate) fn quote_ident(ident: &str) -> String {
-    let bare_spellable =
-        ident.chars().all(|c| c.is_alphanumeric() || c == '_') && !crate::ast::needs_quoting(ident);
+    let bare_spellable = ident.chars().all(|c| c.is_alphanumeric() || c == '_')
+        && !simlin_base::ast::needs_quoting(ident);
     if bare_spellable {
         ident.to_string()
     } else {
@@ -2952,7 +2956,7 @@ pub(crate) fn generate_loop_score_variables(
 /// shipped all of that in every build; GH #464). The feature build re-creates
 /// the instrumentation: it logs cumulative loop-score equation bytes and RSS
 /// at power-of-two sample points plus every 10,000 loops. Enable it with
-/// `cargo run --release --example ltm_full_bench --features ltm_bench -- <mdl>`.
+/// `cargo run --release -p simlin-tests --features instruments,ltm_bench --example ltm_full_bench -- <mdl>`.
 mod loop_score_trace {
     #[cfg(feature = "ltm_bench")]
     pub(super) struct LoopScoreTrace {
@@ -3178,7 +3182,7 @@ fn source_dim_names_for(
 /// The target equation's iterated dimension names (canonical), or `&[]`
 /// when the target is scalar. Used to build the GH #511 [`IteratedDimCtx`].
 fn target_iterated_dim_names_canonical(to_var: &Variable) -> Vec<String> {
-    use crate::ast::Ast;
+    use simlin_base::ast::Ast;
     match to_var.ast() {
         Some(Ast::ApplyToAll(dims, _)) | Some(Ast::Arrayed(dims, _, _, _)) => {
             dims.iter().map(|d| d.name().to_string()).collect()
@@ -3227,8 +3231,8 @@ pub(crate) fn generate_link_score_equation_for_link(
     source_dim_elements: &[Vec<String>],
     to_var: &Variable,
     all_vars: &crate::variable::LoweredVariableMap,
-    dim_ctx: Option<&crate::dimensions::DimensionsContext>,
-    dep_dims: Option<&HashMap<String, Vec<crate::dimensions::Dimension>>>,
+    dim_ctx: Option<&simlin_base::dimensions::DimensionsContext>,
+    dep_dims: Option<&HashMap<String, Vec<simlin_base::dimensions::Dimension>>>,
     to_occurrences: &[OccurrenceSite],
     freeze_helpers: &mut Vec<ArrayFreezeHelper>,
 ) -> Result<LtmEquation, PartialEquationError> {
@@ -3261,8 +3265,8 @@ fn generate_link_score_equation(
     source_dim_elements: &[Vec<String>],
     to_var: &Variable,
     all_vars: &crate::variable::LoweredVariableMap,
-    dim_ctx: Option<&crate::dimensions::DimensionsContext>,
-    dep_dims: Option<&HashMap<String, Vec<crate::dimensions::Dimension>>>,
+    dim_ctx: Option<&simlin_base::dimensions::DimensionsContext>,
+    dep_dims: Option<&HashMap<String, Vec<simlin_base::dimensions::Dimension>>>,
     to_occurrences: &[OccurrenceSite],
     freeze_helpers: &mut Vec<ArrayFreezeHelper>,
 ) -> Result<LtmEquation, PartialEquationError> {
@@ -3405,7 +3409,7 @@ pub(crate) fn link_score_guard(target_ref: &str, source_ref: &str, score: &str) 
 /// parse-synthesized helper has no text of its own and names its axes
 /// canonically on its lowered `ast()`; a module has neither.
 fn target_equation_dims(var: &Variable) -> Option<Vec<String>> {
-    use crate::ast::Ast;
+    use simlin_base::ast::Ast;
     let dims: Vec<String> = match var.eqn.as_ref() {
         Some(Equation::Scalar(_)) => return None,
         Some(Equation::ApplyToAll(dims, _) | Equation::Arrayed(dims, _, _, _)) => dims.clone(),
@@ -3466,14 +3470,14 @@ fn build_arrayed_link_score_equation(
     source_dim_elements: &[Vec<String>],
     source_dim_names: &[String],
     target_dim_names: Vec<String>,
-    target_ast_dims: &[crate::dimensions::Dimension],
-    per_elem: &IdentMap<crate::common::CanonicalElementName, crate::ast::Expr2>,
-    default_expr: Option<&crate::ast::Expr2>,
+    target_ast_dims: &[simlin_base::dimensions::Dimension],
+    per_elem: &IdentMap<simlin_base::common::CanonicalElementName, simlin_base::ast::Expr2>,
+    default_expr: Option<&simlin_base::ast::Expr2>,
     apply_default_to_missing: bool,
     target_ref: &str,
     to_var: &Variable,
-    dim_ctx: Option<&crate::dimensions::DimensionsContext>,
-    dep_dims: Option<&HashMap<String, Vec<crate::dimensions::Dimension>>>,
+    dim_ctx: Option<&simlin_base::dimensions::DimensionsContext>,
+    dep_dims: Option<&HashMap<String, Vec<simlin_base::dimensions::Dimension>>>,
     to_occurrences: &[OccurrenceSite],
     freeze_helpers: &mut Vec<ArrayFreezeHelper>,
 ) -> Result<LtmEquation, PartialEquationError> {
@@ -3525,12 +3529,12 @@ fn build_arrayed_link_score_equation(
     } else {
         ZeroSlotPolicy::OmitStructuralZero
     };
-    let slot_equation = |expr: &crate::ast::Expr2,
+    let slot_equation = |expr: &simlin_base::ast::Expr2,
                          gf_table_ref: Option<&str>,
                          slot: u16,
                          freeze_helpers: &mut Vec<ArrayFreezeHelper>|
      -> Result<Option<String>, PartialEquationError> {
-        let elem_eqn = crate::patch::expr2_to_expr0(expr);
+        let elem_eqn = simlin_base::ast::expr2_to_expr0(expr);
         // Per-element dependency set: walk *only this slot's* expression
         // (the union over all elements -- what `identifier_set` on the
         // whole `Ast::Arrayed` returns -- would over-freeze refs absent
@@ -3538,7 +3542,7 @@ fn build_arrayed_link_score_equation(
         // element-name subscripts of the *target*'s dims are filtered out;
         // strip the *source*'s dim/element names afterward (see above).
         let classified = crate::variable::classify_dependencies(
-            &crate::ast::Ast::Scalar(expr.clone()),
+            &simlin_base::ast::Ast::Scalar(expr.clone()),
             target_ast_dims,
             None,
         );
@@ -3573,8 +3577,10 @@ fn build_arrayed_link_score_equation(
     // Resolved once for the whole target -- see `WithLookupSlotRefs`.
     let slot_refs = WithLookupSlotRefs::new(to_var, target_ast_dims);
 
-    let mut sorted_slots: Vec<(&crate::common::CanonicalElementName, &crate::ast::Expr2)> =
-        per_elem.iter().collect();
+    let mut sorted_slots: Vec<(
+        &simlin_base::common::CanonicalElementName,
+        &simlin_base::ast::Expr2,
+    )> = per_elem.iter().collect();
     sorted_slots.sort_by(|a, b| a.0.cmp(b.0));
 
     // A slot the policy omitted is simply absent from `elements`; nothing is
@@ -3619,7 +3625,7 @@ fn build_arrayed_link_score_equation(
 }
 
 /// The ceteris-paribus wrap's input AST for a Scalar/ApplyToAll target: its
-/// lowered body ([`crate::patch::expr2_to_expr0`]), which involves no text.
+/// lowered body ([`simlin_base::ast::expr2_to_expr0`]), which involves no text.
 ///
 /// A target with no such body is declined (`MissingTypedTarget`), never
 /// scored: `ast()` is `None` exactly when the target's `Expr0 -> Expr2`
@@ -3633,10 +3639,10 @@ fn build_arrayed_link_score_equation(
 /// ([`build_arrayed_link_score_equation`]) and is declined the same way if it
 /// reaches this scalar path.
 fn scalar_or_a2a_target_expr(target_var: &Variable) -> Result<Expr0, PartialEquationError> {
-    use crate::ast::Ast;
+    use simlin_base::ast::Ast;
     match target_var.ast() {
         Some(Ast::Scalar(expr) | Ast::ApplyToAll(_, expr)) => {
-            Ok(crate::patch::expr2_to_expr0(expr))
+            Ok(simlin_base::ast::expr2_to_expr0(expr))
         }
         Some(Ast::Arrayed(..)) | None => Err(PartialEquationError::missing_typed_target(
             target_var.ident.as_str(),
@@ -3676,11 +3682,11 @@ fn scalar_or_a2a_target_deps(
     source_dim_elements: &[Vec<String>],
     source_dim_names: &[String],
 ) -> IdentSet<Ident<Canonical>> {
-    use crate::ast::Ast;
+    use simlin_base::ast::Ast;
     let Some(ast) = to_var.ast() else {
         return IdentSet::default();
     };
-    let target_ast_dims: &[crate::dimensions::Dimension] = match ast {
+    let target_ast_dims: &[simlin_base::dimensions::Dimension] = match ast {
         Ast::ApplyToAll(dims, _) | Ast::Arrayed(dims, _, _, _) => dims,
         Ast::Scalar(_) => &[],
     };
@@ -3705,12 +3711,12 @@ fn generate_auxiliary_to_auxiliary_equation(
     source_dim_elements: &[Vec<String>],
     source_dim_names: &[String],
     to_var: &Variable,
-    dim_ctx: Option<&crate::dimensions::DimensionsContext>,
-    dep_dims: Option<&HashMap<String, Vec<crate::dimensions::Dimension>>>,
+    dim_ctx: Option<&simlin_base::dimensions::DimensionsContext>,
+    dep_dims: Option<&HashMap<String, Vec<simlin_base::dimensions::Dimension>>>,
     to_occurrences: &[OccurrenceSite],
     freeze_helpers: &mut Vec<ArrayFreezeHelper>,
 ) -> Result<LtmEquation, PartialEquationError> {
-    use crate::ast::Ast;
+    use simlin_base::ast::Ast;
 
     let to_q = quote_ident(to.as_str());
 
@@ -4029,7 +4035,7 @@ pub(crate) fn generate_net_flow_equation(
 /// invariant to whether the stock's flows are written separately or as one
 /// net flow (the paper's section 4.4). No `dt` appears: the ratio of two
 /// flow deltas is dimensionless as written, and an isolated loop scores
-/// exactly `+/-1` at every `dt` (`tests/integration/ltm_dt_invariance.rs`).
+/// exactly `+/-1` at every `dt` (`simlin-tests/tests/integration/ltm_dt_invariance.rs`).
 ///
 /// The result is shaped like the stock: `Equation::Scalar` for a scalar
 /// stock, `Equation::ApplyToAll(stock_dims, _)` for an arrayed one, the flow
@@ -4083,14 +4089,14 @@ fn generate_stock_to_flow_equation(
     source_dim_elements: &[Vec<String>],
     source_dim_names: &[String],
     flow_var: &Variable,
-    dim_ctx: Option<&crate::dimensions::DimensionsContext>,
-    dep_dims: Option<&HashMap<String, Vec<crate::dimensions::Dimension>>>,
+    dim_ctx: Option<&simlin_base::dimensions::DimensionsContext>,
+    dep_dims: Option<&HashMap<String, Vec<simlin_base::dimensions::Dimension>>>,
     to_occurrences: &[OccurrenceSite],
     freeze_helpers: &mut Vec<ArrayFreezeHelper>,
 ) -> Result<LtmEquation, PartialEquationError> {
     // For stock-to-flow, we need to calculate how the stock influences the flow
     // This is similar to auxiliary-to-auxiliary but we know the 'from' is a stock
-    use crate::ast::Ast;
+    use simlin_base::ast::Ast;
 
     // The stock-to-flow guard form uses the flow name as the (element-wise
     // within an `Equation::Arrayed` slot) target reference.
@@ -4457,14 +4463,14 @@ pub(crate) use crate::ltm_agg::ReducerKind;
 /// For `Dimension::Indexed`, returns one-based index strings ("1", "2", ...).
 /// The engine uses 1-based indexing for indexed dimensions (see
 /// `dimensions.rs` `SubscriptIterator` which formats as `elem + 1`).
-pub(crate) fn dimension_element_names(dim: &crate::dimensions::Dimension) -> Vec<String> {
+pub(crate) fn dimension_element_names(dim: &simlin_base::dimensions::Dimension) -> Vec<String> {
     match dim {
-        crate::dimensions::Dimension::Named(_, named) => named
+        simlin_base::dimensions::Dimension::Named(_, named) => named
             .elements
             .iter()
             .map(|e| e.as_str().to_string())
             .collect(),
-        crate::dimensions::Dimension::Indexed(_, size) => {
+        simlin_base::dimensions::Dimension::Indexed(_, size) => {
             (1..=*size).map(|i| i.to_string()).collect()
         }
     }
@@ -4493,7 +4499,7 @@ pub(crate) fn dimension_element_names(dim: &crate::dimensions::Dimension) -> Vec
 /// bare original would.
 pub(crate) fn qualify_element_csv(
     element_csv: &str,
-    dims: &[crate::dimensions::Dimension],
+    dims: &[simlin_base::dimensions::Dimension],
 ) -> String {
     let parts: Vec<&str> = element_csv.split(',').collect();
     if parts.len() != dims.len() {
@@ -4503,9 +4509,9 @@ pub(crate) fn qualify_element_csv(
         .iter()
         .zip(dims)
         .map(|(part, dim)| match dim {
-            crate::dimensions::Dimension::Named(dim_name, named) => {
+            simlin_base::dimensions::Dimension::Named(dim_name, named) => {
                 let canonical_part = canonicalize(part);
-                let elem = crate::common::CanonicalElementName::from_raw(&canonical_part);
+                let elem = simlin_base::common::CanonicalElementName::from_raw(&canonical_part);
                 if named.indexed_elements.contains_key(&elem) {
                     format!("{}\u{B7}{}", dim_name.as_str(), canonical_part)
                 } else {
@@ -4513,7 +4519,7 @@ pub(crate) fn qualify_element_csv(
                 }
             }
             // Numeric subscripts over indexed dims are already static.
-            crate::dimensions::Dimension::Indexed(_, _) => part.to_string(),
+            simlin_base::dimensions::Dimension::Indexed(_, _) => part.to_string(),
         })
         .collect();
     qualified.join(",")
@@ -4524,8 +4530,7 @@ pub(crate) fn qualify_element_csv(
 /// per-element link-score generators need to build a correct partial.
 /// `Eq` is deliberately absent: [`Expr0`] carries an `f64` on `Const`, so it is
 /// `PartialEq` only. No consumer needs total equality here.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ClassifiedReducer {
     pub kind: ReducerKind,
     /// Uppercase function name (e.g. "SUM", "MIN").
@@ -4538,7 +4543,7 @@ pub(crate) struct ClassifiedReducer {
     pub is_bare: bool,
     /// The reducer's array argument (its "body") -- e.g. the AST of
     /// `pop[*] * (1 - weight[*])` for `SUM(pop[*] * (1 - weight[*]))`, lowered
-    /// straight from the target's `Expr2` by [`crate::patch::expr2_to_expr0`].
+    /// straight from the target's `Expr2` by [`simlin_base::ast::expr2_to_expr0`].
     /// A tree, never its printed text: a consumer that needs the body reads it
     /// directly rather than parsing a print of a tree the generator already
     /// holds.
@@ -4569,7 +4574,7 @@ pub(crate) fn classify_reducer(
     target_var: &Variable,
     source_ident: &str,
 ) -> Option<ClassifiedReducer> {
-    use crate::ast::Ast;
+    use simlin_base::ast::Ast;
 
     let ast = target_var.ast()?;
     let expr = match ast {
@@ -4591,11 +4596,11 @@ pub(crate) fn classify_reducer(
 /// non-reducer App arguments), `is_top_level` becomes `false` so any reducer
 /// found deeper is correctly flagged as nested.
 fn classify_reducer_in_expr(
-    expr: &crate::ast::Expr2,
+    expr: &simlin_base::ast::Expr2,
     source_ident: &str,
     is_top_level: bool,
 ) -> Option<ClassifiedReducer> {
-    use crate::ast::Expr2;
+    use simlin_base::ast::Expr2;
 
     match expr {
         Expr2::App(builtin, _, _) => {
@@ -4623,7 +4628,7 @@ fn classify_reducer_in_expr(
 /// including the nested-reducer fallback below, which fires when the outer
 /// reducer's array argument does not itself reference `source_ident`.
 pub(crate) fn classify_reducer_in_builtin(
-    builtin: &crate::builtins::BuiltinFn<crate::ast::Expr2>,
+    builtin: &simlin_base::builtins::BuiltinFn<simlin_base::ast::Expr2>,
     source_ident: &str,
     is_top_level: bool,
 ) -> Option<ClassifiedReducer> {
@@ -4668,14 +4673,14 @@ pub(crate) fn classify_reducer_in_builtin(
 /// hand-rolled `Mean(any arity)` arm produced (including a spurious
 /// `pop[boston] → result`).
 fn classify_builtin_if_references_source(
-    builtin: &crate::builtins::BuiltinFn<crate::ast::Expr2>,
+    builtin: &simlin_base::builtins::BuiltinFn<simlin_base::ast::Expr2>,
     source_ident: &str,
 ) -> Option<(ReducerKind, &'static str, Expr0)> {
     let kind = crate::ltm_agg::reducer_kind(builtin)?;
 
     // The recognized-reducer set is exactly `SUM`/`MEAN`/`MIN`/`MAX`/`STDDEV`/
     // `RANK`/`SIZE`, and in each the reduced array is the first argument.
-    let array_arg: &crate::ast::Expr2 = *builtin.args().first()?;
+    let array_arg: &simlin_base::ast::Expr2 = *builtin.args().first()?;
     // The spelling the synthesized equation text writes for the call.
     let upper: &'static str = match builtin.name() {
         "sum" => "SUM",
@@ -4692,13 +4697,13 @@ fn classify_builtin_if_references_source(
     if !expr_references_var(array_arg, canonical_source.as_ref()) {
         return None;
     }
-    Some((kind, upper, crate::patch::expr2_to_expr0(array_arg)))
+    Some((kind, upper, simlin_base::ast::expr2_to_expr0(array_arg)))
 }
 
 /// Check if an Expr2 references a variable with the given canonical name,
 /// either directly (Var) or via subscript (Subscript).
-fn expr_references_var(expr: &crate::ast::Expr2, canonical_name: &str) -> bool {
-    use crate::ast::Expr2;
+fn expr_references_var(expr: &simlin_base::ast::Expr2, canonical_name: &str) -> bool {
+    use simlin_base::ast::Expr2;
 
     match expr {
         Expr2::Var(ident, _, _) => ident.as_str() == canonical_name,
@@ -4814,7 +4819,7 @@ pub(crate) struct ReducerBodyCtx<'a> {
     /// For recognizing a positionally-MAPPED iterated-dim index (GH #534:
     /// `SUM(matrix[State,*])` over `matrix[Region,..]`); `None` disables the
     /// mapped recognition (the by-name check still applies).
-    pub dims_ctx: Option<&'a crate::dimensions::DimensionsContext>,
+    pub dims_ctx: Option<&'a simlin_base::dimensions::DimensionsContext>,
     /// The live source's accepted read slice (one
     /// [`crate::ltm_agg::AxisRead`] per row axis, parallel to
     /// `row_dim_names`) when the reducer is a hoisted agg --
@@ -4865,12 +4870,12 @@ fn pin_body_index(
     ctx: &ReducerBodyCtx<'_>,
     row_parts: &[String],
 ) -> Option<(IndexExpr0, bool)> {
-    use crate::common::CanonicalDimensionName;
+    use simlin_base::common::CanonicalDimensionName;
     let pinned = |moves: bool| {
         (
             IndexExpr0::Expr(Expr0::Var(
                 RawIdent::new_from_str(&row_parts[j]),
-                crate::ast::Loc::default(),
+                simlin_base::ast::Loc::default(),
             )),
             moves,
         )
@@ -4908,7 +4913,7 @@ fn pin_body_index(
                 let dim = dc.get(&CanonicalDimensionName::from_raw(
                     ctx.row_dim_names[j].as_str(),
                 ))?;
-                crate::dimensions::resolve_axis_index_position(value.value(), dim)
+                simlin_base::dimensions::resolve_axis_index_position(value.value(), dim)
             });
             let element = match named {
                 Some(element) => element,
@@ -5000,7 +5005,7 @@ fn pin_body_to_row(expr: Expr0, ctx: &ReducerBodyCtx<'_>, row_parts: &[String]) 
                         .map(|p| {
                             IndexExpr0::Expr(Expr0::Var(
                                 RawIdent::new_from_str(p),
-                                crate::ast::Loc::default(),
+                                simlin_base::ast::Loc::default(),
                             ))
                         })
                         .collect();
@@ -5047,7 +5052,7 @@ fn pin_body_to_row(expr: Expr0, ctx: &ReducerBodyCtx<'_>, row_parts: &[String]) 
                                 let pos = resolve_mismatched_index_position(n.as_ref(), ctx)?;
                                 Some(IndexExpr0::Expr(Expr0::Var(
                                     RawIdent::new_from_str(&row_parts[pos]),
-                                    crate::ast::Loc::default(),
+                                    simlin_base::ast::Loc::default(),
                                 )))
                             }
                             _ => None,
@@ -5482,7 +5487,7 @@ fn generate_linear_body_partial(
 /// previous step's evaluation of that row and `R(all-frozen terms) =
 /// PREVIOUS(agg)` exactly, because per-variable `PREVIOUS` sampling commutes
 /// with arithmetic; a row that is never the argmin therefore scores 0
-/// (`tests/integration/ltm_frozen_clock.rs`, the GH #763 repro). An original
+/// (`simlin-tests/tests/integration/ltm_frozen_clock.rs`, the GH #763 repro). An original
 /// `PREVIOUS` co-input is frozen whole as well; the selected row's lagged
 /// source reads retain the temporal-edge policy of the ordinary wrapper.
 ///

@@ -201,7 +201,7 @@ fn test_override_by_offset_out_of_bounds_returns_error() {
     let compiled = build_compiled(&rate_model());
     let mut vm = Vm::new(compiled).unwrap();
     let err = vm.set_value_by_offset(99999, 1.0).unwrap_err();
-    assert_eq!(err.code, crate::common::ErrorCode::BadOverride);
+    assert_eq!(err.code, simlin_base::common::ErrorCode::BadOverride);
 }
 
 #[test]
@@ -221,7 +221,7 @@ fn test_set_value_non_constant_variable_returns_error() {
 
     // births is a computed flow (not a constant), so set_value should fail
     let err = vm.set_value(&Ident::new("births"), 42.0).unwrap_err();
-    assert_eq!(err.code, crate::common::ErrorCode::BadOverride);
+    assert_eq!(err.code, simlin_base::common::ErrorCode::BadOverride);
 }
 
 #[test]
@@ -238,11 +238,11 @@ fn test_set_value_non_constant_returns_error() {
 
     // "computed" depends on "rate", so it's not a simple constant
     let err = vm.set_value(&Ident::new("computed"), 5.0).unwrap_err();
-    assert_eq!(err.code, crate::common::ErrorCode::BadOverride);
+    assert_eq!(err.code, simlin_base::common::ErrorCode::BadOverride);
 
     // Stocks also cannot be set via set_value
     let err = vm.set_value(&Ident::new("pop"), 500.0).unwrap_err();
-    assert_eq!(err.code, crate::common::ErrorCode::BadOverride);
+    assert_eq!(err.code, simlin_base::common::ErrorCode::BadOverride);
 }
 
 #[test]
@@ -300,7 +300,7 @@ fn test_set_value_module_stock_returns_error() {
     let file_bytes =
         std::fs::read(test_file).expect("modules_hares_and_foxes test fixture must exist");
     let mut cursor = std::io::Cursor::new(file_bytes);
-    let project_datamodel = crate::open_xmile(&mut cursor).unwrap();
+    let project_datamodel = simlin_formats::open_xmile(&mut cursor).unwrap();
     let mut db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel_incremental(&mut db, &project_datamodel, None);
     let compiled = crate::db::compile_project_incremental(
@@ -319,7 +319,7 @@ fn test_set_value_module_stock_returns_error() {
     );
     // Stocks are not simple constants, so set_value should fail
     let err = vm.set_value(&hares_ident, 500.0).unwrap_err();
-    assert_eq!(err.code, crate::common::ErrorCode::BadOverride);
+    assert_eq!(err.code, simlin_base::common::ErrorCode::BadOverride);
 }
 
 #[test]

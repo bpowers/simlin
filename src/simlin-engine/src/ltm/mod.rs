@@ -47,8 +47,9 @@ pub(crate) use graph::ModulePathwayBudgetGuard;
 pub(crate) use graph::{
     ModulePathways, ModulePathwaysWithTruncation, assign_loop_ids, module_pathway_budget,
 };
-pub(crate) use partitions::loop_dimension_element_tuples;
-pub(crate) use types::{SYNTHETIC_NODE_PREFIX, is_synthetic_node_name, normalize_module_ref};
+pub use partitions::loop_dimension_element_tuples;
+pub use types::is_synthetic_node_name;
+pub(crate) use types::{SYNTHETIC_NODE_PREFIX, normalize_module_ref};
 
 // Shared SCC primitive over an `Ident`-keyed adjacency list. Used in
 // production by the `db/dep_graph.rs` element-cycle refinement
@@ -266,7 +267,7 @@ pub(crate) fn lex_smallest_rotation_start<T: Ord>(s: &[T]) -> usize {
 /// allocation this wrapper performs.
 ///
 /// Empty input returns empty.
-pub(crate) fn canonical_rotation<T: Ord + Clone>(circuit: &[T]) -> Vec<T> {
+pub fn canonical_rotation<T: Ord + Clone>(circuit: &[T]) -> Vec<T> {
     let n = circuit.len();
     if n == 0 {
         return Vec::new();
@@ -287,7 +288,7 @@ pub(crate) fn canonical_rotation<T: Ord + Clone>(circuit: &[T]) -> Vec<T> {
 /// by the loop builder (`db::ltm`) and the LTM equation generators
 /// (`ltm_augment`), which both operate on these element-level
 /// identifier strings.
-pub(crate) fn strip_subscript(name: &str) -> &str {
+pub fn strip_subscript(name: &str) -> &str {
     match name.rfind('[') {
         Some(pos) => &name[..pos],
         None => name,

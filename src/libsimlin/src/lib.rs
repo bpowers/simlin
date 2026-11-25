@@ -64,7 +64,6 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 static GLOBAL: wasmalloc::WasmAlloc = wasmalloc::WasmAlloc::new();
 
 use anyhow::{Error as AnyError, Result};
-use simlin_engine::{self as engine};
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::ops::{Deref, DerefMut};
@@ -74,9 +73,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, OnceLock};
 
 #[cfg(test)]
-use simlin_engine::buffa::Message;
+use simlin_formats::buffa::Message;
 #[cfg(test)]
-use simlin_engine::serde as engine_serde;
+use simlin_formats::serde as engine_serde;
 #[cfg(test)]
 use std::ffi::CStr;
 
@@ -252,123 +251,123 @@ impl TryFrom<u32> for SimlinErrorCode {
     }
 }
 
-impl From<engine::ErrorCode> for SimlinErrorCode {
-    fn from(code: engine::ErrorCode) -> Self {
+impl From<simlin_base::ErrorCode> for SimlinErrorCode {
+    fn from(code: simlin_base::ErrorCode) -> Self {
         match code {
-            engine::ErrorCode::NoError => SimlinErrorCode::NoError,
-            engine::ErrorCode::DoesNotExist => SimlinErrorCode::DoesNotExist,
-            engine::ErrorCode::XmlDeserialization => SimlinErrorCode::XmlDeserialization,
-            engine::ErrorCode::VensimConversion => SimlinErrorCode::VensimConversion,
-            engine::ErrorCode::ProtobufDecode => SimlinErrorCode::ProtobufDecode,
-            engine::ErrorCode::InvalidToken => SimlinErrorCode::InvalidToken,
-            engine::ErrorCode::UnrecognizedEof => SimlinErrorCode::UnrecognizedEof,
-            engine::ErrorCode::UnrecognizedToken => SimlinErrorCode::UnrecognizedToken,
-            engine::ErrorCode::ExtraToken => SimlinErrorCode::ExtraToken,
-            engine::ErrorCode::UnclosedComment => SimlinErrorCode::UnclosedComment,
-            engine::ErrorCode::UnclosedQuotedIdent => SimlinErrorCode::UnclosedQuotedIdent,
-            engine::ErrorCode::ExpectedNumber => SimlinErrorCode::ExpectedNumber,
-            engine::ErrorCode::UnknownBuiltin => SimlinErrorCode::UnknownBuiltin,
-            engine::ErrorCode::BadBuiltinArgs => SimlinErrorCode::BadBuiltinArgs,
-            engine::ErrorCode::EmptyEquation => SimlinErrorCode::EmptyEquation,
-            engine::ErrorCode::BadModuleInputDst => SimlinErrorCode::BadModuleInputDst,
-            engine::ErrorCode::BadModuleInputSrc => SimlinErrorCode::BadModuleInputSrc,
-            engine::ErrorCode::NotSimulatable => SimlinErrorCode::NotSimulatable,
-            engine::ErrorCode::BadTable => SimlinErrorCode::BadTable,
-            engine::ErrorCode::BadSimSpecs => SimlinErrorCode::BadSimSpecs,
-            engine::ErrorCode::NoAbsoluteReferences => SimlinErrorCode::NoAbsoluteReferences,
-            engine::ErrorCode::CircularDependency => SimlinErrorCode::CircularDependency,
-            engine::ErrorCode::ArraysNotImplemented => SimlinErrorCode::ArraysNotImplemented,
-            engine::ErrorCode::MultiDimensionalArraysNotImplemented => {
+            simlin_base::ErrorCode::NoError => SimlinErrorCode::NoError,
+            simlin_base::ErrorCode::DoesNotExist => SimlinErrorCode::DoesNotExist,
+            simlin_base::ErrorCode::XmlDeserialization => SimlinErrorCode::XmlDeserialization,
+            simlin_base::ErrorCode::VensimConversion => SimlinErrorCode::VensimConversion,
+            simlin_base::ErrorCode::ProtobufDecode => SimlinErrorCode::ProtobufDecode,
+            simlin_base::ErrorCode::InvalidToken => SimlinErrorCode::InvalidToken,
+            simlin_base::ErrorCode::UnrecognizedEof => SimlinErrorCode::UnrecognizedEof,
+            simlin_base::ErrorCode::UnrecognizedToken => SimlinErrorCode::UnrecognizedToken,
+            simlin_base::ErrorCode::ExtraToken => SimlinErrorCode::ExtraToken,
+            simlin_base::ErrorCode::UnclosedComment => SimlinErrorCode::UnclosedComment,
+            simlin_base::ErrorCode::UnclosedQuotedIdent => SimlinErrorCode::UnclosedQuotedIdent,
+            simlin_base::ErrorCode::ExpectedNumber => SimlinErrorCode::ExpectedNumber,
+            simlin_base::ErrorCode::UnknownBuiltin => SimlinErrorCode::UnknownBuiltin,
+            simlin_base::ErrorCode::BadBuiltinArgs => SimlinErrorCode::BadBuiltinArgs,
+            simlin_base::ErrorCode::EmptyEquation => SimlinErrorCode::EmptyEquation,
+            simlin_base::ErrorCode::BadModuleInputDst => SimlinErrorCode::BadModuleInputDst,
+            simlin_base::ErrorCode::BadModuleInputSrc => SimlinErrorCode::BadModuleInputSrc,
+            simlin_base::ErrorCode::NotSimulatable => SimlinErrorCode::NotSimulatable,
+            simlin_base::ErrorCode::BadTable => SimlinErrorCode::BadTable,
+            simlin_base::ErrorCode::BadSimSpecs => SimlinErrorCode::BadSimSpecs,
+            simlin_base::ErrorCode::NoAbsoluteReferences => SimlinErrorCode::NoAbsoluteReferences,
+            simlin_base::ErrorCode::CircularDependency => SimlinErrorCode::CircularDependency,
+            simlin_base::ErrorCode::ArraysNotImplemented => SimlinErrorCode::ArraysNotImplemented,
+            simlin_base::ErrorCode::MultiDimensionalArraysNotImplemented => {
                 SimlinErrorCode::MultiDimensionalArraysNotImplemented
             }
-            engine::ErrorCode::BadDimensionName => SimlinErrorCode::BadDimensionName,
-            engine::ErrorCode::BadModelName => SimlinErrorCode::BadModelName,
-            engine::ErrorCode::MismatchedDimensions => SimlinErrorCode::MismatchedDimensions,
-            engine::ErrorCode::ArrayReferenceNeedsExplicitSubscripts => {
+            simlin_base::ErrorCode::BadDimensionName => SimlinErrorCode::BadDimensionName,
+            simlin_base::ErrorCode::BadModelName => SimlinErrorCode::BadModelName,
+            simlin_base::ErrorCode::MismatchedDimensions => SimlinErrorCode::MismatchedDimensions,
+            simlin_base::ErrorCode::ArrayReferenceNeedsExplicitSubscripts => {
                 SimlinErrorCode::ArrayReferenceNeedsExplicitSubscripts
             }
-            engine::ErrorCode::DuplicateVariable => SimlinErrorCode::DuplicateVariable,
+            simlin_base::ErrorCode::DuplicateVariable => SimlinErrorCode::DuplicateVariable,
             // A duplicate macro name / macro-vs-model name collision is, at
             // the FFI granularity, the same user-facing failure as a
             // duplicate variable (a name defined twice). The precise
             // `duplicate_macro_name` distinction is preserved in the
             // engine-level `ErrorCode` and the error's `details` message;
             // collapsing here avoids a gratuitous C-ABI enum addition.
-            engine::ErrorCode::DuplicateMacroName => SimlinErrorCode::DuplicateVariable,
-            engine::ErrorCode::UnknownDependency => SimlinErrorCode::UnknownDependency,
-            engine::ErrorCode::VariablesHaveErrors => SimlinErrorCode::VariablesHaveErrors,
-            engine::ErrorCode::UnitDefinitionErrors => SimlinErrorCode::UnitDefinitionErrors,
-            engine::ErrorCode::Generic => SimlinErrorCode::Generic,
-            engine::ErrorCode::NoAppInUnits => SimlinErrorCode::NoAppInUnits,
-            engine::ErrorCode::NoSubscriptInUnits => SimlinErrorCode::NoSubscriptInUnits,
-            engine::ErrorCode::NoIfInUnits => SimlinErrorCode::NoIfInUnits,
-            engine::ErrorCode::NoUnaryOpInUnits => SimlinErrorCode::NoUnaryOpInUnits,
-            engine::ErrorCode::BadBinaryOpInUnits => SimlinErrorCode::BadBinaryOpInUnits,
-            engine::ErrorCode::NoConstInUnits => SimlinErrorCode::NoConstInUnits,
-            engine::ErrorCode::ExpectedInteger => SimlinErrorCode::ExpectedInteger,
-            engine::ErrorCode::ExpectedIntegerOne => SimlinErrorCode::ExpectedIntegerOne,
-            engine::ErrorCode::DuplicateUnit => SimlinErrorCode::DuplicateUnit,
-            engine::ErrorCode::ExpectedModule => SimlinErrorCode::ExpectedModule,
-            engine::ErrorCode::ExpectedIdent => SimlinErrorCode::ExpectedIdent,
-            engine::ErrorCode::UnitMismatch => SimlinErrorCode::UnitMismatch,
-            engine::ErrorCode::TodoWildcard => SimlinErrorCode::Generic,
-            engine::ErrorCode::TodoStarRange => SimlinErrorCode::Generic,
-            engine::ErrorCode::TodoRange => SimlinErrorCode::Generic,
-            engine::ErrorCode::TodoArrayBuiltin => SimlinErrorCode::Generic,
-            engine::ErrorCode::CantSubscriptScalar => SimlinErrorCode::Generic,
-            engine::ErrorCode::DimensionInScalarContext => SimlinErrorCode::Generic,
-            engine::ErrorCode::BadOverride => SimlinErrorCode::BadOverride,
-            engine::ErrorCode::UnsupportedForSerialization => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::DuplicateMacroName => SimlinErrorCode::DuplicateVariable,
+            simlin_base::ErrorCode::UnknownDependency => SimlinErrorCode::UnknownDependency,
+            simlin_base::ErrorCode::VariablesHaveErrors => SimlinErrorCode::VariablesHaveErrors,
+            simlin_base::ErrorCode::UnitDefinitionErrors => SimlinErrorCode::UnitDefinitionErrors,
+            simlin_base::ErrorCode::Generic => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::NoAppInUnits => SimlinErrorCode::NoAppInUnits,
+            simlin_base::ErrorCode::NoSubscriptInUnits => SimlinErrorCode::NoSubscriptInUnits,
+            simlin_base::ErrorCode::NoIfInUnits => SimlinErrorCode::NoIfInUnits,
+            simlin_base::ErrorCode::NoUnaryOpInUnits => SimlinErrorCode::NoUnaryOpInUnits,
+            simlin_base::ErrorCode::BadBinaryOpInUnits => SimlinErrorCode::BadBinaryOpInUnits,
+            simlin_base::ErrorCode::NoConstInUnits => SimlinErrorCode::NoConstInUnits,
+            simlin_base::ErrorCode::ExpectedInteger => SimlinErrorCode::ExpectedInteger,
+            simlin_base::ErrorCode::ExpectedIntegerOne => SimlinErrorCode::ExpectedIntegerOne,
+            simlin_base::ErrorCode::DuplicateUnit => SimlinErrorCode::DuplicateUnit,
+            simlin_base::ErrorCode::ExpectedModule => SimlinErrorCode::ExpectedModule,
+            simlin_base::ErrorCode::ExpectedIdent => SimlinErrorCode::ExpectedIdent,
+            simlin_base::ErrorCode::UnitMismatch => SimlinErrorCode::UnitMismatch,
+            simlin_base::ErrorCode::TodoWildcard => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::TodoStarRange => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::TodoRange => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::TodoArrayBuiltin => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::CantSubscriptScalar => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::DimensionInScalarContext => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::BadOverride => SimlinErrorCode::BadOverride,
+            simlin_base::ErrorCode::UnsupportedForSerialization => SimlinErrorCode::Generic,
             // A bare reference to a lookup table (used as a value without an
             // argument) is, at the FFI granularity, a generic model error; the
             // precise distinction is preserved in the engine-level `ErrorCode`
             // and the error's `details` message (issue #606).
-            engine::ErrorCode::LookupReferencedWithoutArgument => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::LookupReferencedWithoutArgument => SimlinErrorCode::Generic,
             // Conveyor diagnostics collapse to the wire Generic code (the wire
             // enum deliberately does not track the engine's growing tail).
-            engine::ErrorCode::ConveyorWithoutOutflow => SimlinErrorCode::Generic,
-            engine::ErrorCode::ConveyorNonEulerMethod => SimlinErrorCode::Generic,
-            engine::ErrorCode::ConveyorQueueUpstreamNotDiscrete => SimlinErrorCode::Generic,
-            engine::ErrorCode::ConveyorTransitNotPositive => SimlinErrorCode::Generic,
-            engine::ErrorCode::ConveyorTransitTooLong => SimlinErrorCode::Generic,
-            engine::ErrorCode::ConveyorTransitNotDtMultiple => SimlinErrorCode::Generic,
-            engine::ErrorCode::ConveyorLeakFractionsExceedOne => SimlinErrorCode::Generic,
-            engine::ErrorCode::ConveyorLtmDegraded => SimlinErrorCode::Generic,
-            engine::ErrorCode::ConveyorDrivenFlowRead => SimlinErrorCode::Generic,
-            engine::ErrorCode::ConveyorNotExpanded => SimlinErrorCode::Generic,
-            engine::ErrorCode::ConveyorSpreadflowUnsupported => SimlinErrorCode::Generic,
-            engine::ErrorCode::ConveyorArrayedDimensionUnresolved => SimlinErrorCode::Generic,
-            engine::ErrorCode::ConveyorContainerAccessUnsupported => SimlinErrorCode::Generic,
-            engine::ErrorCode::QueueNotExpanded => SimlinErrorCode::Generic,
-            engine::ErrorCode::QueueNonEulerMethod => SimlinErrorCode::Generic,
-            engine::ErrorCode::QueueDrivenFlowRead => SimlinErrorCode::Generic,
-            engine::ErrorCode::QueueOverflowNotOnQueue => SimlinErrorCode::Generic,
-            engine::ErrorCode::QueueLtmDegraded => SimlinErrorCode::Generic,
-            engine::ErrorCode::RepeatedStockFlow => SimlinErrorCode::Generic,
-            engine::ErrorCode::ConveyorInSubmodelUnsupported => SimlinErrorCode::Generic,
-            engine::ErrorCode::QueueInSubmodelUnsupported => SimlinErrorCode::Generic,
-            engine::ErrorCode::QueueSecondaryOutflowToConveyor => SimlinErrorCode::Generic,
-            engine::ErrorCode::ConveyorMultipleNonLeakOutflows => SimlinErrorCode::Generic,
-            engine::ErrorCode::StockBothConveyorAndQueue => SimlinErrorCode::Generic,
-            engine::ErrorCode::ConveyorInitListUnsupported => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::ConveyorWithoutOutflow => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::ConveyorNonEulerMethod => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::ConveyorQueueUpstreamNotDiscrete => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::ConveyorTransitNotPositive => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::ConveyorTransitTooLong => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::ConveyorTransitNotDtMultiple => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::ConveyorLeakFractionsExceedOne => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::ConveyorLtmDegraded => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::ConveyorDrivenFlowRead => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::ConveyorNotExpanded => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::ConveyorSpreadflowUnsupported => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::ConveyorArrayedDimensionUnresolved => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::ConveyorContainerAccessUnsupported => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::QueueNotExpanded => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::QueueNonEulerMethod => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::QueueDrivenFlowRead => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::QueueOverflowNotOnQueue => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::QueueLtmDegraded => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::RepeatedStockFlow => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::ConveyorInSubmodelUnsupported => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::QueueInSubmodelUnsupported => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::QueueSecondaryOutflowToConveyor => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::ConveyorMultipleNonLeakOutflows => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::StockBothConveyorAndQueue => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::ConveyorInitListUnsupported => SimlinErrorCode::Generic,
             // Unknown-element-subscript advisories likewise collapse to the
             // wire Generic code; the specific engine code and the message
             // carry the detail (GH #905).
-            engine::ErrorCode::UnknownElementSubscript => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::UnknownElementSubscript => SimlinErrorCode::Generic,
             // A macro body instantiating a module likewise collapses to the wire
             // Generic code; the engine code and the message carry the detail.
-            engine::ErrorCode::MacroContainsModule => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::MacroContainsModule => SimlinErrorCode::Generic,
             // An unfilled equation (a variable whose equation is nothing but the
             // NaN literal) likewise collapses to the wire Generic code; the
             // message names the variable, which is the whole point of it.
-            engine::ErrorCode::UnfilledEquation => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::UnfilledEquation => SimlinErrorCode::Generic,
             // A declared element with no equation likewise collapses to the
             // wire Generic code; the message names the variable and elements.
-            engine::ErrorCode::MissingElementEquation => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::MissingElementEquation => SimlinErrorCode::Generic,
             // A save step off the step grid likewise collapses to the wire
             // Generic code; the message says what the saved rows are.
-            engine::ErrorCode::SaveStepOffTheStepGrid => SimlinErrorCode::Generic,
-            engine::ErrorCode::SubscriptOutOfRange => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::SaveStepOffTheStepGrid => SimlinErrorCode::Generic,
+            simlin_base::ErrorCode::SubscriptOutOfRange => SimlinErrorCode::Generic,
         }
     }
 }
@@ -429,11 +428,11 @@ pub enum SimlinReadPast {
     AfterLast = 2,
 }
 
-impl From<engine::db::DiagnosticSeverity> for SimlinErrorSeverity {
-    fn from(severity: engine::db::DiagnosticSeverity) -> Self {
+impl From<simlin_engine::db::DiagnosticSeverity> for SimlinErrorSeverity {
+    fn from(severity: simlin_engine::db::DiagnosticSeverity) -> Self {
         match severity {
-            engine::db::DiagnosticSeverity::Error => SimlinErrorSeverity::Error,
-            engine::db::DiagnosticSeverity::Warning => SimlinErrorSeverity::Warning,
+            simlin_engine::db::DiagnosticSeverity::Error => SimlinErrorSeverity::Error,
+            simlin_engine::db::DiagnosticSeverity::Warning => SimlinErrorSeverity::Warning,
         }
     }
 }
@@ -512,7 +511,7 @@ pub struct SimlinProject {
     /// lock would run queries whose garbage no entry point sweeps until an
     /// unrelated one happens to. The `OnceLock` is also the set-once flag that
     /// lets a query skip the datamodel lock once the database exists.
-    db: OnceLock<OrderedMutex<engine::db::SimlinDb>>,
+    db: OnceLock<OrderedMutex<simlin_engine::db::SimlinDb>>,
     /// Latches true the first time any simulation is created on this project
     /// with `enable_ltm = true`. `simlin_project_get_errors` reads it to
     /// decide whether to collect diagnostics under the LTM overlay, so the
@@ -540,7 +539,7 @@ pub struct SimlinProject {
     /// model's links, its structural loops) is the person's wait itself. So a
     /// reading tool call, which holds the database for its answer, checks
     /// this between units of its work and stops while it is not zero
-    /// (`simlin_engine::tools::Workspace::waiting`).
+    /// (`simlin_tools::Workspace::waiting`).
     waiting_for_db: AtomicUsize,
     pub ref_count: AtomicUsize,
 }
@@ -596,10 +595,10 @@ impl Drop for Waiting<'_> {
 /// every memo fetch (salsa's `zalsa.rs` `unwind_if_revision_cancelled`,
 /// `function/fetch.rs`, `event.rs` `Event::new`): a cost on every hit to save
 /// a bounded walk.
-pub struct DbLock<'a>(OrderedGuard<'a, engine::db::SimlinDb>);
+pub struct DbLock<'a>(OrderedGuard<'a, simlin_engine::db::SimlinDb>);
 
 impl Deref for DbLock<'_> {
-    type Target = engine::db::SimlinDb;
+    type Target = simlin_engine::db::SimlinDb;
     fn deref(&self) -> &Self::Target {
         #[cfg(test)]
         lock_order::trace::record(lock_order::Event::UseDatabase);
@@ -676,7 +675,7 @@ pub(crate) fn invoke_db_section_test_hook(project: &SimlinProject) {
 impl SimlinProject {
     /// A project holding `datamodel`, with no database and no derived index
     /// yet: the one constructor every open function shares.
-    pub(crate) fn new(datamodel: engine::datamodel::Project) -> SimlinProject {
+    pub(crate) fn new(datamodel: simlin_base::datamodel::Project) -> SimlinProject {
         SimlinProject {
             datamodel: OrderedMutex::new(Rank::Contents, ProjectContents::new(datamodel)),
             db: OnceLock::new(),
@@ -721,7 +720,9 @@ impl SimlinProject {
     /// land. An edit of the diagrams alone can land meanwhile; the database
     /// holds no diagram, and the contents returned are the ones the caller
     /// answers from.
-    pub(crate) fn lock_contents_and_db(&self) -> (Arc<engine::datamodel::Project>, DbLock<'_>) {
+    pub(crate) fn lock_contents_and_db(
+        &self,
+    ) -> (Arc<simlin_base::datamodel::Project>, DbLock<'_>) {
         let contents = self.datamodel.lock().unwrap();
         let db = self.lock_db_with(&contents);
         let shared = contents.shared();
@@ -793,7 +794,10 @@ impl SimlinProject {
     /// The database, built from `contents` the first time. The caller holds
     /// the datamodel lock `contents` came from, so every build happens under
     /// it.
-    fn db_built_from(&self, contents: &ProjectContents) -> &OrderedMutex<engine::db::SimlinDb> {
+    fn db_built_from(
+        &self,
+        contents: &ProjectContents,
+    ) -> &OrderedMutex<simlin_engine::db::SimlinDb> {
         self.db
             .get_or_init(|| OrderedMutex::new(Rank::Database, new_synced_db(contents)))
     }
@@ -806,8 +810,8 @@ impl SimlinProject {
     /// a waiter is not seen.
     fn lock_counted<'a>(
         &self,
-        db: &'a OrderedMutex<engine::db::SimlinDb>,
-    ) -> OrderedGuard<'a, engine::db::SimlinDb> {
+        db: &'a OrderedMutex<simlin_engine::db::SimlinDb>,
+    ) -> OrderedGuard<'a, simlin_engine::db::SimlinDb> {
         let _waiting = self.count_waiting();
         db.lock().unwrap()
     }
@@ -841,13 +845,13 @@ pub struct SimlinModel {
 pub(crate) struct SimState {
     /// The compiled program, shared with the `Vm` (and with the salsa memo
     /// that assembled it): `reset` recreates the `Vm` from this same `Arc`.
-    pub(crate) compiled: Option<Arc<engine::CompiledSimulation>>,
-    pub(crate) vm: Option<engine::Vm>,
+    pub(crate) compiled: Option<Arc<simlin_engine::CompiledSimulation>>,
+    pub(crate) vm: Option<simlin_engine::Vm>,
     /// Stores the error from VM creation if it failed.
     /// This allows us to surface the actual error when users try to run
     /// the simulation, instead of a generic "VM not initialized" message.
-    pub(crate) vm_error: Option<engine::Error>,
-    pub(crate) results: Option<engine::Results>,
+    pub(crate) vm_error: Option<simlin_base::Error>,
+    pub(crate) results: Option<simlin_base::Results>,
     /// Constant value overrides survive VM consumption (run_to_end consumes the VM).
     /// Re-applied to new VMs created on reset.
     pub(crate) overrides: HashMap<usize, f64>,
@@ -869,7 +873,7 @@ pub(crate) struct SimState {
     /// reads exactly the numbers the engine's own consumers see.  When
     /// populated alongside `loop_element_index`, the two agree on slot count
     /// for every loop (see the `debug_assert!` in `simlin_sim_new`).
-    pub(crate) loop_partitions: engine::indexmap::IndexMap<String, Vec<Option<usize>>>,
+    pub(crate) loop_partitions: simlin_engine::indexmap::IndexMap<String, Vec<Option<usize>>>,
     /// Snapshot of per-loop dimension metadata taken at
     /// `simlin_sim_new` time.  Used by the FFI subscript resolver to
     /// turn a user-supplied loop ID like `r1[Boston]` into a slot
@@ -878,7 +882,7 @@ pub(crate) struct SimState {
     /// weren't generated (e.g. discovery mode) are simply absent
     /// from the map and the resolver naturally falls back to the
     /// "loop unknown" error.
-    pub(crate) loop_element_index: HashMap<String, engine::ltm_post::LoopElementIndex>,
+    pub(crate) loop_element_index: HashMap<String, simlin_engine::ltm_post::LoopElementIndex>,
     /// The loop-enumeration mode the LTM pipeline resolved at
     /// `simlin_sim_new` time (captured while the db was locked, like
     /// `loop_partitions`).  `None` when the sim was created
@@ -886,7 +890,7 @@ pub(crate) struct SimState {
     /// otherwise.  Surfaced through `simlin_sim_get_ltm_mode` so a caller can
     /// tell exhaustive Johnson enumeration apart from the auto-flipped
     /// post-simulation discovery.
-    pub(crate) ltm_mode: Option<engine::db::LtmMode>,
+    pub(crate) ltm_mode: Option<simlin_engine::db::LtmMode>,
     /// The per-`(loop, slot)` relative loop scores of `results`
     /// (`ltm_post::compute_rel_loop_scores` over `loop_partitions`), computed
     /// on the first `simlin_analyze_get_relative_loop_score` query and reused
@@ -903,14 +907,14 @@ pub(crate) struct SimState {
     /// also what [`is_overridable_offset`](Self::is_overridable_offset) reads
     /// while no Vm exists, so the cache is load-bearing for the override gate,
     /// not only for reset.
-    pub(crate) conveyor_plans: Option<Vec<engine::conveyor_compile::ConveyorPlan>>,
+    pub(crate) conveyor_plans: Option<Vec<simlin_engine::conveyor_compile::ConveyorPlan>>,
     /// Resolved queue plans for a queue model (`None`/empty otherwise). Cached
     /// alongside `conveyor_plans` for the same two reasons: `reset` recreates
     /// the VM from `compiled`, and a plain `Vm::new(compiled)` would drop the
     /// queue pass, so reset re-attaches these plans; and the no-Vm override
     /// gate reads them. A model with both conveyors and queues carries both
     /// plan sets.
-    pub(crate) queue_plans: Option<Vec<engine::queue_compile::QueuePlan>>,
+    pub(crate) queue_plans: Option<Vec<simlin_engine::queue_compile::QueuePlan>>,
 }
 
 impl SimState {
@@ -942,19 +946,21 @@ pub struct SimlinSim {
 
 /// Opaque standalone results structure.
 ///
-/// A named-time-series table (an `engine::Results`) that is not tied to any
+/// A named-time-series table (an `simlin_base::Results`) that is not tied to any
 /// project/model/sim. Produced today by `simlin_results_open_vdf` (Vensim VDF
 /// import). The table is immutable after construction, so the accessors need
 /// no lock -- only the refcount is shared mutable state.
 pub struct SimlinResults {
-    pub(crate) results: engine::Results,
+    pub(crate) results: simlin_base::Results,
     pub ref_count: AtomicUsize,
 }
 
 // ── shared helpers (pub(crate)) ────────────────────────────────────────
 
-pub(crate) fn new_synced_db(datamodel: &engine::datamodel::Project) -> engine::db::SimlinDb {
-    let mut db = engine::db::SimlinDb::default();
+pub(crate) fn new_synced_db(
+    datamodel: &simlin_base::datamodel::Project,
+) -> simlin_engine::db::SimlinDb {
+    let mut db = simlin_engine::db::SimlinDb::default();
     db.sync(datamodel);
     db
 }
@@ -1235,7 +1241,7 @@ pub(crate) unsafe fn require_results<'a>(results: *mut SimlinResults) -> Result<
     }
 }
 
-pub(crate) fn ffi_error_from_engine(error: &engine::Error) -> FfiError {
+pub(crate) fn ffi_error_from_engine(error: &simlin_base::Error) -> FfiError {
     FfiError::new(SimlinErrorCode::from(error.code)).with_message(error.to_string())
 }
 
@@ -1352,9 +1358,11 @@ mod database_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engine::test_common::TestProject;
+    use simlin_engine::test_common::TestProject;
 
-    fn open_project_from_datamodel(project: &engine::datamodel::Project) -> *mut SimlinProject {
+    fn open_project_from_datamodel(
+        project: &simlin_base::datamodel::Project,
+    ) -> *mut SimlinProject {
         let buf = engine_serde::serialize(project).unwrap().encode_to_vec();
         unsafe {
             let mut err: *mut SimlinError = ptr::null_mut();

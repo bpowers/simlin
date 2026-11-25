@@ -2,12 +2,12 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-// The Editor's hamburger drawer offers an "Exit" link to "/" -- the app's and
-// simlin-serve's project list. A host that embeds the Editor in a page it owns
-// (a notebook cell) has no such route, and the link would pushState on the
-// host page, so `showHomeLink={false}` hides it. Neither setting needs a
-// router: nothing here wraps the Editor in wouter's <Router>, and the real
-// ModelPropertiesDrawer renders in both configurations.
+// The Editor's hamburger drawer offers an "Exit" link to "/" -- the app's
+// project list. A host that embeds the Editor in a page it owns (a notebook
+// cell) has no such route, and the link would pushState on the host page, so
+// `showHomeLink={false}` hides it. Neither setting needs a router: nothing here
+// wraps the Editor in wouter's <Router>, and the real ModelPropertiesDrawer
+// renders in both configurations.
 
 import { describe, it, expect, beforeEach, afterEach, rs } from '@rstest/core';
 
@@ -93,7 +93,7 @@ describe('Editor showHomeLink', () => {
     });
   }
 
-  it('shows the Exit link by default (app and simlin-serve hosts), with no router in the tree', () => {
+  it('shows the Exit link by default (the app host), with no router in the tree', () => {
     mountAndOpenDrawer(makeProps());
     const exit = screen.getByRole('link', { name: /exit/i });
     expect(exit.getAttribute('href')).toBe('/');

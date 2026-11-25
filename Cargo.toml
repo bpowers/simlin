@@ -3,11 +3,19 @@
 resolver = "2"
 members = [
     "src/libsimlin",
+    "src/simlin-base",
     "src/simlin-cli",
+    "src/simlin-diagram",
+    "src/simlin-edit",
     "src/simlin-engine",
+    "src/simlin-formats",
+    "src/simlin-layout",
     "src/simlin-mcp",
     "src/simlin-mcp-core",
-    "src/simlin-serve",
+    "src/simlin-save-check",
+    "src/simlin-tests",
+    "src/simlin-tools",
+    "src/simlin-wasmgen",
 ]
 
 # Release builds optimize for speed (opt-level = 3) on every target. The wasm32
@@ -98,12 +106,11 @@ strip = false
 #     --extract-json payload (with float_roundtrip) on every `cargo test`.
 #   - wasm-interpreter/checked: every wasmgen parity test executes an emitted
 #     blob under this pure-Rust interpreter.
-#   - the resvg rasterization stack: the `diagram::render_png` tests rasterize
+#   - the resvg rasterization stack: simlin-diagram's `render_png` tests rasterize
 #     a diagram through resvg, and unoptimized SVG filter code dominates them
 #     (~80% of the slowest one is `resvg::filter::morphology::apply`, per
 #     `perf`, with the un-inlined `u8::max` inside it alone at ~35%). Pinning
-#     the stack takes those 16 tests from 2.52s to 0.33s and drops the engine's
-#     lib-test binary below its previous one-test parallel floor.
+#     the stack takes the 16 tests that render a PNG from 2.52s to 0.33s.
 #   - salsa/hashbrown/indexmap: the incremental compilation substrate. Every
 #     model any test compiles goes through salsa's query engine and its
 #     indexmap-backed dependency edges, so this is the one pin that is spread
@@ -115,9 +122,9 @@ strip = false
 # The asymmetry that makes these worth it: a dependency is not recompiled by an
 # edit to a workspace crate, so a pin costs one rebuild of that dependency (and
 # whatever sits above it) and then nothing at all on the edit-compile-test loop.
-# Measured on the render stack: no change to a cold `cargo test -p simlin-engine
-# --no-run` (61.3s vs 58.7s, inside run-to-run noise). Pinning a WORKSPACE crate
-# is a different trade and is deliberately not done here.
+# Measured on the render stack: no change to a cold unit-test build (61.3s vs
+# 58.7s, inside run-to-run noise). Pinning a WORKSPACE crate is a different
+# trade and is deliberately not done here.
 [profile.dev.package.serde_json]
 opt-level = 3
 

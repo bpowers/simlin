@@ -28,9 +28,9 @@
 
 use std::sync::Arc;
 
-use crate::ast::{Ast, Expr0, print_eqn};
-use crate::common::{CanonicalElementName, EquationError, IdentMap};
-use crate::lexer::LexerType;
+use simlin_base::ast::{Ast, Expr0, print_eqn};
+use simlin_base::common::{CanonicalElementName, EquationError, IdentMap};
+use simlin_base::lexer::LexerType;
 
 /// One equation arm: the authoritative parsed AST plus its diagnostic text.
 ///
@@ -48,8 +48,7 @@ use crate::lexer::LexerType;
 /// an `Arrayed` equation still produced bytecode, so the "no bytecode ⇒
 /// `model_ltm_fragment_diagnostics` warns" path never fired and that element's
 /// score read a constant 0 with no diagnostic at all.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LtmArm {
     /// The generator's exact source-form spelling. Retained ONLY for
     /// diagnostics; never re-parsed to compile.
@@ -147,8 +146,7 @@ impl LtmArm {
 /// [`LtmEquation::retarget_dims`]) and layout sizing read them without a
 /// `DimensionsContext`; they are resolved to `Dimension`s only when lowering
 /// to an `Ast<Expr0>` for compilation ([`LtmEquation::to_flow_ast`]).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum LtmEquation {
     Scalar(LtmArm),
     ApplyToAll(Vec<String>, LtmArm),
@@ -358,7 +356,7 @@ impl LtmEquation {
     /// init-phase ast to build.
     pub fn to_flow_ast(
         &self,
-        dimensions: &crate::dimensions::DimensionsContext,
+        dimensions: &simlin_base::dimensions::DimensionsContext,
     ) -> (Option<Ast<Expr0>>, Vec<EquationError>) {
         // A generated arm that failed to parse rejects the whole equation,
         // BEFORE any shape-specific assembly -- see the note above on why the

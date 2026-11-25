@@ -7,12 +7,12 @@ use std::io::{BufReader, Write};
 use std::path::Path;
 
 use sha2::{Digest, Sha256};
-use simlin_engine::datamodel::{
+use simlin_base::datamodel::{
     self, Dt, Equation, GraphicalFunction, GraphicalFunctionKind, GraphicalFunctionScale,
     LoopMetadata, Model, ModelGroup, Rect, SimMethod, SimSpecs, StockFlow, View, ViewElement,
     Visibility,
 };
-use simlin_engine::open_xmile;
+use simlin_formats::open_xmile;
 
 fn escape_string(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")

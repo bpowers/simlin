@@ -7,8 +7,6 @@
 //! This module provides a builder-based API for creating test projects
 //! that can be used by various test modules.
 
-use crate::common::{Canonical, ErrorCode, Ident, IdentMap, UnitError};
-use crate::datamodel::{self, Dimension, Equation, Project, SimSpecs, Variable};
 #[cfg(test)]
 use crate::db::sync_from_datamodel;
 use crate::db::{
@@ -16,6 +14,8 @@ use crate::db::{
     compile_project_incremental, sync_from_datamodel_incremental,
 };
 use crate::vm::{CompiledSimulation, Vm};
+use simlin_base::common::{Canonical, ErrorCode, Ident, IdentMap, UnitError};
+use simlin_base::datamodel::{self, Dimension, Equation, Project, SimSpecs, Variable};
 use std::collections::HashMap;
 
 /// The helpers one variable's production parse synthesized, in walk order,
@@ -42,7 +42,7 @@ pub fn implicit_vars_of(
 /// This is the SINGLE copy of the case rows, consumed by all three backend
 /// tests -- the end-to-end VM pipeline (`round_builtin_tests`), the VM's
 /// `apply()` unit test (`vm::tests::apply_round_ties_to_even`), and the wasm
-/// backend's parity test (`wasmgen::lower_tests::apply_round`) -- so the
+/// backend's parity test (`simlin_wasmgen::lower_tests::apply_round`) -- so the
 /// backends are pinned against identical rows and cannot drift apart. The
 /// exact .5 ties are the load-bearing rows: `f64::round` (ties away from
 /// zero) agrees with `round_ties_even` on every non-tie input, so a table
@@ -707,7 +707,7 @@ impl TestProject {
             &db,
             sync.models["main"].source,
             sync.project,
-            &crate::canonicalize(var_name),
+            &simlin_base::canonicalize(var_name),
         )
     }
 }
@@ -767,7 +767,7 @@ impl TestProject {
 
     /// Compile the project via the incremental salsa pipeline, without the
     /// LTM overlay.
-    pub fn compile_incremental(&self) -> crate::Result<std::sync::Arc<CompiledSimulation>> {
+    pub fn compile_incremental(&self) -> simlin_base::Result<std::sync::Arc<CompiledSimulation>> {
         let datamodel = self.build_datamodel();
         let mut db = SimlinDb::default();
         let sync = sync_from_datamodel_incremental(&mut db, &datamodel, None);
@@ -941,7 +941,7 @@ impl TestProject {
 
 /// Extract variable timeseries from simulation results, including
 /// aggregated base-name entries for arrayed variables.
-pub(crate) fn collect_results(results: &crate::Results) -> HashMap<String, Vec<f64>> {
+pub fn collect_results(results: &simlin_base::Results) -> HashMap<String, Vec<f64>> {
     let mut output: HashMap<String, Vec<f64>> = HashMap::new();
 
     for (name, &offset) in &results.offsets {
@@ -1030,7 +1030,7 @@ pub fn parse_array_declaration(decl: &str) -> (String, Vec<String>) {
 /// Shared by the VM pin
 /// (`array_operand_materialization_tests::an_array_view_inside_a_module_instance_reads_that_instance`)
 /// and the wasm pin
-/// (`wasmgen::module::tests::compile_simulation_arrayed_submodel_views_address_their_instance`),
+/// (`simlin_wasmgen::module::tests::compile_simulation_arrayed_submodel_views_address_their_instance`),
 /// because the two backends agreeing proves nothing here: the wasm view emitter
 /// mirrors the VM opcode for opcode, so it mirrored this defect too. Both assert
 /// the absolute series.

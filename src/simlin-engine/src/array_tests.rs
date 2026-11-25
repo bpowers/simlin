@@ -9,8 +9,8 @@
 
 #[cfg(test)]
 mod wildcard_tests {
-    use crate::ErrorCode;
     use crate::test_common::TestProject;
+    use simlin_base::ErrorCode;
 
     #[test]
     fn wildcard_preserves_dimension() {
@@ -2496,7 +2496,7 @@ mod indexed_dimension_tests {
         //
         // This test verifies that trying to add arrays with different named dimensions
         // (even if same size) results in a compilation error, not silent size-based matching.
-        use crate::common::ErrorCode;
+        use simlin_base::common::ErrorCode;
 
         let project = TestProject::new("named_same_size")
             .named_dimension("Cities", &["Boston", "Seattle"])
@@ -2912,7 +2912,7 @@ mod indexed_dimension_tests {
     fn named_dims_union_broadcasting_error() {
         // Test that named dimensions with different names do NOT allow UNION broadcasting.
         // Even in UNION case, named dims should not be combined just by size.
-        use crate::common::ErrorCode;
+        use simlin_base::common::ErrorCode;
 
         let project = TestProject::new("named_union_error")
             .named_dimension("Cities", &["NYC", "LA", "Chicago"])
@@ -4347,12 +4347,12 @@ mod array_reducer_tests {
 /// direction=0: descending (largest element gets rank 1).
 #[cfg(test)]
 mod rank_tests {
-    use crate::common::ErrorCode;
     use crate::db::{
         DiagnosticError, DiagnosticSeverity, SimlinDb, collect_all_diagnostics, sync_from_datamodel,
     };
-    use crate::open_vensim;
     use crate::test_common::TestProject;
+    use simlin_base::common::ErrorCode;
+    use simlin_formats::open_vensim;
 
     fn assert_bad_rank_arity(project: &TestProject, var_name: &str) {
         let datamodel = project.build_datamodel();
@@ -4644,7 +4644,7 @@ TIME STEP = 1 ~~|
 #[cfg(test)]
 mod group_mapped_temp_arg_tests {
     use crate::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
-    use crate::open_vensim;
+    use simlin_formats::open_vensim;
 
     /// A minimized C-LEARN shape: `Aggregated Regions -> (COP: ...subgroups...)`
     /// is a heterogeneous group mapping (one source element maps to a
@@ -4719,11 +4719,11 @@ TIME STEP = 1 ~~|
     /// fragment that reads a wrong value.
     #[test]
     fn unresolvable_helper_fails_loudly_not_silently() {
-        use crate::common::ErrorCode;
         use crate::db::{
             DiagnosticError, collect_all_diagnostics, compile_project_incremental,
             sync_from_datamodel_incremental,
         };
+        use simlin_base::common::ErrorCode;
 
         // `Other` has NO mapping to `Big`, so `out[Big] = INITIAL(oth[Other])`
         // cannot translate the bare `[Other]` subscript per `Big` element. This
@@ -4797,7 +4797,7 @@ TIME STEP = 1 ~~|
 #[cfg(test)]
 mod arrayed_gf_in_reducer_tests {
     use crate::db::{SimlinDb, compile_project_incremental, sync_from_datamodel_incremental};
-    use crate::open_vensim;
+    use simlin_formats::open_vensim;
 
     /// `g[D]` is a genuine per-element arrayed graphical function (three
     /// distinct tables); `drive = Time` is strictly non-constant; `total =
@@ -5100,9 +5100,9 @@ mod cross_module_array_reference_tests {
     //! emission -- the offset-scan it replaced resolved a cross-module base to
     //! the module variable for exactly the same reason.
 
-    use crate::datamodel;
     use crate::test_common::TestProject;
     use crate::testutils::{x_aux, x_model, x_module, x_module_named, x_project};
+    use simlin_base::datamodel;
 
     fn arrayed(ident: &str, dim: &str, elems: &[(&str, &str)]) -> datamodel::Variable {
         datamodel::Variable::Aux(datamodel::Aux {
@@ -5248,7 +5248,7 @@ mod cross_module_array_reference_tests {
     /// instead, they read `bvals[0]` and `bvals[1]` -- 100 and 200, a silent
     /// wrong answer with no diagnostic anywhere.
     ///
-    /// No wasm-backend twin: `wasmgen::vector` rejects a dynamically-subscripted
+    /// No wasm-backend twin: `simlin_wasmgen::vector` rejects a dynamically-subscripted
     /// ELM MAP source outright, so this shape never reaches wasm lowering. The
     /// static shapes below share the operand with wasm by construction -- it is
     /// baked into the resolved bytecode both backends read -- so they cannot

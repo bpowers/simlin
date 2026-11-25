@@ -10,12 +10,12 @@
 //! body is.
 
 use super::*;
-use crate::ast::{ArrayBounds, Ast, Expr2};
-use crate::builtins::BuiltinFn;
-use crate::common::ErrorCode;
-use crate::datamodel;
 use crate::db::var_fragment::{ExplicitFragment, explicit_fragment_input};
 use crate::test_common::TestProject;
+use simlin_base::ast::{ArrayBounds, Ast, Expr2};
+use simlin_base::builtins::BuiltinFn;
+use simlin_base::common::ErrorCode;
+use simlin_base::datamodel;
 
 /// The `Expr2` body of `main`'s `var` as the production per-variable lowering
 /// produces it: `explicit_fragment_input`'s target, lowered under the
@@ -742,7 +742,7 @@ fn a_module_output_read_the_compiler_refuses_is_still_unit_checked() {
     assert!(
         on_mism.iter().any(|d| d.severity == DiagnosticSeverity::Warning
             && matches!(&d.error,
-                DiagnosticError::Unit(crate::common::UnitError::ConsistencyError(
+                DiagnosticError::Unit(simlin_base::common::UnitError::ConsistencyError(
                     ErrorCode::UnitMismatch, _, Some(detail), _)) if detail.contains("units to match"))),
         "mism is still unit-checked and reports the person/dollar mismatch: {diags:?}"
     );

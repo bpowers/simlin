@@ -2,20 +2,20 @@
 
 ## Running benchmarks
 
-All benchmarks use [Criterion.rs](https://bheisler.github.io/criterion.rs/book/) and live in `src/simlin-engine/benches/`.
+All benchmarks use [Criterion.rs](https://bheisler.github.io/criterion.rs/book/) and live in `src/simlin-tests/benches/`.
 
 ```bash
 # Run all benchmarks
-cargo bench -p simlin-engine
+cargo bench -p simlin-tests
 
 # Run a specific benchmark suite
-cargo bench -p simlin-engine --bench compiler
-cargo bench -p simlin-engine --bench simulation
-cargo bench -p simlin-engine --bench array_ops
+cargo bench -p simlin-tests --bench compiler
+cargo bench -p simlin-tests --bench simulation
+cargo bench -p simlin-tests --bench array_ops
 
 # Run a specific benchmark group within a suite
-cargo bench -p simlin-engine --bench compiler -- parse_mdl
-cargo bench -p simlin-engine --bench compiler -- bytecode_compile/clearn
+cargo bench -p simlin-tests --bench compiler -- parse_mdl
+cargo bench -p simlin-tests --bench compiler -- bytecode_compile/clearn
 ```
 
 Criterion saves results in `target/criterion/` and generates HTML reports in `target/criterion/<group>/report/index.html`.
@@ -86,7 +86,7 @@ What it measures, and what it deliberately excludes:
 
 Absolute numbers include the async public-API overhead, so the VM/wasm ratio is the figure to compare across runs.
 
-The Rust counterpart is `src/simlin-engine/examples/backend_bench.rs`, which uses the same eval-vs-eval methodology and median statistic against the lower-level `Vm`/wasm interfaces.
+The Rust counterpart is `src/simlin-tests/examples/backend_bench.rs`, which uses the same eval-vs-eval methodology and median statistic against the lower-level `Vm`/wasm interfaces.
 
 Results are reported in the PR or chat, not committed: the harness is regenerable, but checked-in numbers go stale and mislead.
 Do not add a results file.
@@ -162,14 +162,14 @@ Criterion benchmark binaries are standalone executables.
 To build one without running it:
 
 ```bash
-cargo bench -p simlin-engine --bench compiler --no-run
+cargo bench -p simlin-tests --bench compiler --no-run
 ```
 
 The binary will be in `target/release/deps/compiler-<hash>`.
 Find the exact path with:
 
 ```bash
-cargo bench -p simlin-engine --bench compiler --no-run 2>&1 | grep -o 'target/[^ ]*'
+cargo bench -p simlin-tests --bench compiler --no-run 2>&1 | grep -o 'target/[^ ]*'
 ```
 
 ### CPU profiling with perf (Linux)
@@ -209,7 +209,7 @@ kcachegrind callgrind.out
 ```
 
 A release build inlines small hot code into its callers, so a per-function listing has no row for "all hashing" or "all refcounting".
-`scripts/callgrind-by-file.py` sums a profile by the source file each instruction came from, which sees through inlining, and lists the functions paying for one file; its header has the commands for profiling one compile of a model with `examples/clearn_profile.rs`.
+`scripts/callgrind-by-file.py` sums a profile by the source file each instruction came from, which sees through inlining, and lists the functions paying for one file; its header has the commands for profiling one compile of a model with `src/simlin-tests/examples/clearn_profile.rs`.
 
 ### Allocation profiling with DHAT (valgrind)
 
@@ -293,10 +293,10 @@ To save an explicit baseline for later comparison:
 
 ```bash
 # Save a baseline
-cargo bench -p simlin-engine --bench compiler -- --save-baseline before-change
+cargo bench -p simlin-tests --bench compiler -- --save-baseline before-change
 
 # Run again after making changes
-cargo bench -p simlin-engine --bench compiler -- --baseline before-change
+cargo bench -p simlin-tests --bench compiler -- --baseline before-change
 ```
 
 HTML comparison reports are generated in `target/criterion/<group>/report/index.html`.

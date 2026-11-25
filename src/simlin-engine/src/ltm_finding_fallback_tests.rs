@@ -9,8 +9,8 @@ use std::collections::HashMap;
 
 use super::super::{LinkOffset, MemoryMeter, ScriptedClock, SystemClock};
 use super::*;
-use crate::common::{Canonical, Ident, IdentMap};
-use crate::results::{Method, Specs};
+use simlin_base::common::{Canonical, Ident, IdentMap};
+use simlin_base::results::{Method, Specs};
 
 // --- Fixture construction -------------------------------------------------
 
@@ -148,7 +148,7 @@ fn default_weight_is_clamped_log_abs() {
     assert_eq!(FallbackWeight::DEFAULT, FallbackWeight::ClampedLogAbs);
 }
 
-/// The production strategy is the one `examples/ltm_fallback_eval` measured
+/// The production strategy is the one `simlin-tests/examples/ltm_fallback_eval` measured
 /// best, and each axis is pinned to the row that settled it.
 ///
 /// The measurement, on World3 and C-LEARN against the exact enumeration:
@@ -846,7 +846,7 @@ fn equal_weight_cycles_are_ordered_by_hop_count_not_node_id() {
 /// alone ranks it first while ordering on hops first ranks the two-node cycle.
 ///
 /// The control matters because it is what the hop term is measured against in
-/// `examples/ltm_fallback_eval.rs`: without an arm that demonstrably picks
+/// `simlin-tests/examples/ltm_fallback_eval.rs`: without an arm that demonstrably picks
 /// differently, "the hop tie-break changes nothing" would be unfalsifiable.
 #[test]
 fn each_tie_break_arm_orders_equal_weight_cycles_its_own_way() {

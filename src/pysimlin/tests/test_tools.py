@@ -2,7 +2,7 @@
 its runs, and an edit a tool makes committed as the project's other edits are.
 
 What each tool answers is pinned by the engine's own tests
-(``simlin_engine::tools``); these pin the binding.
+(``simlin_tools``); these pin the binding.
 """
 
 import json

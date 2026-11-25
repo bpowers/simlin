@@ -6,14 +6,14 @@
 //
 // A pure fromJson<->toJson test (datamodel.test.ts) can pass while still using
 // a wrong JSON key name, because both halves agree on the typo. These tests
-// instead drive the actual Rust serializer (src/simlin-engine/src/json.rs) via
+// instead drive the actual Rust serializer (src/simlin-formats/src/json.rs) via
 // the WASM engine, so a key name that does not match the serializer is caught:
 // the engine drops the unknown field and the survival assertion fails.
 //
 // The scenario mirrors the editor's persistence path exactly. The editor loads
 // a serialized project, builds the in-memory datamodel, and -- on any edit --
 // re-serializes a variable as a FULL upsert (replace-by-UID, see
-// src/simlin-engine/src/patch.rs). Any wire field datamodel.ts fails to
+// src/simlin-edit/src/patch.rs). Any wire field datamodel.ts fails to
 // round-trip is therefore dropped the moment the user edits an unrelated field.
 
 import { describe, it, expect, beforeAll } from '@rstest/core';

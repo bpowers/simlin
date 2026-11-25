@@ -33,17 +33,17 @@ interface ModelPropertiesDrawerProps {
   onSimSpecCommit: (field: SimSpecField, value: number | string) => void;
   onDownloadXmile: () => void;
   // When provided, a destructive "Delete project" action is shown. Hosts that
-  // can't (or shouldn't) delete -- read-only viewers, embeds, the local
-  // file-backed viewer -- simply leave this undefined.
+  // can't (or shouldn't) delete -- read-only viewers, embeds, the notebook
+  // widget -- simply leave this undefined.
   onDelete?: () => Promise<void>;
   // Read-only viewers (issue #935) still see the sim specs and can download
   // the model, but the fields are disabled: sim specs are project content and
   // a draft that silently never commits would misrepresent editability.
   readOnly?: boolean;
-  // The "Exit" link navigates to "/" -- the project list in the app and in
-  // simlin-serve. Defaults to shown; a host that embeds the Editor in a page it
-  // owns (a notebook cell) has no such route and hides it, which also means no
-  // router is needed to mount the drawer.
+  // The "Exit" link navigates to "/" -- the project list in the app. Defaults
+  // to shown; a host that embeds the Editor in a page it owns (a notebook cell)
+  // has no such route and hides it, which also means no router is needed to
+  // mount the drawer.
   showHomeLink?: boolean;
 }
 

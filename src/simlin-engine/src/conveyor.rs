@@ -27,7 +27,7 @@ use std::collections::VecDeque;
 /// no bound a hostile or typo'd `<len>` blows up the allocation two ways: a
 /// `usize`-saturating count (e.g. `1e300 / dt`) panics `vec![0.0; usize::MAX]`
 /// with "capacity overflow" -- a host-process abort under libsimlin's
-/// `panic = "abort"` release profile (wasm, pysimlin, serve) -- and a merely
+/// `panic = "abort"` release profile (wasm, pysimlin) -- and a merely
 /// enormous finite count (`1e12 / dt` -> ~4e12 slats -> ~32 TB) OOMs when
 /// committed. 1,000,000 slats is far beyond any physically meaningful
 /// `transit/dt` ratio yet trivially cheap to reject below, so a latched transit
@@ -36,10 +36,10 @@ use std::collections::VecDeque;
 /// [`ErrorCode::ConveyorTransitTooLong`]) rather than silently saturating the
 /// belt geometry.
 ///
-/// [`ErrorCode::ConveyorTransitTooLong`]: crate::common::ErrorCode::ConveyorTransitTooLong
+/// [`ErrorCode::ConveyorTransitTooLong`]: simlin_base::common::ErrorCode::ConveyorTransitTooLong
 pub(crate) const MAX_SLATS_PER_BELT: usize = 1_000_000;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// Test-only override of [`MAX_SLATS_PER_BELT`], scoped by an active
     /// [`SlatBoundGuard`]. Lets a test trip the slat-count gate with a tiny
@@ -50,10 +50,10 @@ thread_local! {
 }
 
 /// The per-belt slat-count bound for the current thread. Production returns
-/// [`MAX_SLATS_PER_BELT`]; in a `#[cfg(test)]` build an active
+/// [`MAX_SLATS_PER_BELT`]; in a `#[cfg(any(test, feature = "test-support"))]` build an active
 /// [`SlatBoundGuard`] override takes precedence.
-pub(crate) fn slat_bound() -> usize {
-    #[cfg(test)]
+pub fn slat_bound() -> usize {
+    #[cfg(any(test, feature = "test-support"))]
     {
         if let Some(b) = SLAT_BOUND_OVERRIDE.with(|c| c.get()) {
             return b;
@@ -65,20 +65,20 @@ pub(crate) fn slat_bound() -> usize {
 /// RAII guard (test-only) that overrides [`slat_bound`] for the current thread
 /// for the guard's lifetime, restoring the previous value on drop -- so a
 /// panicking test never leaks the override to the next test reusing the thread.
-#[cfg(test)]
-pub(crate) struct SlatBoundGuard {
+#[cfg(any(test, feature = "test-support"))]
+pub struct SlatBoundGuard {
     prev: Option<usize>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl SlatBoundGuard {
-    pub(crate) fn new(bound: usize) -> Self {
+    pub fn new(bound: usize) -> Self {
         let prev = SLAT_BOUND_OVERRIDE.with(|c| c.replace(Some(bound)));
         Self { prev }
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for SlatBoundGuard {
     fn drop(&mut self) {
         SLAT_BOUND_OVERRIDE.with(|c| c.set(self.prev));
@@ -113,8 +113,7 @@ pub fn slat_count(transit: f64, dt: f64) -> usize {
 /// Static per-leak-flow configuration. The leak *fraction* is dynamic (re-read
 /// every DT, §5.1) and passed in per step; only the zone and the integer-unit
 /// flag are fixed here.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LeakConfig {
     /// Fractional belt position where the leak zone starts, from the entry side
     /// (§5.3). Default 0 (entry).
@@ -136,8 +135,7 @@ impl Default for LeakConfig {
 }
 
 /// One slat of the belt. Index 0 is the exit (front); the back is the entry.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 struct Slat {
     /// Material in this slat.
     content: f64,
@@ -160,8 +158,7 @@ impl Slat {
 
 /// Per-conveyor runtime state (§4.2). One instance per scalar conveyor (per
 /// array element for arrayed conveyors).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ConveyorState {
     dt: f64,
     exponential_leak: bool,
@@ -211,8 +208,7 @@ pub struct PhaseAInputs<'a> {
 }
 
 /// Phase A result: the volumes leaving the belt this DT.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct PhaseAResult {
     /// Primary-outflow volume this DT (0 when arrested or the exit is held).
     pub out_vol: f64,
@@ -238,8 +234,6 @@ pub struct PhaseAResult {
 /// weights `w_i` (i = 0..d-1, exit-first) the caller pre-evaluated from the
 /// `<isee:distrib_eq>` graphical function or array; a caller that cannot resolve
 /// them passes an empty vector, which falls back to `Beginning`.
-// Debug is unconditional (not gated on debug-derive): ConveyorPlan/InflowPlan
-// and their metas derive Debug unconditionally and embed a Placement.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Placement {
     /// All of `A` at the entry slat (depth `d`). The XMILE default.
@@ -282,8 +276,7 @@ pub struct PhaseBInputs<'a> {
 }
 
 /// Phase B result: the admitted inflow rates this DT.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct PhaseBResult {
     /// Total admitted inflow *volume* this DT (conveyor-driven + equation).
     pub admitted: f64,

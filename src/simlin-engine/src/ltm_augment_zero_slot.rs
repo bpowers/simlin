@@ -7,9 +7,9 @@
 //! the project line-count lint. Mounted into `ltm_augment`, so callers keep
 //! naming these items `crate::ltm_augment::*`.
 
-use crate::ast::{Expr0, IndexExpr0};
-use crate::builtins::{ArgKind, BuiltinSig, Invariance, ResultKind, UntypedBuiltinFn};
-use crate::canonicalize;
+use simlin_base::ast::{Expr0, IndexExpr0};
+use simlin_base::builtins::{ArgKind, BuiltinSig, Invariance, ResultKind, UntypedBuiltinFn};
+use simlin_base::canonicalize;
 
 use super::FROZEN_CLOCK_HELPER;
 
@@ -58,7 +58,7 @@ pub(crate) enum ZeroSlotPolicy {
     ///
     /// The omitted slot's `0` is the decision (GH #1022), taken over two
     /// positions that disagree.
-    /// `crate::float`'s module docs hold that an engine-manufactured NaN is
+    /// `simlin_base::float`'s module docs hold that an engine-manufactured NaN is
     /// noise in a channel practitioners debug by hand, and this NaN is
     /// engine-made -- the guard form's own subtraction -- on an arm with no
     /// causal dependence on its source, so `0` is the structurally known answer.

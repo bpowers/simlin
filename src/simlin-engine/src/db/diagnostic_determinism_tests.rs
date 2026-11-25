@@ -101,9 +101,9 @@ fn arrayed_and_multi_model_diagnostics_are_reproducible() {
                 x_aux("uw", "3", Some("widgets")),
                 x_aux("ug", "4", Some("gadgets")),
                 x_aux("um", "5", Some("meters")),
-                crate::datamodel::Variable::Aux(crate::datamodel::Aux {
+                simlin_base::datamodel::Variable::Aux(simlin_base::datamodel::Aux {
                     ident: "mixed".to_string(),
-                    equation: crate::datamodel::Equation::Arrayed(
+                    equation: simlin_base::datamodel::Equation::Arrayed(
                         vec!["D".to_string()],
                         vec![
                             ("d1".to_string(), "uw".to_string(), None, None),
@@ -122,7 +122,7 @@ fn arrayed_and_multi_model_diagnostics_are_reproducible() {
                     gf: None,
                     ai_state: None,
                     uid: None,
-                    compat: crate::datamodel::Compat::default(),
+                    compat: simlin_base::datamodel::Compat::default(),
                 }),
                 // Two SMTH1 calls with mismatched input/initial units: the
                 // stdlib-module argument check emits one row each, in
@@ -139,17 +139,17 @@ fn arrayed_and_multi_model_diagnostics_are_reproducible() {
             ],
         );
         let mut datamodel = crate::testutils::x_project(
-            crate::datamodel::SimSpecs {
+            simlin_base::datamodel::SimSpecs {
                 start: 0.0,
                 stop: 4.0,
-                dt: crate::datamodel::Dt::Dt(1.0),
+                dt: simlin_base::datamodel::Dt::Dt(1.0),
                 save_step: None,
-                sim_method: crate::datamodel::SimMethod::Euler,
+                sim_method: simlin_base::datamodel::SimMethod::Euler,
                 time_units: Some("month".to_string()),
             },
             &[main, sub],
         );
-        datamodel.dimensions = vec![crate::datamodel::Dimension::named(
+        datamodel.dimensions = vec![simlin_base::datamodel::Dimension::named(
             "D".to_string(),
             vec!["d1".to_string(), "d2".to_string(), "d3".to_string()],
         )];
@@ -209,7 +209,7 @@ fn the_cycle_reported_among_several_is_a_function_of_the_model() {
         let cycles: Vec<String> =
             collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off)
                 .iter()
-                .filter(|d| d.code() == crate::common::ErrorCode::CircularDependency)
+                .filter(|d| d.code() == simlin_base::common::ErrorCode::CircularDependency)
                 .map(|d| format!("{:?}: {:?}", d.variable, d.reason()))
                 .collect();
         assert_eq!(
@@ -229,17 +229,17 @@ fn conveyor_param_unit_diagnostics_are_reproducible() {
     use crate::testutils::{x_aux, x_model, x_project};
 
     let belt = |ident: &str| {
-        crate::datamodel::Variable::Stock(crate::datamodel::Stock {
+        simlin_base::datamodel::Variable::Stock(simlin_base::datamodel::Stock {
             ident: ident.to_string(),
-            equation: crate::datamodel::Equation::Scalar("10".to_string()),
+            equation: simlin_base::datamodel::Equation::Scalar("10".to_string()),
             documentation: String::new(),
             units: Some("widgets".to_string()),
             inflows: vec![],
             outflows: vec![],
             ai_state: None,
             uid: None,
-            compat: crate::datamodel::Compat {
-                conveyor: Some(crate::datamodel::Conveyor {
+            compat: simlin_base::datamodel::Compat {
+                conveyor: Some(simlin_base::datamodel::Conveyor {
                     // widgets, where `<len>` requires the time unit (month).
                     transit_time: "w_len".to_string(),
                     capacity: None,
@@ -252,7 +252,7 @@ fn conveyor_param_unit_diagnostics_are_reproducible() {
                     exponential_leak: false,
                     ignore_earlier_zone_losses: false,
                 }),
-                ..crate::datamodel::Compat::default()
+                ..simlin_base::datamodel::Compat::default()
             },
         })
     };
@@ -267,12 +267,12 @@ fn conveyor_param_unit_diagnostics_are_reproducible() {
             ],
         );
         let datamodel = x_project(
-            crate::datamodel::SimSpecs {
+            simlin_base::datamodel::SimSpecs {
                 start: 0.0,
                 stop: 4.0,
-                dt: crate::datamodel::Dt::Dt(1.0),
+                dt: simlin_base::datamodel::Dt::Dt(1.0),
                 save_step: None,
-                sim_method: crate::datamodel::SimMethod::Euler,
+                sim_method: simlin_base::datamodel::SimMethod::Euler,
                 time_units: Some("month".to_string()),
             },
             &[main],

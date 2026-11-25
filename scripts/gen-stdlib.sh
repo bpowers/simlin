@@ -15,7 +15,7 @@ cargo build -p simlin-cli --release
 # Generate the stdlib Rust code
 target/release/simlin gen-stdlib \
     --stdlib-dir stdlib \
-    --output src/simlin-engine/src/stdlib.gen.rs
+    --output src/simlin-base/src/stdlib.gen.rs
 
 # Ensure the generated code is formatted consistently
-cargo fmt -p simlin-engine
+cargo fmt -p simlin-base

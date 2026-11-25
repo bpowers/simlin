@@ -1,0 +1,1426 @@
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
+
+//! MDL AST to datamodel conversion.
+//!
+//! This module converts parsed MDL AST items directly to `datamodel::Project`,
+//! bypassing the XMILE intermediate format.
+
+#[cfg(test)]
+mod apply_to_all_tests;
+#[cfg(test)]
+mod axis_dimension_tests;
+mod control;
+mod dimensions;
+#[cfg(test)]
+mod element_value_tests;
+mod external_data;
+mod helpers;
+#[cfg(test)]
+mod macro_tests;
+mod macros;
+mod multi_output;
+#[cfg(test)]
+mod number_list_tests;
+mod stocks;
+mod types;
+mod variables;
+
+pub(in crate::mdl) use dimensions::{element_owners, smallest_dimension_holding};
+pub(in crate::mdl) use external_data::is_external_data_placeholder;
+use helpers::{canonical_name, get_equation_name};
+pub(crate) use types::ConvertError;
+use types::{SimSpecsBuilder, SyntheticFlow};
+pub(crate) use types::{SymbolInfo, VariableType};
+
+use crate::mdl::view::{self, VensimView};
+
+use std::collections::{HashMap, HashSet};
+
+use crate::import_losses::ImportWarning;
+use simlin_base::datamodel::{Dimension, Project, SimMethod, Unit};
+
+use crate::mdl::ast::{Equation as MdlEquation, MdlItem, SubscriptElement};
+
+/// Information about a group collected during parsing.
+struct GroupInfo {
+    /// Group name (raw, will be normalized later)
+    name: String,
+    /// Index of parent group in the groups vec, if any
+    parent_index: Option<usize>,
+    /// Canonical names of variables in this group
+    members: Vec<String>,
+}
+use crate::mdl::reader::EquationReader;
+use crate::mdl::settings::PostEquationParser;
+use crate::mdl::xmile_compat::XmileFormatter;
+
+/// Context for MDL to datamodel conversion.
+pub(crate) struct ConversionContext<'input> {
+    /// All parsed items from the MDL file
+    items: Vec<MdlItem<'input>>,
+    /// Symbol table mapping canonical names to symbol info
+    symbols: HashMap<String, SymbolInfo<'input>>,
+    /// Collected dimensions
+    dimensions: Vec<Dimension>,
+    /// [`Self::dimensions`] in canonicalized `DimensionsContext` form, built on
+    /// first use.
+    ///
+    /// Cached because it is read once per ELEMENT of every arrayed variable
+    /// (`build_element_context`, resolving cross-dimension mapping
+    /// substitutions), and building it canonicalizes and interns every
+    /// dimension's every element name -- 2% of a C-LEARN import's instructions
+    /// spent rebuilding one immutable value. Invalidated by
+    /// [`Self::push_dimension`], which is the only way `dimensions` grows, so
+    /// the cache cannot go stale by construction rather than by convention.
+    dims_ctx: std::sync::OnceLock<simlin_base::dimensions::DimensionsContext>,
+    /// Dimension equivalences: source canonical -> target canonical
+    equivalences: HashMap<String, String>,
+    /// Original (pre-canonicalization) names for equivalence sources
+    equivalence_original_names: HashMap<String, String>,
+    /// SimSpecs builder
+    sim_specs: SimSpecsBuilder,
+    /// Integration method (to be used in Phase 10 for settings parsing)
+    #[allow(dead_code)]
+    integration_method: SimMethod,
+    /// Unit equivalences
+    unit_equivs: Vec<Unit>,
+    /// Expression formatter
+    formatter: XmileFormatter,
+    /// Synthetic flows generated for stocks with non-decomposable rates
+    synthetic_flows: Vec<SyntheticFlow>,
+    /// Maps element names to their owning dimension name (canonical).
+    /// Used for ambiguous element resolution and BangElement formatting.
+    /// First/largest match wins like xmutil's owner assignment.
+    element_owners: HashMap<String, String>,
+    /// Maps dimension names (canonical) to their element lists (expanded).
+    dimension_elements: HashMap<String, Vec<String>>,
+    /// Lookup variables whose tables extrapolate: those a `TABXL` call names.
+    extrapolate_lookups: HashSet<String>,
+    /// Raw subscript definitions for recursive expansion during dimension building.
+    /// Maps canonical dimension name to the raw SubscriptElement list.
+    raw_subscript_defs: HashMap<String, Vec<SubscriptElement<'input>>>,
+    /// Collected groups during parsing
+    groups: Vec<GroupInfo>,
+    /// Index of current group for variable assignment (None = no group yet)
+    current_group_index: Option<usize>,
+    /// Parsed views from the sketch section
+    views: Vec<VensimView>,
+    /// Optional data provider for resolving GET DIRECT references
+    data_provider: Option<&'input dyn crate::data_provider::DataProvider>,
+    /// File aliases from type 30 settings (e.g. "?data" -> "data.xlsx")
+    file_aliases: HashMap<String, String>,
+    /// The source after the equations (the sketch and the settings), empty
+    /// for a macro body's sub-context
+    post_equations: &'input str,
+    /// Whether to find what the file holds that the project does not keep.
+    /// Only a caller that asks for the losses pays to find them.
+    report_losses: bool,
+    /// Whether the last pass keeps one equation where a variable's elements
+    /// say one thing (`element_equations`); off only to compare against.
+    compact_elements: bool,
+    /// The control variables whose equations are not constants, so the sim
+    /// specs hold their defaults (`control::read_controls`).
+    unread_controls: Vec<control::Control>,
+}
+
+impl<'input> ConversionContext<'input> {
+    /// Create a new conversion context from MDL source (convenience wrapper for tests).
+    #[cfg(test)]
+    pub fn new(source: &'input str) -> Result<Self, ConvertError> {
+        Self::new_with_data(source, None)
+    }
+
+    /// Create a new conversion context from MDL source with an optional DataProvider.
+    pub(crate) fn new_with_data(
+        source: &'input str,
+        data_provider: Option<&'input dyn crate::data_provider::DataProvider>,
+    ) -> Result<Self, ConvertError> {
+        let mut reader = EquationReader::new(source);
+        let items: Result<Vec<MdlItem<'input>>, _> = reader.by_ref().collect();
+        let items = items?;
+
+        // Parse views and settings from remaining source (after equations)
+        let remaining = reader.remaining();
+
+        // Parse views from sketch section
+        let views = view::parse_views(remaining)?;
+
+        // Parse settings (after views end marker)
+        let settings_parser = PostEquationParser::new(remaining);
+        let settings = settings_parser.parse_settings();
+
+        let mut ctx = Self::new_from_items(
+            items,
+            Vec::new(),
+            XmileFormatter::new(),
+            data_provider,
+            SimSpecsBuilder {
+                sim_method: Some(settings.integration_method),
+                ..SimSpecsBuilder::default()
+            },
+            settings.integration_method,
+            settings.unit_equivs,
+            views,
+            settings.file_aliases,
+        );
+        ctx.post_equations = remaining;
+        Ok(ctx)
+    }
+
+    /// Construct a `ConversionContext` over a caller-supplied item list.
+    ///
+    /// This is the reusable core of `new_with_data`: it does no reader draining
+    /// or settings parsing, so it can also build a *scoped sub-context* for a
+    /// macro body. In that case the caller passes the macro's body equations as
+    /// `items` together with the parent context's already-built `dimensions`,
+    /// `data_provider`, and `formatter` (the macro body defines no dimensions of
+    /// its own, and the formatter's subrange-name state must match the parent's
+    /// so body-equation formatting is identical). The remaining settings-derived
+    /// inputs (`sim_specs`, `integration_method`, `unit_equivs`, `views`,
+    /// `file_aliases`) are irrelevant to a macro body, which the caller signals
+    /// by passing defaults/empties.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::mdl::convert) fn new_from_items(
+        items: Vec<MdlItem<'input>>,
+        dimensions: Vec<Dimension>,
+        formatter: XmileFormatter,
+        data_provider: Option<&'input dyn crate::data_provider::DataProvider>,
+        sim_specs: SimSpecsBuilder,
+        integration_method: SimMethod,
+        unit_equivs: Vec<Unit>,
+        views: Vec<VensimView>,
+        file_aliases: HashMap<String, String>,
+    ) -> Self {
+        let n_items = items.len();
+        ConversionContext {
+            items,
+            symbols: HashMap::with_capacity(n_items),
+            dimensions,
+            dims_ctx: std::sync::OnceLock::new(),
+            equivalences: HashMap::new(),
+            equivalence_original_names: HashMap::new(),
+            sim_specs,
+            integration_method,
+            unit_equivs,
+            formatter,
+            synthetic_flows: Vec::new(),
+            element_owners: HashMap::new(),
+            dimension_elements: HashMap::new(),
+            extrapolate_lookups: HashSet::new(),
+            raw_subscript_defs: HashMap::new(),
+            groups: Vec::new(),
+            current_group_index: None,
+            views,
+            data_provider,
+            file_aliases,
+            post_equations: "",
+            report_losses: false,
+            compact_elements: true,
+            unread_controls: Vec::new(),
+        }
+    }
+
+    /// Append a dimension, dropping the memoized [`Self::dims_ctx`].
+    ///
+    /// The ONLY place `dimensions` grows; going through it is what makes the
+    /// memo correct without relying on the phase ordering (dimension building
+    /// happens to finish before any variable is converted today).
+    pub(in crate::mdl::convert) fn push_dimension(&mut self, dim: Dimension) {
+        self.dimensions.push(dim);
+        self.dims_ctx.take();
+    }
+
+    /// The canonicalized form of [`Self::dimensions`], built once.
+    pub(in crate::mdl::convert) fn dimensions_context(
+        &self,
+    ) -> &simlin_base::dimensions::DimensionsContext {
+        self.dims_ctx.get_or_init(|| {
+            simlin_base::dimensions::DimensionsContext::from(self.dimensions.as_slice())
+        })
+    }
+
+    /// Convert the MDL to a Project, also returning what the file holds that
+    /// the project does not keep ([`ImportWarning`]) when `report_losses`
+    /// is set, and nothing when it is not.
+    pub(crate) fn convert(mut self) -> Result<(Project, Vec<ImportWarning>), ConvertError> {
+        // Pass 1: Collect symbols and build initial symbol table
+        self.collect_symbols();
+
+        // Pass 2: Build dimensions from subscript definitions
+        self.build_dimensions()?;
+
+        // Pass 2.5: Set subrange dimensions on formatter for bang-subscript formatting
+        // Subranges are dimensions with a mapping set (they map to a parent dimension).
+        // Use canonical form (to_lower_space) since the formatter lookup also uses
+        // to_lower_space for consistency.
+        let mut subrange_dims: HashSet<String> = self
+            .dimensions
+            .iter()
+            .filter(|d| d.maps_to().is_some())
+            .map(|d| canonical_name(&d.name))
+            .collect();
+
+        // Also detect implicit subranges: dimensions whose elements are all owned
+        // by a single different parent dimension. These are subranges for bang
+        // formatting purposes even without explicit `->` mapping syntax.
+        for (dim_canonical, elements) in &self.dimension_elements {
+            if subrange_dims.contains(dim_canonical) || elements.is_empty() {
+                continue;
+            }
+            if let Some(first_owner) = elements
+                .first()
+                .and_then(|e| self.element_owners.get(&canonical_name(e)))
+                && first_owner != dim_canonical
+                && elements.iter().all(|e| {
+                    self.element_owners
+                        .get(&canonical_name(e))
+                        .map(|o| o == first_owner)
+                        .unwrap_or(false)
+                })
+            {
+                subrange_dims.insert(dim_canonical.clone());
+            }
+        }
+
+        self.formatter.set_subranges(subrange_dims);
+        self.set_formatter_scope();
+
+        // Pass 3: Mark variable types (stock/flow/aux) and extract control vars
+        self.mark_variable_types();
+
+        // Pass 4: Scan for the TABXL calls that mark a table as extrapolating
+        self.scan_for_extrapolate_lookups();
+
+        // Pass 5: Link stocks and flows
+        self.link_stocks_and_flows();
+
+        // Pass 6: Convert each :MACRO: definition into a macro-marked Model.
+        // This must run before build_project consumes `self`, since it reads
+        // self.items / dimensions / formatter / data_provider to build a
+        // scoped sub-context per macro body.
+        let macro_models = self.build_macro_models()?;
+
+        // Pass 6.5: Materialize every multi-output (`:`-list) macro
+        // invocation in the main model BEFORE build_project's per-symbol loop
+        // formats it. A multi-output `Expr::App` must never reach
+        // `build_equation` / the XMILE formatter (the formatter asserts
+        // `output_bindings.is_empty()`). This needs the macro-marked models'
+        // `MacroSpec`s, which Pass 6 just built; it produces brand-new
+        // datamodel variables (a Module + binding Auxes) and the set of LHS
+        // symbols whose normal build must be skipped.
+        let macro_models_by_name: HashMap<String, &simlin_base::datamodel::Model> = macro_models
+            .iter()
+            .filter(|m| m.macro_spec.is_some())
+            .map(|m| (canonical_name(&m.name), m))
+            .collect();
+        let materialization = self.materialize_multi_output_invocations(&macro_models_by_name)?;
+
+        // Pass 7: Build the final project (the "main" model) and attach the
+        // macro-marked models alongside it.
+        let self_compact = self.compact_elements;
+        let (mut project, losses) = self.build_project(&materialization)?;
+        // Pass 8: Where the file wrote a variable out once per element and
+        // its elements say one thing, keep that one equation.
+        if self_compact {
+            crate::element_equations::compact_element_equations(&mut project);
+        }
+        project.models.extend(macro_models);
+        Ok((project, losses))
+    }
+
+    /// Tell the formatter what this model's names denote: its symbols, and
+    /// the elements of the project's dimensions.
+    pub(in crate::mdl::convert) fn set_formatter_scope(&mut self) {
+        let owners = element_owners(&self.dimensions);
+        let mut elements = HashMap::new();
+        for dim in &self.dimensions {
+            let simlin_base::datamodel::DimensionElements::Named(names) = &dim.elements else {
+                continue;
+            };
+            for element in names {
+                let key = canonical_name(element);
+                if owners.get(&key) == Some(&canonical_name(&dim.name)) {
+                    elements.insert(key, (dim.name.clone(), element.clone()));
+                }
+            }
+        }
+        // A macro body is converted in a context of its own, which holds no
+        // macro definitions; it calls the file's macros by the names its
+        // parent's scope already has.
+        let mut macros = self.formatter.macro_names();
+        macros.extend(self.items.iter().filter_map(|item| match item {
+            MdlItem::Macro(def) => Some(canonical_name(&def.name)),
+            _ => None,
+        }));
+        self.formatter
+            .set_scope(crate::mdl::xmile_compat::NameScope {
+                variables: self.symbols.keys().cloned().collect(),
+                elements,
+                macros,
+            });
+    }
+
+    /// Pass 1: Collect all symbols from the parsed items.
+    fn collect_symbols(&mut self) {
+        // Clone items to avoid borrow issues
+        let items = std::mem::take(&mut self.items);
+
+        for item in &items {
+            match item {
+                MdlItem::Equation(eq) => {
+                    if let Some(name) = get_equation_name(&eq.equation) {
+                        let canonical = canonical_name(&name);
+
+                        // Assign to group only if:
+                        // 1. There's a current group
+                        // 2. This is the variable's first equation
+                        // 3. This is NOT a subscript definition, equivalence, or control variable
+                        // Note: Macro equations are self-contained in MacroDef.equations
+                        // and never appear in the main items iteration, so we don't
+                        // need special handling for them.
+                        let is_first_equation = !self.symbols.contains_key(&canonical);
+                        let is_variable_equation = Self::is_variable_equation(&eq.equation);
+                        if let Some(group_idx) = self.current_group_index
+                            && is_first_equation
+                            && is_variable_equation
+                        {
+                            self.groups[group_idx].members.push(canonical.clone());
+                        }
+
+                        let info = self
+                            .symbols
+                            .entry(canonical)
+                            .or_insert_with(SymbolInfo::new);
+                        info.equations.push((**eq).clone());
+                    }
+                }
+                MdlItem::Group(group) => {
+                    // Determine parent using xmutil algorithm (VensimParse.cpp:259-275):
+                    // If groups empty OR (first char differs from last group AND new first char is digit):
+                    //   Search for existing group with same name as owner
+                    // Otherwise: owner is previous group
+                    let parent_index = self.determine_group_parent(&group.name);
+
+                    let group_info = GroupInfo {
+                        name: group.name.to_string(),
+                        parent_index,
+                        members: Vec::new(),
+                    };
+                    self.groups.push(group_info);
+                    self.current_group_index = Some(self.groups.len() - 1);
+                }
+                MdlItem::Macro(_) | MdlItem::EqEnd(_) => {}
+            }
+        }
+
+        // Restore items
+        self.items = items;
+    }
+
+    /// Check if an equation represents an actual variable (not a subscript def,
+    /// equivalence, or control variable like INITIAL TIME).
+    fn is_variable_equation(eq: &MdlEquation<'_>) -> bool {
+        // Skip subscript definitions and equivalences
+        if matches!(
+            eq,
+            MdlEquation::SubscriptDef(_, _) | MdlEquation::Equivalence(_, _, _)
+        ) {
+            return false;
+        }
+
+        // The control variables are the sim specs, not variables.
+        get_equation_name(eq).is_none_or(|name| control::Control::named(&name).is_none())
+    }
+
+    /// Determine the parent index for a new group using xmutil's algorithm.
+    /// (VensimParse.cpp:259-275)
+    fn determine_group_parent(&self, new_group_name: &str) -> Option<usize> {
+        if self.groups.is_empty() {
+            return None;
+        }
+
+        let new_first_char = new_group_name.chars().next();
+        let last_group_first_char = self.groups.last().and_then(|g| g.name.chars().next());
+
+        // If first char differs AND new first char is a digit:
+        // Try to find existing group with same name as owner
+        let try_find_owner = matches!(
+            (new_first_char, last_group_first_char),
+            (Some(c1), Some(c2)) if c1.is_ascii_digit() && c1 != c2
+        );
+
+        if try_find_owner {
+            // Search for existing group with this name as owner
+            // (This is what xmutil does, though it usually fails to find a match)
+            for (idx, g) in self.groups.iter().enumerate() {
+                if g.name == new_group_name {
+                    return Some(idx);
+                }
+            }
+        }
+
+        // Default: owner is the previous group
+        Some(self.groups.len() - 1)
+    }
+}
+
+// build_project and other variable building methods are in variables.rs
+
+/// Convert MDL source to a Project (convenience wrapper for tests).
+#[cfg(test)]
+pub fn convert_mdl(source: &str) -> Result<Project, ConvertError> {
+    convert_mdl_with_data(source, None)
+}
+
+/// Convert MDL source to a Project with an optional DataProvider
+/// for resolving GET DIRECT external data references.
+pub(crate) fn convert_mdl_with_data(
+    source: &str,
+    data_provider: Option<&dyn crate::data_provider::DataProvider>,
+) -> Result<Project, ConvertError> {
+    let ctx = ConversionContext::new_with_data(source, data_provider)?;
+    ctx.convert().map(|(project, _)| project)
+}
+
+/// The project an MDL file opens as with every variable the reader writes out
+/// once per element left so: what the compaction pass is compared against.
+#[cfg(test)]
+pub(crate) fn convert_mdl_per_element(source: &str) -> Result<Project, ConvertError> {
+    let mut ctx = ConversionContext::new_with_data(source, None)?;
+    ctx.compact_elements = false;
+    ctx.convert().map(|(project, _)| project)
+}
+
+/// [`convert_mdl_with_data`], also returning what the file holds that the
+/// project does not keep.
+pub(crate) fn convert_mdl_reporting(
+    source: &str,
+    data_provider: Option<&dyn crate::data_provider::DataProvider>,
+) -> Result<(Project, Vec<ImportWarning>), ConvertError> {
+    let mut ctx = ConversionContext::new_with_data(source, data_provider)?;
+    ctx.report_losses = true;
+    ctx.convert()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use simlin_base::datamodel::{Dt, Equation, Variable};
+
+    #[test]
+    fn test_simple_conversion() {
+        let mdl = "x = 5
+~ Units
+~ A constant |
+y = x * 2
+~ Units
+~ Derived value |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+        assert_eq!(project.models.len(), 1);
+        assert!(!project.models[0].variables.is_empty());
+    }
+
+    #[test]
+    fn an_absent_saveper_follows_the_time_step() {
+        // No SAVEPER defined: the save step follows the time step, which the
+        // datamodel says with no save step (simulated as the time step).
+        let mdl = "INITIAL TIME = 0
+~ ~|
+FINAL TIME = 100
+~ ~|
+TIME STEP = 0.5
+~ ~|
+x = 1
+~ ~|
+\\\\\\---///
+";
+        let project = convert_mdl(mdl).unwrap();
+
+        assert_eq!(project.sim_specs.dt, Dt::Dt(0.5));
+        assert_eq!(project.sim_specs.save_step, None);
+        assert_eq!(
+            simlin_base::results::Specs::from(&project.sim_specs).save_step,
+            0.5
+        );
+    }
+
+    #[test]
+    fn test_simspecs_saveper_explicit() {
+        // SAVEPER explicitly defined, should use that value
+        let mdl = "INITIAL TIME = 0
+~ ~|
+FINAL TIME = 100
+~ ~|
+TIME STEP = 0.5
+~ ~|
+SAVEPER = 1
+~ ~|
+x = 1
+~ ~|
+\\\\\\---///
+";
+        let project = convert_mdl(mdl).unwrap();
+
+        assert_eq!(project.sim_specs.dt, Dt::Dt(0.5));
+        assert_eq!(
+            project.sim_specs.save_step,
+            Some(Dt::Dt(1.0)),
+            "save_step should use explicit SAVEPER value"
+        );
+    }
+
+    #[test]
+    fn test_integration_method_from_settings() {
+        // MDL with settings section containing type 15 (integration method)
+        let mdl = "x = 1
+~ ~|
+\\\\\\---///
+V300
+*View 1
+///---\\\\\\
+:L<%^E!@
+15:0,0,0,1,0,0
+";
+        let project = convert_mdl(mdl).unwrap();
+
+        assert_eq!(
+            project.sim_specs.sim_method,
+            SimMethod::RungeKutta4,
+            "sim_method should be RK4 from type 15 settings"
+        );
+    }
+
+    #[test]
+    fn test_integration_method_default_euler() {
+        // MDL without settings section should default to Euler
+        let mdl = "x = 1
+~ ~|
+\\\\\\---///
+";
+        let project = convert_mdl(mdl).unwrap();
+
+        assert_eq!(
+            project.sim_specs.sim_method,
+            SimMethod::Euler,
+            "sim_method should default to Euler"
+        );
+    }
+
+    #[test]
+    fn test_unit_equivalences_from_settings() {
+        // MDL with settings section containing type 22 (unit equivalence)
+        let mdl = "x = 1
+~ Dollar ~|
+\\\\\\---///
+V300
+///---\\\\\\
+:L<%^E!@
+22:$,Dollar,Dollars,$s
+22:Hour,Hours,Hr
+";
+        let project = convert_mdl(mdl).unwrap();
+
+        assert_eq!(project.units.len(), 2);
+
+        let dollar = &project.units[0];
+        assert_eq!(dollar.name, "Dollar");
+        assert_eq!(dollar.equation, Some("$".to_string()));
+        assert_eq!(dollar.aliases, vec!["Dollars", "$s"]);
+        assert!(!dollar.disabled);
+
+        let hour = &project.units[1];
+        assert_eq!(hour.name, "Hour");
+        assert_eq!(hour.equation, None);
+        assert_eq!(hour.aliases, vec!["Hours", "Hr"]);
+    }
+
+    #[test]
+    fn test_full_mdl_with_settings() {
+        // Full MDL file similar to test_control_vars.mdl
+        let mdl = r#"x = 5
+~ Units
+~ A constant |
+INITIAL TIME = 0
+~ Month ~|
+FINAL TIME = 100
+~ Month ~|
+TIME STEP = 0.25
+~ Month ~|
+\\\---/// Sketch information
+V300
+*View 1
+$192-192-192,0,Times
+10,1,x,100,100,12,11,8,3,0,0,0,0,0,0
+///---\\\
+:L<%^E!@
+1:Current.vdf
+15:0,0,0,5,0,0
+22:$,Dollar,Dollars
+"#;
+        let project = convert_mdl(mdl).unwrap();
+
+        // Verify sim_specs
+        assert_eq!(project.sim_specs.start, 0.0);
+        assert_eq!(project.sim_specs.stop, 100.0);
+        assert_eq!(project.sim_specs.dt, Dt::Dt(0.25));
+        assert_eq!(
+            project.sim_specs.sim_method,
+            SimMethod::RungeKutta4,
+            "Method code 5 should map to RK4"
+        );
+
+        // Verify unit equivalences
+        assert_eq!(project.units.len(), 1);
+        assert_eq!(project.units[0].name, "Dollar");
+    }
+
+    #[test]
+    fn test_mdl_group_basic() {
+        // Single group with variables using curly brace format
+        let mdl = "{**Control**}\nx = 5\n~ Units\n~ Variable in Control group |\n\ny = 10\n~ Units\n~ Another variable |\n\\\\\\---///\n";
+        let project = convert_mdl(mdl).unwrap();
+        let model = &project.models[0];
+
+        assert_eq!(model.groups.len(), 1);
+        assert_eq!(model.groups[0].name, "Control");
+        assert!(model.groups[0].parent.is_none());
+        // Both x and y should be members
+        assert!(model.groups[0].members.contains(&"x".to_string()));
+        assert!(model.groups[0].members.contains(&"y".to_string()));
+    }
+
+    #[test]
+    fn test_mdl_group_multiple() {
+        // Multiple groups using curly brace format
+        // Group names preserve spaces (xmutil behavior)
+        let mdl =
+            "{**First Group**}\nx = 5\n~ ~|\n\n{**Second Group**}\ny = 10\n~ ~|\n\\\\\\---///\n";
+        let project = convert_mdl(mdl).unwrap();
+        let model = &project.models[0];
+
+        assert_eq!(model.groups.len(), 2);
+        assert_eq!(model.groups[0].name, "First Group");
+        assert_eq!(model.groups[1].name, "Second Group");
+        assert!(model.groups[0].members.contains(&"x".to_string()));
+        assert!(model.groups[1].members.contains(&"y".to_string()));
+    }
+
+    #[test]
+    fn test_mdl_group_hierarchy() {
+        // Groups with hierarchy: second group's parent is first
+        // Group names preserve spaces (xmutil behavior)
+        let mdl = "{**Top Level**}\na = 1\n~ ~|\n\n{**Sub Group**}\nb = 2\n~ ~|\n\\\\\\---///\n";
+        let project = convert_mdl(mdl).unwrap();
+        let model = &project.models[0];
+
+        assert_eq!(model.groups.len(), 2);
+        // First group has no parent
+        assert!(model.groups[0].parent.is_none());
+        // Second group's parent is the first (with preserved spaces)
+        assert_eq!(model.groups[1].parent, Some("Top Level".to_string()));
+    }
+
+    #[test]
+    fn test_mdl_group_first_equation_only() {
+        // Variable should be assigned to group on first equation only
+        let mdl = "{**Group A**}\nx = A FUNCTION OF(y)\n~ ~|\n\n{**Group B**}\nx = 5\n~ ~|\n\\\\\\---///\n";
+        let project = convert_mdl(mdl).unwrap();
+        let model = &project.models[0];
+
+        assert_eq!(model.groups.len(), 2);
+        // x should be in Group A (first equation), not Group B
+        assert!(
+            model.groups[0].members.contains(&"x".to_string()),
+            "x should be in Group A"
+        );
+        assert!(
+            !model.groups[1].members.contains(&"x".to_string()),
+            "x should NOT be in Group B"
+        );
+    }
+
+    #[test]
+    fn test_mdl_group_before_equations() {
+        // Variables before any group marker are not assigned to any group
+        let mdl = "x = 5\n~ ~|\n\n{**Group A**}\ny = 10\n~ ~|\n\\\\\\---///\n";
+        let project = convert_mdl(mdl).unwrap();
+        let model = &project.models[0];
+
+        assert_eq!(model.groups.len(), 1);
+        // x was defined before any group, should not be in any group
+        assert!(
+            !model.groups[0].members.contains(&"x".to_string()),
+            "x should NOT be in any group"
+        );
+        // y was defined after group marker
+        assert!(
+            model.groups[0].members.contains(&"y".to_string()),
+            "y should be in Group A"
+        );
+    }
+
+    #[test]
+    fn test_mdl_group_star_format() {
+        // Test ***\nname\n***| format (name must not contain spaces in star format)
+        let mdl = "***\nMyGroup\n***|\nx = 5\n~ ~|\n\\\\\\---///\n";
+        let project = convert_mdl(mdl).unwrap();
+        let model = &project.models[0];
+
+        assert_eq!(model.groups.len(), 1);
+        assert_eq!(model.groups[0].name, "MyGroup");
+        assert!(model.groups[0].members.contains(&"x".to_string()));
+    }
+
+    #[test]
+    fn test_mdl_group_name_uniqueness() {
+        // If a group name conflicts with a symbol, it should be made unique
+        // xmutil uses " 1" suffix (with space), not "_1"
+        let mdl = "x: a, b\n~ ~|\n\n{**x**}\ny = 5\n~ ~|\n\\\\\\---///\n";
+        let project = convert_mdl(mdl).unwrap();
+        let model = &project.models[0];
+
+        assert_eq!(model.groups.len(), 1);
+        // Group name "x" conflicts with dimension "x", should be "x 1" (with space)
+        assert_eq!(model.groups[0].name, "x 1");
+    }
+
+    #[test]
+    fn test_mdl_group_variables_after_macro() {
+        // Variables defined after a macro should still be assigned to their group.
+        // This tests that macro handling doesn't break group membership.
+        let mdl = "{**Control**}\nx = 5\n~ ~|\n\n:MACRO: MYMACRO(input)\nmacro_var = input * 2\n~ ~|\n:END OF MACRO:\n\ny = 10\n~ ~|\n\\\\\\---///\n";
+        let project = convert_mdl(mdl).unwrap();
+        let model = &project.models[0];
+
+        assert_eq!(model.groups.len(), 1);
+        assert_eq!(model.groups[0].name, "Control");
+        // Both x and y should be in the Control group
+        assert!(
+            model.groups[0].members.contains(&"x".to_string()),
+            "x should be in Control group"
+        );
+        assert!(
+            model.groups[0].members.contains(&"y".to_string()),
+            "y should be in Control group (after macro)"
+        );
+        // macro_var should NOT be in the group (it's inside a macro)
+        assert!(
+            !model.groups[0].members.contains(&"macro_var".to_string()),
+            "macro_var should NOT be in any group (inside macro)"
+        );
+    }
+
+    #[test]
+    fn test_mdl_to_xmile_groups_roundtrip() {
+        // Test that MDL groups survive conversion through XMILE
+        use crate::xmile::{project_from_reader, project_to_xmile};
+        use std::io::Cursor;
+
+        let mdl = "{**Control**}\nx = 5\n~ ~|\n\n{**Settings**}\ny = 10\n~ ~|\n\\\\\\---///\n";
+        let project = convert_mdl(mdl).unwrap();
+        let model = &project.models[0];
+
+        // Verify initial MDL conversion has groups
+        assert_eq!(model.groups.len(), 2);
+        assert_eq!(model.groups[0].name, "Control");
+        assert_eq!(model.groups[1].name, "Settings");
+        assert!(model.groups[0].members.contains(&"x".to_string()));
+        assert!(model.groups[1].members.contains(&"y".to_string()));
+
+        // Convert to XMILE and back
+        let xmile_str = project_to_xmile(&project).unwrap();
+        let mut cursor = Cursor::new(xmile_str.as_bytes());
+        let roundtripped = project_from_reader(&mut cursor).unwrap();
+        let roundtripped_model = &roundtripped.models[0];
+
+        // Verify groups survived the roundtrip
+        assert_eq!(roundtripped_model.groups.len(), 2);
+        assert_eq!(roundtripped_model.groups[0].name, "Control");
+        assert_eq!(roundtripped_model.groups[1].name, "Settings");
+        assert!(
+            roundtripped_model.groups[0]
+                .members
+                .contains(&"x".to_string())
+        );
+        assert!(
+            roundtripped_model.groups[1]
+                .members
+                .contains(&"y".to_string())
+        );
+    }
+
+    #[test]
+    fn test_mdl_group_excludes_subscript_definitions() {
+        // P2: Subscript definitions should NOT be added to group members
+        let mdl = "{**Control**}\nDim: a, b, c\n~ ~|\nx = 5\n~ ~|\n\\\\\\---///\n";
+        let project = convert_mdl(mdl).unwrap();
+        let model = &project.models[0];
+
+        assert_eq!(model.groups.len(), 1);
+        // x should be in the group
+        assert!(
+            model.groups[0].members.contains(&"x".to_string()),
+            "x should be in Control group"
+        );
+        // Dim (subscript definition) should NOT be in the group (check both cases)
+        assert!(
+            !model.groups[0].members.contains(&"Dim".to_string())
+                && !model.groups[0].members.contains(&"dim".to_string()),
+            "Subscript definition 'Dim' should NOT be in group members, got: {:?}",
+            model.groups[0].members
+        );
+    }
+
+    #[test]
+    fn test_mdl_group_excludes_control_variables() {
+        // P2: Control variables (INITIAL TIME, FINAL TIME, etc.) should NOT be in group members
+        let mdl = "{**Control**}\nINITIAL TIME = 0\n~ ~|\nFINAL TIME = 100\n~ ~|\nTIME STEP = 1\n~ ~|\nx = 5\n~ ~|\n\\\\\\---///\n";
+        let project = convert_mdl(mdl).unwrap();
+        let model = &project.models[0];
+
+        assert_eq!(model.groups.len(), 1);
+
+        // Debug: print members
+        eprintln!("Group members: {:?}", model.groups[0].members);
+
+        // x should be in the group
+        assert!(
+            model.groups[0].members.contains(&"x".to_string()),
+            "x should be in Control group"
+        );
+        // Control variables should NOT be in the group
+        // Members are stored with space_to_underbar format
+        assert!(
+            !model.groups[0]
+                .members
+                .contains(&"INITIAL_TIME".to_string())
+                && !model.groups[0]
+                    .members
+                    .contains(&"initial_time".to_string()),
+            "INITIAL TIME should NOT be in group members"
+        );
+        assert!(
+            !model.groups[0].members.contains(&"FINAL_TIME".to_string())
+                && !model.groups[0].members.contains(&"final_time".to_string()),
+            "FINAL TIME should NOT be in group members"
+        );
+        assert!(
+            !model.groups[0].members.contains(&"TIME_STEP".to_string())
+                && !model.groups[0].members.contains(&"time_step".to_string()),
+            "TIME STEP should NOT be in group members"
+        );
+    }
+
+    #[test]
+    fn test_mdl_group_name_preserves_spaces() {
+        // Group names should preserve spaces, not convert to underscores
+        let mdl = "{**Control Panel**}\nx = 5\n~ ~|\n\\\\\\---///\n";
+        let project = convert_mdl(mdl).unwrap();
+        let model = &project.models[0];
+
+        assert_eq!(model.groups.len(), 1);
+        assert_eq!(
+            model.groups[0].name, "Control Panel",
+            "Group name should preserve spaces"
+        );
+    }
+
+    #[test]
+    fn test_mdl_group_name_conflict_uses_space_suffix() {
+        // When group name conflicts, xmutil appends " 1" (with space), not "_1"
+        let mdl = "x = 1\n~ ~|\n{**x**}\ny = 5\n~ ~|\n\\\\\\---///\n";
+        let project = convert_mdl(mdl).unwrap();
+        let model = &project.models[0];
+
+        assert_eq!(model.groups.len(), 1);
+        // Group name "x" conflicts with variable "x", should be "x 1" (with space)
+        assert_eq!(
+            model.groups[0].name, "x 1",
+            "Conflicting group name should use ' 1' suffix (with space)"
+        );
+    }
+
+    #[test]
+    fn test_mdl_group_name_conflict_with_dimension_element() {
+        // Group name conflict detection should include dimension elements
+        let mdl = "Dim: elem1, elem2\n~ ~|\n{**elem1**}\nx = 5\n~ ~|\n\\\\\\---///\n";
+        let project = convert_mdl(mdl).unwrap();
+        let model = &project.models[0];
+
+        assert_eq!(model.groups.len(), 1);
+        // Group name "elem1" conflicts with dimension element "elem1"
+        assert_eq!(
+            model.groups[0].name, "elem1 1",
+            "Group name conflicting with dimension element should use ' 1' suffix"
+        );
+    }
+
+    #[test]
+    fn test_implicit_subrange_bang_subscript_formatting() {
+        // When a dimension is an implicit subrange (its elements are a subset of
+        // a larger dimension, without explicit `->` mapping), BangElement on it
+        // should produce "dim.*" not just "*".
+        let mdl = "COP: OECD US, OECD EU, DevA, DevB
+~ ~|
+COP Developed: OECD US, OECD EU
+~ ~|
+x[COP] = 1
+~ ~|
+y = SUM(x[COP Developed!])
+~ ~|
+\\\\\\---///
+";
+        let project = convert_mdl(mdl).unwrap();
+        let y = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "y")
+            .expect("Should have y variable");
+
+        if let Variable::Aux(a) = y {
+            let eq = match &a.equation {
+                Equation::Scalar(expr) => expr.clone(),
+                other => panic!("Expected Scalar equation, got {:?}", other),
+            };
+            assert!(
+                eq.contains("COP_Developed.*"),
+                "Bang subscript on implicit subrange should produce 'COP_Developed.*', got: {}",
+                eq
+            );
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_mdl_group_numeric_leading_owner_logic() {
+        // xmutil's numeric-leading owner logic:
+        // If new group starts with digit AND differs from previous group's first char,
+        // search for existing group with same name as owner
+        let mdl = "{**1 Main**}\na = 1\n~ ~|\n{**1.1 Sub**}\nb = 2\n~ ~|\n{**2 Other**}\nc = 3\n~ ~|\n\\\\\\---///\n";
+        let project = convert_mdl(mdl).unwrap();
+        let model = &project.models[0];
+
+        assert_eq!(model.groups.len(), 3);
+        // "1 Main" has no parent (first group)
+        assert!(model.groups[0].parent.is_none());
+        // "1.1 Sub" starts with '1', same as previous, so parent is previous ("1 Main")
+        assert_eq!(model.groups[1].parent, Some("1 Main".to_string()));
+        // "2 Other" starts with '2', differs from '1', and is a digit
+        // So it searches for existing group named "2 Other" (not found), then uses previous
+        assert_eq!(model.groups[2].parent, Some("1-1 Sub".to_string()));
+    }
+
+    #[test]
+    fn test_mdl_views_parsed() {
+        // Test that views are parsed from the sketch section
+        let mdl = r#"x = 5
+~ Units
+~ A constant |
+\\\---/// Sketch information
+V300  Do not put anything below this section
+*View 1
+$192-192-192,0,Helvetica|10|B|0-0-0|0-0-0|0-0-0|-1--1--1|-1--1--1|96,96,100,0
+10,1,x,100,200,40,20,3,3,0,0,0,0,0,0
+///---\\\
+"#;
+        let project = convert_mdl(mdl).unwrap();
+        let model = &project.models[0];
+
+        // Verify views are populated
+        assert_eq!(model.views.len(), 1);
+
+        // Verify the view contains elements
+        let simlin_base::datamodel::View::StockFlow(sf) = &model.views[0];
+        assert!(!sf.elements.is_empty(), "View should have elements");
+    }
+
+    #[test]
+    fn test_mdl_views_with_flow() {
+        // Test view parsing with stocks, flows, and connectors
+        let mdl = r#"Stock = INTEG(inflow, 100)
+~ Units
+~ Stock |
+inflow = 10
+~ Units/Time
+~ Flow |
+\\\---/// Sketch
+V300
+*Test
+$font
+10,1,Stock,100,100,40,20,3,3,0,0,0,0,0,0
+11,2,444,200,100,6,8,34,3,0,0,1,0,0,0
+10,3,inflow,200,120,40,20,40,3,0,0,-1,0,0,0
+1,4,2,1,4,0,0,22,0,0,0,-1--1--1,,1|(150,100)|
+///---\\\
+"#;
+        let project = convert_mdl(mdl).unwrap();
+        let model = &project.models[0];
+
+        assert_eq!(model.views.len(), 1);
+        let simlin_base::datamodel::View::StockFlow(sf) = &model.views[0];
+        // Should have at least stock, flow, and maybe link elements
+        assert!(
+            sf.elements.len() >= 2,
+            "View should have stock and flow elements"
+        );
+    }
+
+    #[test]
+    fn test_mdl_no_views_still_works() {
+        // Test that MDL files without views still parse correctly
+        let mdl = "x = 5\n~ ~|\n\\\\\\---///\n";
+        let project = convert_mdl(mdl).unwrap();
+        let model = &project.models[0];
+
+        // Views should be empty
+        assert!(model.views.is_empty());
+
+        // But the model should still have variables
+        assert!(!model.variables.is_empty());
+    }
+
+    #[test]
+    fn test_get_direct_error_propagates() {
+        // When a DataProvider is configured but returns an error (e.g. missing file),
+        // the conversion should fail rather than silently keeping the raw expression.
+        use crate::data_provider::NullDataProvider;
+
+        let mdl = "x := GET DIRECT DATA('nonexistent.csv', ',', 'A', 'B2')
+~ Units
+~ Data variable |
+\\\\\\---///
+";
+        let provider = NullDataProvider;
+        let result = convert_mdl_with_data(mdl, Some(&provider));
+        assert!(
+            result.is_err(),
+            "GET DIRECT resolution failure should propagate as a conversion error, \
+             not silently keep the raw expression"
+        );
+    }
+
+    /// Find the (single) macro-marked model with the given name in a project.
+    fn find_macro_model<'a>(project: &'a Project, name: &str) -> &'a simlin_base::datamodel::Model {
+        project
+            .models
+            .iter()
+            .find(|m| m.name == name && m.macro_spec.is_some())
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected macro-marked model {:?}, models present: {:?}",
+                    name,
+                    project
+                        .models
+                        .iter()
+                        .map(|m| (m.name.clone(), m.macro_spec.is_some()))
+                        .collect::<Vec<_>>()
+                )
+            })
+    }
+
+    fn scalar_eq(var: &Variable) -> String {
+        match var.get_equation() {
+            Some(Equation::Scalar(s)) => s.clone(),
+            other => panic!("expected Scalar equation, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_macro_imports_as_macro_marked_model() {
+        // macros.AC1.1: a :MACRO: block imports as a macro-marked Model whose
+        // MacroSpec.parameters matches the header input list, with body
+        // variables matching the body equations; the "main" model is
+        // unaffected and the invocation is preserved as equation text.
+        let mdl = ":MACRO: EXPRESSION MACRO(input, parameter)
+EXPRESSION MACRO = input * parameter
+~ ~|
+:END OF MACRO:
+macro output = EXPRESSION MACRO(macro input, macro parameter)
+~ ~|
+macro input = 5
+~ ~|
+macro parameter = 1.1
+~ ~|
+\\\\\\---///
+";
+        let project = convert_mdl(mdl).unwrap();
+
+        let m = find_macro_model(&project, "expression_macro");
+        let spec = m.macro_spec.as_ref().unwrap();
+        assert_eq!(spec.parameters, vec!["input", "parameter"]);
+        assert_eq!(spec.primary_output, "expression_macro");
+        assert!(spec.additional_outputs.is_empty());
+
+        // Body aux exists and references the parameters byte-identically.
+        let body = m
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "expression_macro")
+            .expect("macro body aux expression_macro");
+        assert!(matches!(body, Variable::Aux(_)));
+        let body_eq = scalar_eq(body);
+        assert!(
+            body_eq.contains("input") && body_eq.contains("parameter"),
+            "body equation {:?} should reference both parameters",
+            body_eq
+        );
+
+        // Synthesized port variables for each formal parameter.
+        for p in &spec.parameters {
+            let port = m
+                .variables
+                .iter()
+                .find(|v| v.get_ident() == p)
+                .unwrap_or_else(|| panic!("port variable {:?} should exist", p));
+            assert!(
+                port.can_be_module_input(),
+                "port {:?} must have can_be_module_input == true",
+                p
+            );
+        }
+
+        // The "main" model is untouched and preserves the invocation.
+        let main = project
+            .models
+            .iter()
+            .find(|m| m.name == "main")
+            .expect("main model");
+        assert!(main.macro_spec.is_none());
+        let inv = main
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "macro_output")
+            .expect("macro_output in main");
+        // The invocation is preserved verbatim as a call (not expanded /
+        // materialized); the MDL formatter keeps the call-site name's
+        // original casing (`EXPRESSION_MACRO(...)`), so compare
+        // case-insensitively.
+        let inv_eq = scalar_eq(inv);
+        assert!(
+            inv_eq.to_lowercase().contains("expression_macro("),
+            "invocation {:?} should be preserved as an EXPRESSION MACRO call",
+            inv_eq
+        );
+    }
+
+    #[test]
+    fn test_macro_with_output_list_imports_additional_outputs() {
+        // macros.AC1.2: a :MACRO: header with a `:` output list imports with
+        // MacroSpec.additional_outputs populated in order; the additional
+        // outputs are NOT synthesized as ports (they are body-computed).
+        // The macro is defined but not invoked: a multi-output *invocation*
+        // (`y = add3(p, q, r : lo, hi)`) is materialized only in Phase 4, so
+        // exercising it here would trip the Phase-1 text-formatter assertion.
+        // The `:`-header import (additional_outputs) is what AC1.2 verifies.
+        let mdl = ":MACRO: add3(a, b, c : minval, maxval)
+add3 = a + b + c
+~ ~|
+minval = MIN(a, MIN(b, c))
+~ ~|
+maxval = MAX(a, MAX(b, c))
+~ ~|
+:END OF MACRO:
+x = 5
+~ ~|
+\\\\\\---///
+";
+        let project = convert_mdl(mdl).unwrap();
+
+        let m = find_macro_model(&project, "add3");
+        let spec = m.macro_spec.as_ref().unwrap();
+        assert_eq!(spec.parameters, vec!["a", "b", "c"]);
+        assert_eq!(spec.additional_outputs, vec!["minval", "maxval"]);
+        assert_eq!(spec.primary_output, "add3");
+
+        // Parameters are synthesized as ports.
+        for p in ["a", "b", "c"] {
+            let port = m
+                .variables
+                .iter()
+                .find(|v| v.get_ident() == p)
+                .unwrap_or_else(|| panic!("port variable {:?} should exist", p));
+            assert!(port.can_be_module_input());
+        }
+
+        // Additional outputs are body-computed, NOT synthesized as ports:
+        // they exist as ordinary body variables (with their real equations),
+        // not as can_be_module_input placeholders.
+        for o in ["minval", "maxval"] {
+            let v = m
+                .variables
+                .iter()
+                .find(|v| v.get_ident() == o)
+                .unwrap_or_else(|| panic!("output variable {:?} should exist", o));
+            assert!(
+                !v.can_be_module_input(),
+                "additional output {:?} must NOT be a synthesized input port",
+                o
+            );
+            let eq = scalar_eq(v);
+            assert_ne!(eq, "0", "output {:?} must keep its body equation", o);
+        }
+    }
+
+    #[test]
+    fn test_uninvoked_macro_is_preserved() {
+        // macros.AC1.7: a macro defined but never invoked still imports as a
+        // valid macro-marked model with the correct MacroSpec and ports.
+        let mdl = ":MACRO: INIT(value)
+INIT = value
+~ ~|
+:END OF MACRO:
+x = 5
+~ ~|
+\\\\\\---///
+";
+        let project = convert_mdl(mdl).unwrap();
+
+        let m = find_macro_model(&project, "init");
+        let spec = m.macro_spec.as_ref().unwrap();
+        assert_eq!(spec.parameters, vec!["value"]);
+        assert_eq!(spec.primary_output, "init");
+        let port = m
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "value")
+            .expect("port variable value");
+        assert!(port.can_be_module_input());
+        // The body variable still exists.
+        assert!(m.variables.iter().any(|v| v.get_ident() == "init"));
+    }
+
+    #[test]
+    fn test_stock_bodied_macro_synthesizes_flow_port() {
+        // A stock-bodied macro: the body var is a Stock, the INTEG rate
+        // parameter becomes a Flow port and the INTEG initial parameter an
+        // Aux port (both can_be_module_input), and the stock's inflow
+        // resolves to the rate parameter (directly or via a synthetic flow
+        // whose equation is the rate parameter).
+        let mdl = ":MACRO: EXPRESSION MACRO(input, parameter)
+EXPRESSION MACRO = INTEG(input, parameter)
+~ ~|
+:END OF MACRO:
+macro output = EXPRESSION MACRO(macro input, macro parameter)
+~ ~|
+macro input = 5
+~ ~|
+macro parameter = 1.1
+~ ~|
+\\\\\\---///
+";
+        let project = convert_mdl(mdl).unwrap();
+
+        let m = find_macro_model(&project, "expression_macro");
+
+        let body = m
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "expression_macro")
+            .expect("macro body stock expression_macro");
+        let stock = match body {
+            Variable::Stock(s) => s,
+            other => panic!("expected Stock, got {:?}", other),
+        };
+
+        let input_port = m
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "input")
+            .expect("input port");
+        assert!(
+            matches!(input_port, Variable::Flow(_)),
+            "input (INTEG rate) port should be a Flow, got {:?}",
+            input_port
+        );
+        assert!(input_port.can_be_module_input());
+
+        let parameter_port = m
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "parameter")
+            .expect("parameter port");
+        assert!(
+            matches!(parameter_port, Variable::Aux(_)),
+            "parameter (INTEG initial) port should be an Aux, got {:?}",
+            parameter_port
+        );
+        assert!(parameter_port.can_be_module_input());
+
+        // The stock's inflow resolves to `input` directly, or via a synthetic
+        // flow whose equation is `input`.
+        let direct = stock.inflows.iter().any(|f| f == "input");
+        let via_synthetic = stock.inflows.iter().any(|fname| {
+            m.variables.iter().any(|v| {
+                v.get_ident() == fname
+                    && matches!(v.get_equation(), Some(Equation::Scalar(s)) if s == "input")
+            })
+        });
+        assert!(
+            direct || via_synthetic,
+            "stock inflow should resolve to `input` (directly or via synthetic flow), \
+             inflows={:?}",
+            stock.inflows
+        );
+    }
+
+    #[test]
+    fn test_macro_body_dollar_time_translated() {
+        // macros.AC1.5: `$`-suffixed time references in a macro body import as
+        // the canonical engine time identifiers (not `Time$` / `TIME STEP$`).
+        let mdl = ":MACRO: MYMACRO(input)
+MYMACRO = input * Time$ / TIME STEP$
+~ ~|
+:END OF MACRO:
+x = 5
+~ ~|
+\\\\\\---///
+";
+        let project = convert_mdl(mdl).unwrap();
+
+        let m = find_macro_model(&project, "mymacro");
+        let body = m
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "mymacro")
+            .expect("macro body aux mymacro");
+        // `Time$` / `TIME STEP$` are rewritten to the canonical engine time
+        // idents (`time` / `time_step`), which the shared XMILE formatter then
+        // renders in its uniform time-name form (`TIME` / `DT`) -- exactly as
+        // it does for an ordinary non-macro equation that references `Time` /
+        // `TIME STEP`. `TIME` and `DT` are the 0-arity engine time builtins
+        // (`DT` is the `time_step` alias); the engine resolves them inside a
+        // module body at any depth. The point of AC1.5 is that no `$`-escape
+        // survives and the references are the canonical engine time vars.
+        let eq = scalar_eq(body);
+        assert_eq!(
+            eq, "input * TIME / DT",
+            "body `$`-time references must translate to the canonical engine \
+             time idents (formatted TIME / DT), got {:?}",
+            eq
+        );
+        assert!(
+            !eq.contains('$'),
+            "body equation {:?} must not retain any `$`-time reference",
+            eq
+        );
+        // Cross-check: a non-macro equation referencing `Time` / `TIME STEP`
+        // formats identically, proving the rewrite produced the same
+        // canonical idents the formatter renders for ordinary time refs.
+        let baseline =
+            convert_mdl("y = input * Time / TIME STEP\n~ ~|\ninput = 1\n~ ~|\n\\\\\\---///\n")
+                .unwrap();
+        let y = baseline.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "y")
+            .expect("y in baseline");
+        assert_eq!(scalar_eq(y), eq);
+    }
+}

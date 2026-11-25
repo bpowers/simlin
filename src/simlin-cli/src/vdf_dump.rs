@@ -5,7 +5,7 @@
 use std::collections::HashSet;
 use std::error::Error;
 
-use simlin_engine::vdf::{
+use simlin_formats::vdf::{
     FILE_HEADER_SIZE, RECORD_SIZE, SYSTEM_NAMES, Section, VDF_SECTION6_OT_CODE_STOCK,
     VDF_SECTION6_OT_CODE_TIME, VDF_SENTINEL, VENSIM_BUILTINS, VdfDatasetFile, VdfFile, VdfKind,
     probe_vdf_kind, read_f32, read_u16, read_u32,
@@ -936,8 +936,8 @@ fn print_data_blocks(vdf: &VdfFile) {
             "  [TIME]"
         } else {
             match layout.grid {
-                simlin_engine::vdf::VdfBlockGrid::Data => "  [DATA-GRID]",
-                simlin_engine::vdf::VdfBlockGrid::Unreconciled => "  [UNRECONCILED]",
+                simlin_formats::vdf::VdfBlockGrid::Data => "  [DATA-GRID]",
+                simlin_formats::vdf::VdfBlockGrid::Unreconciled => "  [UNRECONCILED]",
                 _ => "",
             }
         };
@@ -990,7 +990,7 @@ fn print_gaps(vdf: &VdfFile, file_size: usize) {
 
     // Data blocks (from first to end of last)
     if vdf.first_data_block > 0 {
-        let blocks = simlin_engine::vdf::enumerate_data_blocks(
+        let blocks = simlin_formats::vdf::enumerate_data_blocks(
             &vdf.data,
             vdf.first_data_block,
             vdf.bitmap_size,

@@ -8,8 +8,8 @@
 //! systems, SVG, PNG, and scene formats. The memory for the output buffers is allocated via
 //! `simlin_malloc` so that callers free it with `simlin_free`.
 
-use simlin_engine::buffa::Message;
-use simlin_engine::{self as engine, serde as engine_serde};
+use simlin_formats::buffa::Message;
+use simlin_formats::serde as engine_serde;
 use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::ptr;
@@ -193,7 +193,7 @@ pub unsafe extern "C" fn simlin_project_serialize_json(
     };
     let bytes = match format {
         ffi::SimlinJsonFormat::Native => {
-            let json_project: engine::json::Project = datamodel.into();
+            let json_project: simlin_formats::json::Project = datamodel.into();
             match serde_json::to_vec(&json_project) {
                 Ok(data) => data,
                 Err(err) => {
@@ -207,7 +207,7 @@ pub unsafe extern "C" fn simlin_project_serialize_json(
             }
         }
         ffi::SimlinJsonFormat::Sdai => {
-            let sdai_model: engine::json_sdai::SdaiModel = datamodel.into();
+            let sdai_model: simlin_formats::json_sdai::SdaiModel = datamodel.into();
             match serde_json::to_vec(&sdai_model) {
                 Ok(data) => data,
                 Err(err) => {
@@ -281,7 +281,7 @@ pub unsafe extern "C" fn simlin_project_serialize_xmile(
     };
 
     let datamodel_locked = proj.datamodel.lock().unwrap();
-    match simlin_engine::to_xmile(&datamodel_locked) {
+    match simlin_formats::to_xmile(&datamodel_locked) {
         Ok(xmile_str) => {
             let bytes = xmile_str.into_bytes();
             let len = bytes.len();
@@ -318,7 +318,7 @@ pub unsafe extern "C" fn simlin_project_serialize_xmile(
 /// a model that has a diagram view. The output buffer contains UTF-8 text.
 ///
 /// The MDL surface cannot represent every Simlin construct. The engine's
-/// lossiness contract (`simlin_engine::mdl::project_to_mdl_with_warnings`)
+/// lossiness contract (`simlin_formats::mdl::project_to_mdl_with_warnings`)
 /// splits the gap in two, and this function surfaces both halves separately:
 ///
 /// - **Hard errors** (a project with more than one ordinary model, an
@@ -369,7 +369,7 @@ pub unsafe extern "C" fn simlin_project_serialize_mdl(
     let proj = ffi_try!(out_error, require_project(project));
 
     let datamodel_locked = proj.datamodel.lock().unwrap();
-    let (mdl_text, warnings) = match simlin_engine::to_mdl_with_warnings(&datamodel_locked) {
+    let (mdl_text, warnings) = match simlin_formats::to_mdl_with_warnings(&datamodel_locked) {
         Ok(result) => result,
         Err(err) => {
             store_error(
@@ -400,7 +400,7 @@ pub unsafe extern "C" fn simlin_project_serialize_mdl(
 ///
 /// Saves the project in `format` (a `SimlinSaveFormat`), reads the save back
 /// as a host would open it, and compares the model the save holds with the
-/// project's two ways (see `simlin_engine::save_check`):
+/// project's two ways (see `simlin_save_check`):
 ///
 /// - its definition: the simulation specs, each dimension's elements, parent
 ///   and mappings, and each variable's kind, dimensions, elements, equations
@@ -496,19 +496,19 @@ pub unsafe extern "C" fn simlin_project_check_save(
     };
     let proj = ffi_try!(out_error, require_project(project));
     let datamodel = proj.datamodel.lock().unwrap().shared();
-    let format: engine::save_check::SaveFormat = format.into();
+    let format: simlin_save_check::SaveFormat = format.into();
     #[cfg(feature = "file_io")]
-    let provider = data_dir.map(simlin_engine::FilesystemDataProvider::new);
+    let provider = data_dir.map(simlin_formats::FilesystemDataProvider::new);
     #[cfg(feature = "file_io")]
     let data = provider
         .as_ref()
-        .map(|p| p as &dyn simlin_engine::DataProvider);
+        .map(|p| p as &dyn simlin_formats::DataProvider);
     #[cfg(not(feature = "file_io"))]
-    let data: Option<&dyn simlin_engine::DataProvider> = {
+    let data: Option<&dyn simlin_formats::DataProvider> = {
         let _ = data_dir;
         None
     };
-    let changes = match engine::save_check::check_save_with_data(&datamodel, format, data) {
+    let changes = match simlin_save_check::check_save_with_data(&datamodel, format, data) {
         Ok(changes) => changes,
         Err(err) => {
             store_error(
@@ -534,8 +534,8 @@ pub unsafe extern "C" fn simlin_project_check_save(
                 SimlinErrorKind::Model
             },
             severity: match change.kind {
-                engine::save_check::ChangeKind::Results => SimlinErrorSeverity::Error,
-                engine::save_check::ChangeKind::Structure => SimlinErrorSeverity::Warning,
+                simlin_save_check::ChangeKind::Results => SimlinErrorSeverity::Error,
+                simlin_save_check::ChangeKind::Structure => SimlinErrorSeverity::Warning,
             },
             details: Some(change.reason.clone()),
             ..ErrorDetail::new(SimlinErrorCode::Generic)
@@ -594,7 +594,7 @@ pub unsafe extern "C" fn simlin_project_serialize_systems(
     };
 
     let datamodel_locked = proj.datamodel.lock().unwrap();
-    match simlin_engine::to_systems(&datamodel_locked) {
+    match simlin_formats::to_systems(&datamodel_locked) {
         Ok(systems_str) => {
             let bytes = systems_str.into_bytes();
             let len = bytes.len();
@@ -628,12 +628,12 @@ pub unsafe extern "C" fn simlin_project_serialize_systems(
 /// has a stock-and-flow view with something in it, or does not exist (the
 /// renderer reports that case itself, distinguishing "not found" from layout
 /// failures).
-fn renders_as_it_is(datamodel: &engine::datamodel::Project, model_name: &str) -> bool {
+fn renders_as_it_is(datamodel: &simlin_base::datamodel::Project, model_name: &str) -> bool {
     datamodel.get_model(model_name).is_none_or(|model| {
         model
             .views
             .first()
-            .is_some_and(|engine::datamodel::View::StockFlow(sf)| !sf.elements.is_empty())
+            .is_some_and(|simlin_base::datamodel::View::StockFlow(sf)| !sf.elements.is_empty())
     })
 }
 
@@ -654,7 +654,7 @@ fn renders_as_it_is(datamodel: &engine::datamodel::Project, model_name: &str) ->
 fn datamodel_to_render(
     proj: &SimlinProject,
     model_name: &str,
-) -> Result<Arc<engine::datamodel::Project>, String> {
+) -> Result<Arc<simlin_base::datamodel::Project>, String> {
     let datamodel = proj.datamodel.lock().unwrap().shared();
     if renders_as_it_is(&datamodel, model_name) {
         return Ok(datamodel);
@@ -667,11 +667,11 @@ fn datamodel_to_render(
     let db_state = db_locked
         .current_source_project()
         .map(|sp| (&*db_locked, sp));
-    let layout = engine::layout::generate_best_layout(&datamodel, model_name, db_state)?;
+    let layout = simlin_layout::generate_best_layout(&datamodel, model_name, db_state)?;
 
     let mut with_layout = (*datamodel).clone();
     if let Some(model) = with_layout.get_model_mut(model_name) {
-        model.views = vec![engine::datamodel::View::StockFlow(layout)];
+        model.views = vec![simlin_base::datamodel::View::StockFlow(layout)];
     }
     Ok(Arc::new(with_layout))
 }
@@ -695,7 +695,7 @@ unsafe fn render_model_to_buffer(
     out_len: *mut usize,
     out_error: *mut *mut SimlinError,
     what: &str,
-    render: impl FnOnce(&engine::datamodel::Project, &str) -> Result<Vec<u8>, String>,
+    render: impl FnOnce(&simlin_base::datamodel::Project, &str) -> Result<Vec<u8>, String>,
 ) {
     clear_out_error(out_error);
     if out_buffer.is_null() || out_len.is_null() {
@@ -814,7 +814,7 @@ pub unsafe extern "C" fn simlin_project_render_svg(
         out_error,
         "SVG",
         |datamodel, model_name| {
-            simlin_engine::diagram::render_svg(datamodel, model_name).map(String::into_bytes)
+            simlin_diagram::render_svg(datamodel, model_name).map(String::into_bytes)
         },
     );
 }
@@ -856,7 +856,7 @@ pub unsafe extern "C" fn simlin_project_render_scene(
         out_error,
         "scene",
         |datamodel, model_name| {
-            simlin_engine::diagram::build_scene(datamodel, model_name)
+            simlin_diagram::build_scene(datamodel, model_name)
                 .and_then(|scene| scene.to_json())
                 .map(String::into_bytes)
         },
@@ -898,7 +898,7 @@ pub unsafe extern "C" fn simlin_project_render_png(
     out_len: *mut usize,
     out_error: *mut *mut SimlinError,
 ) {
-    let opts = simlin_engine::diagram::PngRenderOpts {
+    let opts = simlin_diagram::PngRenderOpts {
         width: if width > 0 { Some(width) } else { None },
         height: if height > 0 { Some(height) } else { None },
     };
@@ -910,8 +910,7 @@ pub unsafe extern "C" fn simlin_project_render_png(
         out_error,
         "PNG",
         |datamodel, model_name| {
-            simlin_engine::diagram::render_png(datamodel, model_name, &opts)
-                .map_err(|err| err.to_string())
+            simlin_diagram::render_png(datamodel, model_name, &opts).map_err(|err| err.to_string())
         },
     );
 }

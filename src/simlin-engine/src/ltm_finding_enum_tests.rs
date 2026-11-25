@@ -11,7 +11,7 @@
 
 use super::tests::{solo_group_loop, synthetic_results};
 use super::*;
-use crate::common::IdentMap;
+use simlin_base::common::IdentMap;
 
 /// Helper to build stock list from names (duplicated from
 /// `ltm_finding_tests.rs`'s identically-named helper -- trivial enough that a
@@ -69,8 +69,10 @@ fn single_partition(stocks: &[&str]) -> CyclePartitions {
 // ===========================================================================
 
 /// Build a scalar stock/flow/aux datamodel project for enumeration tests.
-fn enum_test_project(vars: Vec<crate::datamodel::Variable>) -> crate::datamodel::Project {
-    use crate::datamodel;
+fn enum_test_project(
+    vars: Vec<simlin_base::datamodel::Variable>,
+) -> simlin_base::datamodel::Project {
+    use simlin_base::datamodel;
     datamodel::Project {
         name: "enum_test".to_string(),
         sim_specs: datamodel::SimSpecs {
@@ -102,8 +104,8 @@ pub(super) fn enum_stock(
     eqn: &str,
     inflows: &[&str],
     outflows: &[&str],
-) -> crate::datamodel::Variable {
-    use crate::datamodel;
+) -> simlin_base::datamodel::Variable {
+    use simlin_base::datamodel;
     datamodel::Variable::Stock(datamodel::Stock {
         ident: ident.to_string(),
         equation: datamodel::Equation::Scalar(eqn.to_string()),
@@ -117,8 +119,8 @@ pub(super) fn enum_stock(
     })
 }
 
-pub(super) fn enum_flow(ident: &str, eqn: &str) -> crate::datamodel::Variable {
-    use crate::datamodel;
+pub(super) fn enum_flow(ident: &str, eqn: &str) -> simlin_base::datamodel::Variable {
+    use simlin_base::datamodel;
     datamodel::Variable::Flow(datamodel::Flow {
         ident: ident.to_string(),
         equation: datamodel::Equation::Scalar(eqn.to_string()),
@@ -131,8 +133,8 @@ pub(super) fn enum_flow(ident: &str, eqn: &str) -> crate::datamodel::Variable {
     })
 }
 
-fn enum_aux(ident: &str, eqn: &str) -> crate::datamodel::Variable {
-    use crate::datamodel;
+fn enum_aux(ident: &str, eqn: &str) -> simlin_base::datamodel::Variable {
+    use simlin_base::datamodel;
     datamodel::Variable::Aux(datamodel::Aux {
         ident: ident.to_string(),
         equation: datamodel::Equation::Scalar(eqn.to_string()),
@@ -149,7 +151,7 @@ fn enum_aux(ident: &str, eqn: &str) -> crate::datamodel::Variable {
 /// given candidate generator. Returns the result plus the raw Results (so
 /// tests can mutate score series and re-discover).
 pub(super) fn discover_project(
-    project: &crate::datamodel::Project,
+    project: &simlin_base::datamodel::Project,
     candidate_gen: CandidateGen,
 ) -> DiscoveryResult {
     let (results, ctx) = ltm_simulate(project);
@@ -165,7 +167,7 @@ struct EnumTestCtx {
     expansion: LinkExpansionContext,
 }
 
-fn ltm_simulate(project: &crate::datamodel::Project) -> (Results, EnumTestCtx) {
+fn ltm_simulate(project: &simlin_base::datamodel::Project) -> (Results, EnumTestCtx) {
     use salsa::Setter;
     let mut db = crate::db::SimlinDb::default();
     let sync = crate::db::sync_from_datamodel_incremental(&mut db, project, None);
@@ -442,7 +444,7 @@ fn enumeration_budget_trip_falls_back_to_the_shortest_path_sweep() {
 /// The logistic fixture every counter test below shares: one stock with a
 /// reinforcing births loop and a balancing deaths loop, so the universe is
 /// exactly two elementary cycles and both carry real mass.
-fn two_loop_logistic_project() -> crate::datamodel::Project {
+fn two_loop_logistic_project() -> simlin_base::datamodel::Project {
     enum_test_project(vec![
         enum_stock("population", "100", &["births"], &["deaths"]),
         enum_flow("births", "population * 0.1"),
@@ -930,12 +932,12 @@ pub(super) fn enum_results(n_offsets: usize, step_count: usize, data: Vec<f64>) 
         data: data.into_boxed_slice(),
         step_size: n_offsets,
         step_count,
-        specs: crate::results::Specs {
+        specs: simlin_base::results::Specs {
             start: 0.0,
             stop: (step_count - 1) as f64,
             dt: 1.0,
             save_step: 1.0,
-            method: crate::results::Method::Euler,
+            method: simlin_base::results::Method::Euler,
             n_chunks: step_count,
         },
         is_vensim: false,

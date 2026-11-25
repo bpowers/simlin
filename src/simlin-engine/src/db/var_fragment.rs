@@ -48,19 +48,20 @@ use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use crate::ast::LoweringScope;
-use crate::canonicalize;
-use crate::common::{Canonical, Ident, IdentMap};
-use crate::compiler::fragment::{DepShape, FragmentInput};
+use crate::compiler::fragment::FragmentInput;
 use crate::db::{
     Db, Diagnostic, DiagnosticError, DiagnosticSeverity, ImplicitVarMeta, LtmOverlay,
-    ModuleInputSet, ParsedVariableResult, SourceModel, SourceProject, SourceVariable,
-    SourceVariableKind, VariableDeps, canonical_module_input_set, model_implicit_var_by_name,
-    model_variable_by_name, module_dep_shape, parse_source_variable, project_converted_dimensions,
+    ModuleInputSet, ParsedVariableResult, SourceModel, SourceProject, SourceVariable, VariableDeps,
+    canonical_module_input_set, model_implicit_var_by_name, model_variable_by_name,
+    module_dep_shape, parse_source_variable, project_converted_dimensions,
     project_dimensions_context, variable_dimensions, variable_direct_dependencies, variable_tables,
 };
-use crate::dimensions::{Dimension, DimensionsContext};
+use crate::variable::SourceVariableKind;
 use crate::variable::Variable;
+use simlin_base::ast::{DepShape, LoweringScope};
+use simlin_base::canonicalize;
+use simlin_base::common::{Canonical, Ident, IdentMap};
+use simlin_base::dimensions::{Dimension, DimensionsContext};
 
 /// Outcome of [`explicit_fragment_input`]: every diagnostic the constructor
 /// raised, in emission order (the malformed-unit rows first, then the first
@@ -70,18 +71,6 @@ pub(crate) struct ExplicitFragment<'db> {
     /// Boxed: a `FragmentInput` holds its maps inline, and the constructor's
     /// failure paths return the struct without one.
     pub input: Option<Box<FragmentInput<'db>>>,
-}
-
-/// The names of the run's clock slots, by canonical name: the time, the time
-/// step, and the initial and final time. A bare word of these is the builtin
-/// (`Expr0::new` makes a call of it), and a variable a model declares under
-/// one takes that slot's results key, so a rename does not give a variable
-/// one (`patch::apply_rename_variable`).
-pub(crate) const IMPLICIT_GLOBALS: [&str; 4] = ["time", "dt", "initial_time", "final_time"];
-
-/// Whether `name`, a canonical name, is one of [`IMPLICIT_GLOBALS`].
-pub(crate) fn is_implicit_global(name: &str) -> bool {
-    IMPLICIT_GLOBALS.contains(&name)
 }
 
 /// Resolve datamodel dimension names to the project's `Dimension`s. A name the
@@ -96,7 +85,7 @@ pub(crate) fn dimensions_named(
         .iter()
         .filter_map(|name| {
             dim_context
-                .get(&crate::common::CanonicalDimensionName::from_raw(name))
+                .get(&simlin_base::common::CanonicalDimensionName::from_raw(name))
                 .cloned()
         })
         .collect()
@@ -745,13 +734,13 @@ pub(crate) fn explicit_fragment_input<'db>(
         let suppress_empty = var.kind(db) == SourceVariableKind::Flow
             && parse_failures
                 .iter()
-                .any(|d| d.code() == crate::common::ErrorCode::EmptyEquation)
+                .any(|d| d.code() == simlin_base::common::ErrorCode::EmptyEquation)
             && flow_is_special_stock_driven(db, model, var_ident.clone());
         diagnostics.extend(
             parse_failures
                 .into_iter()
                 .filter(|d| {
-                    !(suppress_empty && d.code() == crate::common::ErrorCode::EmptyEquation)
+                    !(suppress_empty && d.code() == simlin_base::common::ErrorCode::EmptyEquation)
                 })
                 .map(|d| diagnostic(d.clone())),
         );
@@ -783,9 +772,9 @@ pub(crate) fn explicit_fragment_input<'db>(
                 let dep = ident.as_str();
                 let referenced_bare = deps.deps.reads_local(ident);
                 (referenced_bare && crate::db::source_var_is_table_only(db, *dep_sv)).then(|| {
-                    diagnostic(DiagnosticError::Model(crate::common::Error::new(
-                        crate::common::ErrorKind::Model,
-                        crate::common::ErrorCode::LookupReferencedWithoutArgument,
+                    diagnostic(DiagnosticError::Model(simlin_base::common::Error::new(
+                        simlin_base::common::ErrorKind::Model,
+                        simlin_base::common::ErrorCode::LookupReferencedWithoutArgument,
                         Some(format!(
                             "'{dep}' is a lookup table and must be called with an \
                              argument, e.g. {dep}(x) or LOOKUP({dep}, x)"
@@ -850,8 +839,8 @@ pub(crate) fn explicit_fragment_input<'db>(
             .ast()
             .and_then(|ast| ast.locate_var(head.as_str()))
             .unwrap_or_default();
-        let error = crate::common::EquationError::detailed(
-            crate::common::ErrorCode::UnknownDependency,
+        let error = simlin_base::common::EquationError::detailed(
+            simlin_base::common::ErrorCode::UnknownDependency,
             loc.start,
             loc.end,
             format!("'{head}' is not a variable of model '{model_name}'"),
@@ -875,7 +864,7 @@ pub(crate) fn explicit_fragment_input<'db>(
         match gf_tables
             .iter()
             .map(|t| crate::compiler::Table::new(&var_ident, t))
-            .collect::<crate::Result<Vec<_>>>()
+            .collect::<simlin_base::Result<Vec<_>>>()
         {
             Ok(ts) if !ts.is_empty() => {
                 tables.insert(self_ident, ts);

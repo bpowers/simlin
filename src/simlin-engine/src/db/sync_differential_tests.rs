@@ -22,8 +22,9 @@
 use std::io::BufReader;
 
 use super::*;
-use crate::patch::{ModelOperation, ModelPatch, ProjectPatch, apply_patch};
 use crate::test_common::TestProject;
+use simlin_base::project_patch::{ModelOperation, ModelPatch, ProjectPatch};
+use simlin_edit::patch::apply_patch;
 
 /// What one input holds, read back field by field. The struct literal names
 /// every field of `SourceVariableFields`, so a field added to the extraction
@@ -232,7 +233,7 @@ fn patched(project: &datamodel::Project, ops: Vec<ModelOperation>) -> datamodel:
 }
 
 fn open(xmile: &str) -> datamodel::Project {
-    crate::compat::open_xmile(&mut BufReader::new(xmile.as_bytes())).expect("it opens")
+    simlin_formats::compat::open_xmile(&mut BufReader::new(xmile.as_bytes())).expect("it opens")
 }
 
 fn pool() -> Vec<(&'static str, datamodel::Project)> {
@@ -468,7 +469,7 @@ fn pool() -> Vec<(&'static str, datamodel::Project)> {
     let mut stdlib_own = base.clone();
     stdlib_own
         .models
-        .push(crate::stdlib::get("smth1").expect("the stdlib has smth1"));
+        .push(simlin_base::stdlib::get("smth1").expect("the stdlib has smth1"));
     add("the stdlib model's own definition", stdlib_own);
     let mut shadow_respelled = base.clone();
     shadow_respelled

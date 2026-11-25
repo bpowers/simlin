@@ -12,9 +12,9 @@
 //! variable, naming the element and pointing at the reference, so a host can
 //! show it beside that element.
 
-use crate::common::ErrorCode;
 use crate::db::{DiagnosticError, DiagnosticSeverity};
 use crate::test_common::TestProject;
+use simlin_base::common::ErrorCode;
 
 /// Every `SubscriptOutOfRange` row of `project`, as `(variable, the
 /// referenced text, details)`, the text cut from `equation` by the row's span.
@@ -270,7 +270,7 @@ fn the_warning_names_the_dimension_and_the_end() {
             .collect::<Vec<_>>()
     };
     let past = |before_first| {
-        Some(crate::common::ReadPast {
+        Some(simlin_base::common::ReadPast {
             dimension: "age".to_string(),
             before_first,
         })

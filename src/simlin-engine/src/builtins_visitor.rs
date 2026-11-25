@@ -6,26 +6,26 @@ use std::sync::LazyLock;
 
 use indexmap::IndexMap;
 
-use crate::ast::{Ast, Expr0, IndexExpr0, Literal};
-use crate::builtins::{UntypedBuiltinFn, is_builtin_fn};
 use crate::capture::{
     Capture, CaptureKind, CaptureShape, HoistedArg, ImplicitModule, ImplicitVar, element_suffix,
     insert_implicit_var,
 };
-use crate::common::{
+use crate::snapshot_arg::{SnapshotAccess, SnapshotArg, SnapshotIndex};
+use crate::variable::ElementScope;
+use simlin_base::ast::{Ast, Expr0, IndexExpr0, Literal};
+use simlin_base::builtins::{UntypedBuiltinFn, is_builtin_fn};
+use simlin_base::common::{
     Canonical, CanonicalDimensionName, CanonicalElementName, EquationError, Ident, IdentMap,
     IdentSet, RawIdent, canonicalize,
 };
-use crate::dimensions::{
+use simlin_base::dimensions::{
     Axis, AxisIndexName, Dimension, DimensionsContext, DirectMappingsOnly, SubscriptIterator,
     axes_of, match_axes_partial, resolve_axis_index_name,
 };
-use crate::eqn_err;
-use crate::module_functions::{
+use simlin_base::eqn_err;
+use simlin_base::module_functions::{
     MacroCallResolution, MacroRegistry, ModuleFunctionDescriptor, stdlib_descriptor,
 };
-use crate::snapshot_arg::{SnapshotAccess, SnapshotArg, SnapshotIndex};
-use crate::variable::ElementScope;
 
 /// An empty registry used when no project macros are in scope (the
 /// `BuiltinVisitor::new` constructor before `with_macro_registry` runs). Lets
@@ -98,8 +98,6 @@ pub enum SnapshotIndexFacts<'a> {
 
 /// What an apply-to-all body asks of the expansion, from the calls it
 /// contains. Ordered, so a body's requirement is the maximum over its calls.
-// `Debug` is unconditional, as the crate keeps it for every type an
-// `assert_eq!` compares (the routing-arm table in `macro_expansion_tests`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum PerElement {
     /// Nothing that synthesizes a helper.
@@ -120,7 +118,7 @@ pub(crate) enum PerElement {
 /// expansion's shape is decided per body, and a walk cannot change shape
 /// halfway through.
 ///
-/// The stdlib predicate is [`crate::builtins::is_stdlib_module_function`],
+/// The stdlib predicate is [`simlin_base::builtins::is_stdlib_module_function`],
 /// which is defined over the same descriptor table the expansion reads
 /// (`stdlib_descriptor`), so the two cannot drift. A macro call that the
 /// registry routes to the builtin rather than expanding -- a passthrough at an
@@ -141,7 +139,7 @@ pub(crate) fn per_element_requirements(
                 MacroCallResolution::Passthrough(_)
                 | MacroCallResolution::RenamedBuiltinSelfCall
                 | MacroCallResolution::Unresolved => {
-                    if crate::builtins::is_stdlib_module_function(func.as_str()) {
+                    if simlin_base::builtins::is_stdlib_module_function(func.as_str()) {
                         PerElement::ModuleInstance
                     } else if matches!(func.as_str(), "init" | "previous") {
                         PerElement::SnapshotOnly
@@ -212,7 +210,7 @@ fn parse_module_order_arg(expr: &Expr0) -> Option<u32> {
 fn rewrite_alias_module_call(
     func: String,
     args: Vec<Expr0>,
-    loc: crate::builtins::Loc,
+    loc: simlin_base::builtins::Loc,
 ) -> Result<(String, Vec<Expr0>), EquationError> {
     if func == "delay" {
         return eqn_err!(
@@ -672,7 +670,7 @@ impl<'a> BuiltinVisitor<'a> {
     /// resolve. In a body walked for one element it is that element's own,
     /// scalar, scoped to the element so lowering resolves its body there.
     fn hoist_capture(&mut self, kind: CaptureKind, arg: Expr0) -> Result<Expr0, EquationError> {
-        let loc = crate::builtins::Loc::default();
+        let loc = simlin_base::builtins::Loc::default();
         let shape = match self.element_scope() {
             Some(scope) => CaptureShape::Element(scope),
             None if self.dimension_names.is_empty() => CaptureShape::Scalar,
@@ -740,7 +738,7 @@ impl<'a> BuiltinVisitor<'a> {
         descriptor: &ModuleFunctionDescriptor,
         func: &str,
         args: Vec<Expr0>,
-        loc: crate::builtins::Loc,
+        loc: simlin_base::builtins::Loc,
     ) -> Result<Expr0, EquationError> {
         use Expr0::*;
 
@@ -767,7 +765,7 @@ impl<'a> BuiltinVisitor<'a> {
         // Argument-first: each argument that needs a helper is filed before
         // the instance, which is the order the implicit-var list keeps and the
         // order the salsa-cached vectors compare in.
-        let mut sources: Vec<(String, crate::builtins::Loc)> = Vec::with_capacity(args.len());
+        let mut sources: Vec<(String, simlin_base::builtins::Loc)> = Vec::with_capacity(args.len());
         for (i, arg) in args.into_iter().enumerate() {
             let arg_loc = arg.get_loc();
             let src = match arg {
@@ -856,7 +854,7 @@ impl<'a> BuiltinVisitor<'a> {
                 // operator (`MODULO(x, y)` is `x mod y`) is that operator:
                 // `ast::operator_for_call` is the one list, which an
                 // equation's canonical form reads too.
-                let args = match crate::ast::operator_for_call(&func, args) {
+                let args = match simlin_base::ast::operator_for_call(&func, args) {
                     Ok((op, lhs, rhs)) => return Ok(Op2(op, Box::new(lhs), Box::new(rhs), loc)),
                     Err(args) => args,
                 };
@@ -979,7 +977,7 @@ fn macro_arity(
     descriptor: &ModuleFunctionDescriptor,
     func: &str,
     args: usize,
-    loc: crate::builtins::Loc,
+    loc: simlin_base::builtins::Loc,
 ) -> Result<(), EquationError> {
     let declared = descriptor.parameter_ports.len();
     if args == declared {
@@ -1392,7 +1390,7 @@ mod tests {
             .aux("init", "0", None)
             .array_aux("d[DimA]", "DELAYN(input_a[DimA], delay_time, 2, init)");
 
-        project.assert_compile_error_vm(crate::ErrorCode::UnknownBuiltin);
+        project.assert_compile_error_vm(simlin_base::ErrorCode::UnknownBuiltin);
     }
 
     /// Test with indexed dimensions (numeric 1,2,3...)
@@ -1576,9 +1574,10 @@ mod tests {
                 .aux("init", "0", None)
                 .aux("result", equation, None);
             assert!(
-                project
-                    .error_diagnostics()
-                    .contains(&("main.result".to_string(), crate::ErrorCode::NotSimulatable)),
+                project.error_diagnostics().contains(&(
+                    "main.result".to_string(),
+                    simlin_base::ErrorCode::NotSimulatable
+                )),
                 "{equation}: {:?}",
                 project.error_diagnostics()
             );

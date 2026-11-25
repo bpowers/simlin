@@ -25,7 +25,7 @@
 //! the second by itself, which is where both defects on this branch landed.
 
 use super::*;
-use crate::common::{IdentMap, IdentSet};
+use simlin_base::common::{IdentMap, IdentSet};
 
 /// The per-element row pinning must descend into a subscript RANGE's endpoints,
 /// not just its plain expression indices.
@@ -44,8 +44,8 @@ use crate::common::{IdentMap, IdentSet};
 /// lands.
 #[test]
 fn per_element_pin_descends_into_range_endpoints() {
-    use crate::dimensions::DimensionsContext;
     use crate::ltm_agg::AxisRead;
+    use simlin_base::dimensions::DimensionsContext;
 
     let region = make_named_dimension("region", &["nyc", "boston"]);
     let from_dims = vec![region.clone()];
@@ -161,7 +161,7 @@ fn per_element_pin_descends_into_range_endpoints() {
 /// well-formed project reaches it.
 #[test]
 fn dep_element_pins_projection_enumeration() {
-    use crate::dimensions::DimensionsContext;
+    use simlin_base::dimensions::DimensionsContext;
     /// A pin's `axes`: per dep axis, the `(spelled dimension, element)` pairs.
     type AxisSpellings = Vec<Vec<(String, String)>>;
 
@@ -239,7 +239,7 @@ fn dep_element_pins_projection_enumeration() {
     let target_dims = vec![region.clone(), age.clone()];
     let target_elements = vec!["boston".to_string(), "young".to_string()];
 
-    let pinnable: Vec<(Ident<Canonical>, Vec<crate::dimensions::Dimension>)> = vec![
+    let pinnable: Vec<(Ident<Canonical>, Vec<simlin_base::dimensions::Dimension>)> = vec![
         // identity, in the target's own order
         (Ident::new("same"), vec![region.clone(), age.clone()]),
         // identity, REORDERED -- the silent-wrong-element row
@@ -481,11 +481,11 @@ fn dep_element_pins_projection_enumeration() {
 /// exactly where the one interesting line gets lost.
 struct PinFixture {
     from: Ident<Canonical>,
-    from_dims: Vec<crate::dimensions::Dimension>,
+    from_dims: Vec<simlin_base::dimensions::Dimension>,
     source_dim_elements: Vec<Vec<String>>,
     source_dim_names: Vec<String>,
     target_iterated_dims: Vec<String>,
-    dim_ctx: crate::dimensions::DimensionsContext,
+    dim_ctx: simlin_base::dimensions::DimensionsContext,
     site_axes: Vec<crate::ltm_agg::AxisRead>,
     row_parts_bare: Vec<String>,
     target_elem_by_dim: HashMap<String, (String, usize)>,
@@ -498,7 +498,7 @@ struct PinFixture {
     /// and `target_elem_by_dim` -- carried separately because a repeated
     /// dimension makes the name-keyed pair unrepresentable, which is what the
     /// pin projection now refuses to depend on.
-    target_dims: Vec<crate::dimensions::Dimension>,
+    target_dims: Vec<simlin_base::dimensions::Dimension>,
     target_elements: Vec<String>,
 }
 
@@ -534,7 +534,7 @@ impl PinFixture {
             ],
             source_dim_names: vec!["region".to_string(), "age".to_string()],
             target_iterated_dims: vec!["region".to_string()],
-            dim_ctx: crate::dimensions::DimensionsContext::from(project_dims.as_slice()),
+            dim_ctx: simlin_base::dimensions::DimensionsContext::from(project_dims.as_slice()),
             site_axes: vec![
                 AxisRead::Iterated {
                     dim: "region".to_string(),
@@ -628,7 +628,7 @@ impl PinFixture {
             ],
             source_dim_names: vec!["region".to_string(), "age".to_string()],
             target_iterated_dims: vec!["state".to_string()],
-            dim_ctx: crate::dimensions::DimensionsContext::from(project_dims.as_slice()),
+            dim_ctx: simlin_base::dimensions::DimensionsContext::from(project_dims.as_slice()),
             site_axes: vec![
                 AxisRead::Iterated {
                     dim: "state".to_string(),
@@ -683,7 +683,7 @@ impl PinFixture {
             ],
             source_dim_names: vec!["region".to_string(), "bucket".to_string()],
             target_iterated_dims: vec!["region".to_string()],
-            dim_ctx: crate::dimensions::DimensionsContext::from(project_dims.as_slice()),
+            dim_ctx: simlin_base::dimensions::DimensionsContext::from(project_dims.as_slice()),
             site_axes: vec![
                 AxisRead::Iterated {
                     dim: "region".to_string(),
@@ -1551,8 +1551,8 @@ fn per_element_pin_index_verdict_enumeration() {
     ]);
     assert!(
         fx.dim_ctx.is_subdimension_of(
-            &crate::common::CanonicalDimensionName::from_raw("bigcity"),
-            &crate::common::CanonicalDimensionName::from_raw("region"),
+            &simlin_base::common::CanonicalDimensionName::from_raw("bigcity"),
+            &simlin_base::common::CanonicalDimensionName::from_raw("region"),
         ),
         "the subdimension row needs `bigcity` to genuinely be a subdimension of the \
          source's `region` axis, or it duplicates the unrelated-dimension row"

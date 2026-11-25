@@ -16,7 +16,7 @@
 //! change that moves only the unit-definition ERROR list.
 
 use super::*;
-use crate::datamodel;
+use simlin_base::datamodel;
 
 /// A qualified `PREVIOUS`/`INIT` index depends on the one element it spells,
 /// through `project_has_qualified_element`, not on the project's dimension
@@ -486,7 +486,7 @@ fn test_dimension_invalidation_maps_to_chain() {
 
 mod expand_maps_to_chains_tests {
     use super::super::expand_maps_to_chains;
-    use crate::datamodel::{Dimension, DimensionMapping};
+    use simlin_base::datamodel::{Dimension, DimensionMapping};
     use std::collections::BTreeSet;
 
     fn named(name: &str, elements: &[&str]) -> Dimension {

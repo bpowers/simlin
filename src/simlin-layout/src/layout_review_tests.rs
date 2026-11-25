@@ -1,0 +1,3192 @@
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
+
+use super::*;
+use simlin_base::datamodel;
+
+// Tests for code review feedback fixes
+
+#[test]
+fn test_build_stock_flow_from_state_resets_invalid_zoom() {
+    // When a template view has zoom <= 0 (e.g. from an imported or
+    // hand-authored JSON view), build_stock_flow_from_state should
+    // fall back to 1.0 instead of preserving the invalid value.
+    let model = simple_model();
+    let project = test_project(model.clone());
+    let layout = generate_best_layout(&project, TEST_MODEL, None).expect("layout should succeed");
+
+    // Seed state from the generated layout, then build with a zero-zoom template
+    let state = LayoutState::from_existing_view(&layout, &model);
+    let mut bad_template = layout.clone();
+    bad_template.zoom = 0.0;
+
+    let result = build_stock_flow_from_state(state, &bad_template);
+    assert!(
+        result.zoom > 0.0,
+        "zoom must be positive, got {}",
+        result.zoom
+    );
+    assert!(
+        (result.zoom - 1.0).abs() < f64::EPSILON,
+        "invalid zoom should reset to 1.0, got {}",
+        result.zoom
+    );
+
+    // Also test negative zoom
+    let state2 = LayoutState::from_existing_view(&layout, &model);
+    let mut neg_template = layout;
+    neg_template.zoom = -1.5;
+    let result2 = build_stock_flow_from_state(state2, &neg_template);
+    assert!(
+        (result2.zoom - 1.0).abs() < f64::EPSILON,
+        "negative zoom should reset to 1.0, got {}",
+        result2.zoom
+    );
+}
+
+#[test]
+fn test_apply_deletion_removes_alias_of_deleted_var() {
+    // Issue 2: apply_deletion must also remove Alias elements where
+    // alias_of_uid == deleted_uid.
+    let model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+            ident: "rate".to_string(),
+            equation: datamodel::Equation::Scalar("0.5".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: Some(1),
+        })]
+        .into(),
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+        macro_spec: None,
+    };
+    let mut state = LayoutState::new(&model);
+
+    // Add the aux element and an alias pointing to it
+    let aux_uid = state.get_or_alloc_uid("rate");
+    state.elements.push(ViewElement::Aux(view_element::Aux {
+        name: "rate".to_string(),
+        uid: aux_uid,
+        x: 100.0,
+        y: 100.0,
+        label_side: view_element::LabelSide::Bottom,
+        compat: None,
+    }));
+    state.positions.insert(aux_uid, Position::new(100.0, 100.0));
+
+    let alias_uid = state.uid_manager.alloc("");
+    state.elements.push(ViewElement::Alias(view_element::Alias {
+        uid: alias_uid,
+        alias_of_uid: aux_uid,
+        x: 200.0,
+        y: 200.0,
+        label_side: view_element::LabelSide::Bottom,
+        compat: None,
+    }));
+
+    assert_eq!(state.elements.len(), 2);
+
+    // Delete the aux -- the alias should be removed too
+    state.apply_deletion("rate");
+
+    let alias_count = state
+        .elements
+        .iter()
+        .filter(|e| matches!(e, ViewElement::Alias(_)))
+        .count();
+    assert_eq!(
+        alias_count, 0,
+        "alias of deleted aux should have been removed"
+    );
+    assert!(
+        state.elements.is_empty(),
+        "all elements should be gone after deleting the only var"
+    );
+}
+
+#[test]
+fn test_existing_bounding_box_negative_positions() {
+    // Issue 3: existing_bounding_box initializes max_x/max_y with f64::MIN
+    // instead of f64::NEG_INFINITY. Verify the bounding box correctly
+    // encompasses elements at negative coordinates.
+    let model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+            ident: "x".to_string(),
+            equation: datamodel::Equation::Scalar("1".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: Some(1),
+        })]
+        .into(),
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+        macro_spec: None,
+    };
+    let mut state = LayoutState::new(&model);
+
+    // Insert variable elements at negative coordinates
+    let uid_a = state.uid_manager.alloc("a");
+    let uid_b = state.uid_manager.alloc("b");
+    state.elements.push(ViewElement::Aux(view_element::Aux {
+        name: "a".into(),
+        uid: uid_a,
+        x: -500.0,
+        y: -300.0,
+        label_side: LabelSide::Bottom,
+        compat: None,
+    }));
+    state.elements.push(ViewElement::Aux(view_element::Aux {
+        name: "b".into(),
+        uid: uid_b,
+        x: -100.0,
+        y: -50.0,
+        label_side: LabelSide::Bottom,
+        compat: None,
+    }));
+    state.positions.insert(uid_a, Position::new(-500.0, -300.0));
+    state.positions.insert(uid_b, Position::new(-100.0, -50.0));
+
+    let (min_pos, max_pos) = existing_bounding_box(&state);
+
+    assert!(
+        (min_pos.x - (-500.0)).abs() < 1e-9,
+        "min_x should be -500, got {}",
+        min_pos.x
+    );
+    assert!(
+        (min_pos.y - (-300.0)).abs() < 1e-9,
+        "min_y should be -300, got {}",
+        min_pos.y
+    );
+    assert!(
+        (max_pos.x - (-100.0)).abs() < 1e-9,
+        "max_x should be -100, got {}",
+        max_pos.x
+    );
+    assert!(
+        (max_pos.y - (-50.0)).abs() < 1e-9,
+        "max_y should be -50, got {}",
+        max_pos.y
+    );
+}
+
+#[test]
+fn test_incremental_flow_endpoints_rebuilt_after_topology_change() {
+    // Issue 1: When a flow's stock connections change (e.g., F moves from
+    // being an inflow to stock A to being an inflow to stock B), the flow
+    // element should be rebuilt with the new attached_to_uid values.
+
+    // Build a model: stock_a <-- flow_f (flow_f is an inflow to stock_a)
+    let initial_model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_a".to_string(),
+                equation: datamodel::Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec!["flow_f".to_string()],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(1),
+            }),
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_b".to_string(),
+                equation: datamodel::Equation::Scalar("50".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(2),
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "flow_f".to_string(),
+                equation: datamodel::Equation::Scalar("10".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(3),
+            }),
+        ]
+        .into(),
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+        macro_spec: None,
+    };
+    let initial_project = test_project(initial_model);
+    let old_view =
+        generate_layout(&initial_project, TEST_MODEL, None).expect("initial layout should succeed");
+
+    // Verify old_view: flow_f has an endpoint attached to stock_a
+    let stock_a_uid = old_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Stock(s) if canonicalize(&s.name).as_ref() == "stock_a" => Some(s.uid),
+            _ => None,
+        })
+        .expect("stock_a should be in old_view");
+
+    let flow_f_in_old = old_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "flow_f" => Some(f.clone()),
+            _ => None,
+        })
+        .expect("flow_f should be in old_view");
+
+    let old_attached_to_stock_a = flow_f_in_old
+        .points
+        .iter()
+        .any(|pt| pt.attached_to_uid == Some(stock_a_uid));
+    assert!(
+        old_attached_to_stock_a,
+        "flow_f should initially have an endpoint attached to stock_a"
+    );
+
+    // Now patch: move flow_f to be an inflow to stock_b instead
+    let mut patched_project = initial_project.clone();
+    let model = patched_project.get_model_mut(TEST_MODEL).unwrap();
+    model.variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            match var {
+                datamodel::Variable::Stock(s) if s.ident == "stock_a" => {
+                    s.inflows.clear();
+                }
+                datamodel::Variable::Stock(s) if s.ident == "stock_b" => {
+                    s.inflows = vec!["flow_f".to_string()];
+                }
+                _ => {}
+            }
+        }
+    });
+
+    let patch = simlin_base::project_patch::ModelPatch {
+        name: TEST_MODEL.to_string(),
+        ops: vec![
+            simlin_base::project_patch::ModelOperation::UpsertStock(datamodel::Stock {
+                ident: "stock_a".to_string(),
+                equation: datamodel::Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(1),
+            }),
+            simlin_base::project_patch::ModelOperation::UpsertStock(datamodel::Stock {
+                ident: "stock_b".to_string(),
+                equation: datamodel::Equation::Scalar("50".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec!["flow_f".to_string()],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(2),
+            }),
+        ],
+    };
+
+    let new_view = incremental_layout(&old_view, &patched_project, TEST_MODEL, &patch, None)
+        .expect("incremental layout after topology change should succeed");
+
+    // Find stock_b's UID in the new view
+    let stock_b_uid = new_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Stock(s) if canonicalize(&s.name).as_ref() == "stock_b" => Some(s.uid),
+            _ => None,
+        })
+        .expect("stock_b should be in new_view");
+
+    // flow_f should now have an endpoint attached to stock_b, not stock_a
+    let flow_f_in_new = new_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "flow_f" => Some(f.clone()),
+            _ => None,
+        })
+        .expect("flow_f should be in new_view");
+
+    let attached_to_stock_b = flow_f_in_new
+        .points
+        .iter()
+        .any(|pt| pt.attached_to_uid == Some(stock_b_uid));
+    assert!(
+        attached_to_stock_b,
+        "flow_f should have an endpoint attached to stock_b after topology change, points: {:?}",
+        flow_f_in_new.points
+    );
+
+    // flow_f should NOT still be attached to stock_a
+    let still_attached_to_stock_a = flow_f_in_new
+        .points
+        .iter()
+        .any(|pt| pt.attached_to_uid == Some(stock_a_uid));
+    assert!(
+        !still_attached_to_stock_a,
+        "flow_f should NOT still be attached to stock_a after topology change"
+    );
+}
+
+// ---- Issue 1: flow endpoint transitions between stock and cloud ----
+
+#[test]
+fn test_incremental_flow_endpoint_stock_to_cloud() {
+    // Build a model where flow_f flows from stock_b into stock_a (both endpoints on stocks).
+    // Then patch so flow_f flows from a cloud into stock_a (from-stock becomes None).
+    // After incremental_layout the source point must NOT be attached to any stock.
+
+    let initial_model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_a".to_string(),
+                equation: datamodel::Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec!["flow_f".to_string()],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(1),
+            }),
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_b".to_string(),
+                equation: datamodel::Equation::Scalar("200".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec!["flow_f".to_string()],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(2),
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "flow_f".to_string(),
+                equation: datamodel::Equation::Scalar("10".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(3),
+            }),
+        ]
+        .into(),
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+        macro_spec: None,
+    };
+    let initial_project = test_project(initial_model);
+    let old_view =
+        generate_layout(&initial_project, TEST_MODEL, None).expect("initial layout should succeed");
+
+    // Verify initial state: flow_f has a source endpoint attached to stock_b
+    let stock_b_uid_old = old_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Stock(s) if canonicalize(&s.name).as_ref() == "stock_b" => Some(s.uid),
+            _ => None,
+        })
+        .expect("stock_b should be in old_view");
+    let flow_f_old = old_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "flow_f" => Some(f.clone()),
+            _ => None,
+        })
+        .expect("flow_f should be in old_view");
+    assert!(
+        flow_f_old
+            .points
+            .iter()
+            .any(|pt| pt.attached_to_uid == Some(stock_b_uid_old)),
+        "flow_f should initially have source attached to stock_b"
+    );
+
+    // Patch: stock_b no longer has flow_f as an outflow (flow becomes cloud-sourced)
+    let mut patched_project = initial_project.clone();
+    let model = patched_project.get_model_mut(TEST_MODEL).unwrap();
+    model.variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            if let datamodel::Variable::Stock(s) = var
+                && s.ident == "stock_b"
+            {
+                s.outflows.clear();
+            }
+        }
+    });
+    let patch = simlin_base::project_patch::ModelPatch {
+        name: TEST_MODEL.to_string(),
+        ops: vec![simlin_base::project_patch::ModelOperation::UpsertStock(
+            datamodel::Stock {
+                ident: "stock_b".to_string(),
+                equation: datamodel::Equation::Scalar("200".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(2),
+            },
+        )],
+    };
+
+    let new_view = incremental_layout(&old_view, &patched_project, TEST_MODEL, &patch, None)
+        .expect("incremental layout should succeed");
+
+    // Collect all stock UIDs in the new view
+    let stock_uids: HashSet<i32> = new_view
+        .elements
+        .iter()
+        .filter_map(|e| match e {
+            ViewElement::Stock(s) => Some(s.uid),
+            _ => None,
+        })
+        .collect();
+
+    let flow_f_new = new_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "flow_f" => Some(f.clone()),
+            _ => None,
+        })
+        .expect("flow_f should be in new_view");
+
+    // The source point (first point) must not be attached to any stock
+    let source_pt = &flow_f_new.points[0];
+    assert!(
+        source_pt
+            .attached_to_uid
+            .is_none_or(|uid| !stock_uids.contains(&uid)),
+        "flow_f source must be unattached to any stock (cloud) after stock-to-cloud transition, \
+         got attached_to_uid={:?}, stock_uids={:?}",
+        source_pt.attached_to_uid,
+        stock_uids
+    );
+}
+
+#[test]
+fn test_incremental_flow_endpoint_cloud_to_stock() {
+    // Build a model where flow_f flows from a cloud into stock_a.
+    // Then patch so flow_f flows from stock_b into stock_a.
+    // After incremental_layout the source point must be attached to stock_b.
+
+    let initial_model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_a".to_string(),
+                equation: datamodel::Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec!["flow_f".to_string()],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(1),
+            }),
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_b".to_string(),
+                equation: datamodel::Equation::Scalar("50".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(2),
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "flow_f".to_string(),
+                equation: datamodel::Equation::Scalar("10".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(3),
+            }),
+        ]
+        .into(),
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+        macro_spec: None,
+    };
+    let initial_project = test_project(initial_model);
+    let old_view =
+        generate_layout(&initial_project, TEST_MODEL, None).expect("initial layout should succeed");
+
+    // Verify initial state: flow_f source is a cloud (not attached to any stock)
+    let old_stock_uids: HashSet<i32> = old_view
+        .elements
+        .iter()
+        .filter_map(|e| match e {
+            ViewElement::Stock(s) => Some(s.uid),
+            _ => None,
+        })
+        .collect();
+    let flow_f_old = old_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "flow_f" => Some(f.clone()),
+            _ => None,
+        })
+        .expect("flow_f should be in old_view");
+    assert!(
+        flow_f_old.points[0]
+            .attached_to_uid
+            .is_none_or(|uid| !old_stock_uids.contains(&uid)),
+        "flow_f source should initially be a cloud (not attached to a stock)"
+    );
+
+    // Patch: stock_b now has flow_f as outflow (flow becomes stock_b-sourced)
+    let mut patched_project = initial_project.clone();
+    let model = patched_project.get_model_mut(TEST_MODEL).unwrap();
+    model.variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            if let datamodel::Variable::Stock(s) = var
+                && s.ident == "stock_b"
+            {
+                s.outflows = vec!["flow_f".to_string()];
+            }
+        }
+    });
+    let patch = simlin_base::project_patch::ModelPatch {
+        name: TEST_MODEL.to_string(),
+        ops: vec![simlin_base::project_patch::ModelOperation::UpsertStock(
+            datamodel::Stock {
+                ident: "stock_b".to_string(),
+                equation: datamodel::Equation::Scalar("50".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec!["flow_f".to_string()],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(2),
+            },
+        )],
+    };
+
+    let new_view = incremental_layout(&old_view, &patched_project, TEST_MODEL, &patch, None)
+        .expect("incremental layout should succeed");
+
+    let stock_b_uid_new = new_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Stock(s) if canonicalize(&s.name).as_ref() == "stock_b" => Some(s.uid),
+            _ => None,
+        })
+        .expect("stock_b should be in new_view");
+
+    let flow_f_new = new_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "flow_f" => Some(f.clone()),
+            _ => None,
+        })
+        .expect("flow_f should be in new_view");
+
+    // The source point must now be attached to stock_b
+    let attached_to_stock_b = flow_f_new
+        .points
+        .iter()
+        .any(|pt| pt.attached_to_uid == Some(stock_b_uid_new));
+    assert!(
+        attached_to_stock_b,
+        "flow_f source should be attached to stock_b after cloud-to-stock transition, \
+         points={:?}",
+        flow_f_new.points
+    );
+}
+
+// ---- Issue 2: variable kind changes not detected as replacements ----
+//
+// These tests exercise the case where a caller issues UpsertStock (or UpsertAux)
+// WITHOUT a preceding DeleteVariable.  The patch is therefore a kind-change with
+// no explicit removal, which identify_new_elements must still detect.
+
+#[test]
+fn test_incremental_kind_change_aux_to_stock_no_delete() {
+    // Build a model with aux "foo". Generate layout. Change "foo" to a stock
+    // using only UpsertStock (no DeleteVariable in the patch).
+    // After incremental_layout the view must contain a Stock element for "foo",
+    // not an Aux.
+
+    let initial_model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Aux(datamodel::Aux {
+                ident: "foo".to_string(),
+                equation: datamodel::Equation::Scalar("42".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(1),
+            }),
+            datamodel::Variable::Aux(datamodel::Aux {
+                ident: "bar".to_string(),
+                equation: datamodel::Equation::Scalar("1".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(2),
+            }),
+        ]
+        .into(),
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+        macro_spec: None,
+    };
+    let initial_project = test_project(initial_model);
+    let old_view =
+        generate_layout(&initial_project, TEST_MODEL, None).expect("initial layout should succeed");
+
+    // Verify initial state: "foo" is an Aux element
+    assert!(
+        old_view
+            .elements
+            .iter()
+            .any(|e| matches!(e, ViewElement::Aux(a) if canonicalize(&a.name).as_ref() == "foo")),
+        "foo should start as Aux in old_view"
+    );
+
+    // Patch: kind-change aux "foo" -> stock "foo" with no DeleteVariable.
+    // The patched project reflects the new state; the patch has only UpsertStock.
+    let mut patched_project = initial_project.clone();
+    let model = patched_project.get_model_mut(TEST_MODEL).unwrap();
+    model.variables.retain(|v| v.get_ident() != "foo");
+    model
+        .variables
+        .push(datamodel::Variable::Stock(datamodel::Stock {
+            ident: "foo".to_string(),
+            equation: datamodel::Equation::Scalar("0".to_string()),
+            documentation: String::new(),
+            units: None,
+            inflows: vec![],
+            outflows: vec![],
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: Some(1),
+        }));
+    // Only UpsertStock -- no explicit DeleteVariable
+    let patch = simlin_base::project_patch::ModelPatch {
+        name: TEST_MODEL.to_string(),
+        ops: vec![simlin_base::project_patch::ModelOperation::UpsertStock(
+            datamodel::Stock {
+                ident: "foo".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(1),
+            },
+        )],
+    };
+
+    let new_view = incremental_layout(&old_view, &patched_project, TEST_MODEL, &patch, None)
+        .expect("incremental layout after kind change should succeed");
+
+    // "foo" must now be a Stock element
+    let foo_is_stock = new_view
+        .elements
+        .iter()
+        .any(|e| matches!(e, ViewElement::Stock(s) if canonicalize(&s.name).as_ref() == "foo"));
+    assert!(
+        foo_is_stock,
+        "foo should be a Stock after kind change from Aux to Stock"
+    );
+
+    // "foo" must NOT remain an Aux element
+    let foo_is_aux = new_view
+        .elements
+        .iter()
+        .any(|e| matches!(e, ViewElement::Aux(a) if canonicalize(&a.name).as_ref() == "foo"));
+    assert!(
+        !foo_is_aux,
+        "foo must not remain as an Aux after kind change to Stock"
+    );
+}
+
+#[test]
+fn test_incremental_kind_change_stock_to_aux_no_delete() {
+    // Build a model with stock "tank" and no flows. Generate layout.
+    // Change "tank" to an aux using only UpsertAux (no DeleteVariable).
+    // After incremental_layout the view must contain an Aux element for "tank",
+    // not a Stock.
+
+    let initial_model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "tank".to_string(),
+                equation: datamodel::Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(1),
+            }),
+            datamodel::Variable::Aux(datamodel::Aux {
+                ident: "rate".to_string(),
+                equation: datamodel::Equation::Scalar("0.1".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(2),
+            }),
+        ]
+        .into(),
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+        macro_spec: None,
+    };
+    let initial_project = test_project(initial_model);
+    let old_view =
+        generate_layout(&initial_project, TEST_MODEL, None).expect("initial layout should succeed");
+
+    assert!(
+        old_view.elements.iter().any(
+            |e| matches!(e, ViewElement::Stock(s) if canonicalize(&s.name).as_ref() == "tank")
+        ),
+        "tank should start as Stock in old_view"
+    );
+
+    // Patch: kind-change stock "tank" -> aux "tank" with no DeleteVariable.
+    let mut patched_project = initial_project.clone();
+    let model = patched_project.get_model_mut(TEST_MODEL).unwrap();
+    model.variables.retain(|v| v.get_ident() != "tank");
+    model
+        .variables
+        .push(datamodel::Variable::Aux(datamodel::Aux {
+            ident: "tank".to_string(),
+            equation: datamodel::Equation::Scalar("100".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: Some(1),
+        }));
+    // Only UpsertAux -- no explicit DeleteVariable
+    let patch = simlin_base::project_patch::ModelPatch {
+        name: TEST_MODEL.to_string(),
+        ops: vec![simlin_base::project_patch::ModelOperation::UpsertAux(
+            datamodel::Aux {
+                ident: "tank".to_string(),
+                equation: datamodel::Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(1),
+            },
+        )],
+    };
+
+    let new_view = incremental_layout(&old_view, &patched_project, TEST_MODEL, &patch, None)
+        .expect("incremental layout after kind change should succeed");
+
+    let tank_is_aux = new_view
+        .elements
+        .iter()
+        .any(|e| matches!(e, ViewElement::Aux(a) if canonicalize(&a.name).as_ref() == "tank"));
+    assert!(
+        tank_is_aux,
+        "tank should be an Aux after kind change from Stock to Aux"
+    );
+
+    let tank_is_stock = new_view
+        .elements
+        .iter()
+        .any(|e| matches!(e, ViewElement::Stock(s) if canonicalize(&s.name).as_ref() == "tank"));
+    assert!(
+        !tank_is_stock,
+        "tank must not remain as a Stock after kind change to Aux"
+    );
+}
+
+// ---- Issue 1 (PR review iter 3): diff_clouds must wire cloud UIDs into flow attached_to_uid ----
+
+#[test]
+fn test_diff_clouds_wires_attached_to_uid_for_unattached_flow_point() {
+    // Simulate an XMILE import where a cloud element exists but the flow's source
+    // point has attached_to_uid == None.  After diff_clouds the flow point's
+    // attached_to_uid must reference the cloud's UID.
+    let mut state = LayoutState {
+        uid_manager: UidManager::new(),
+        display_names: HashMap::new(),
+        elements: Vec::new(),
+        positions: HashMap::new(),
+        flow_templates: HashMap::new(),
+        cloud_ident_to_uid: HashMap::new(),
+        cloud_ident_to_flow_ident: HashMap::new(),
+        flow_ident_to_clouds: HashMap::new(),
+    };
+
+    // flow "f" uid=2, from cloud (no from_stock)
+    state.uid_manager.add(2, "f");
+    state.display_names.insert("f".into(), "f".into());
+
+    // Flow element whose source point has attached_to_uid == None (XMILE import style)
+    state.elements.push(ViewElement::Flow(view_element::Flow {
+        name: "f".into(),
+        uid: 2,
+        x: 100.0,
+        y: 100.0,
+        label_side: LabelSide::Bottom,
+        points: vec![
+            FlowPoint {
+                x: 50.0,
+                y: 100.0,
+                attached_to_uid: None,
+            },
+            FlowPoint {
+                x: 200.0,
+                y: 100.0,
+                attached_to_uid: None,
+            },
+        ],
+        compat: None,
+        label_compat: None,
+    }));
+    state.positions.insert(2, Position::new(100.0, 100.0));
+
+    // Cloud already exists for this flow, but the flow point is unattached
+    let cloud_uid = state.uid_manager.alloc("");
+    state.elements.push(ViewElement::Cloud(view_element::Cloud {
+        uid: cloud_uid,
+        flow_uid: 2,
+        x: 50.0,
+        y: 100.0,
+        compat: None,
+    }));
+    state
+        .positions
+        .insert(cloud_uid, Position::new(50.0, 100.0));
+
+    // Metadata says "f" has no from_stock (needs source cloud)
+    let metadata = ComputedMetadata {
+        chains: Vec::new(),
+        feedback_loops: Vec::new(),
+        dominant_periods: Vec::new(),
+        dep_graph: BTreeMap::new(),
+        reverse_dep_graph: BTreeMap::new(),
+        constants: BTreeSet::new(),
+        stock_to_inflows: HashMap::new(),
+        stock_to_outflows: HashMap::new(),
+        flow_to_stocks: HashMap::from([("f".into(), (None, None))]),
+    };
+
+    diff_clouds(&mut state, &metadata);
+
+    // After diff_clouds, the flow's source point must be attached to the cloud
+    let flow = state
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if f.uid == 2 => Some(f.clone()),
+            _ => None,
+        })
+        .expect("flow should still exist after diff_clouds");
+
+    let surviving_cloud_uid = state
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Cloud(c) if c.flow_uid == 2 => Some(c.uid),
+            _ => None,
+        })
+        .expect("cloud for flow should still exist");
+
+    let source_attached = flow.points[0].attached_to_uid;
+    assert_eq!(
+        source_attached,
+        Some(surviving_cloud_uid),
+        "source flow point attached_to_uid should reference the cloud after diff_clouds, \
+         got {:?}",
+        source_attached
+    );
+}
+
+// ---- Issue 2 (PR review iter 3): display names preserved through type-change deletion ----
+
+#[test]
+fn test_incremental_kind_change_preserves_display_name() {
+    // Build a model with aux "Growth Rate" (ident: "Growth Rate", canonical: "growth_rate").
+    // Generate layout.  Change it to a stock via type-change (UpsertStock, no DeleteVariable).
+    // The resulting Stock element's name must be "Growth Rate", not "growth_rate".
+
+    let initial_model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Aux(datamodel::Aux {
+                ident: "Growth Rate".to_string(),
+                equation: datamodel::Equation::Scalar("0.1".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(1),
+            }),
+            datamodel::Variable::Aux(datamodel::Aux {
+                ident: "other".to_string(),
+                equation: datamodel::Equation::Scalar("1.0".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(2),
+            }),
+        ]
+        .into(),
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+        macro_spec: None,
+    };
+    let initial_project = test_project(initial_model);
+    let old_view =
+        generate_layout(&initial_project, TEST_MODEL, None).expect("initial layout should succeed");
+
+    // Verify initial state: the display name was preserved
+    let aux_name = old_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Aux(a) if canonicalize(&a.name).as_ref() == "growth_rate" => {
+                Some(a.name.clone())
+            }
+            _ => None,
+        })
+        .expect("Growth Rate aux should exist in old view");
+    // The aux element name should contain "Growth" (line-wrapped or not)
+    assert!(
+        aux_name.contains("Growth"),
+        "aux display name should contain 'Growth', got '{}'",
+        aux_name
+    );
+
+    // Patch: kind-change aux "Growth Rate" -> stock, no DeleteVariable
+    let mut patched_project = initial_project.clone();
+    let model = patched_project.get_model_mut(TEST_MODEL).unwrap();
+    model.variables.retain(|v| v.get_ident() != "Growth Rate");
+    model
+        .variables
+        .push(datamodel::Variable::Stock(datamodel::Stock {
+            ident: "Growth Rate".to_string(),
+            equation: datamodel::Equation::Scalar("0".to_string()),
+            documentation: String::new(),
+            units: None,
+            inflows: vec![],
+            outflows: vec![],
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: Some(1),
+        }));
+    let patch = simlin_base::project_patch::ModelPatch {
+        name: TEST_MODEL.to_string(),
+        ops: vec![simlin_base::project_patch::ModelOperation::UpsertStock(
+            datamodel::Stock {
+                ident: "Growth Rate".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(1),
+            },
+        )],
+    };
+
+    let new_view = incremental_layout(&old_view, &patched_project, TEST_MODEL, &patch, None)
+        .expect("incremental layout after kind change should succeed");
+
+    // The rebuilt Stock element must use "Growth Rate", not "growth_rate"
+    let stock_name = new_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Stock(s) if canonicalize(&s.name).as_ref() == "growth_rate" => {
+                Some(s.name.clone())
+            }
+            _ => None,
+        })
+        .expect("Growth Rate stock should exist in new view");
+
+    assert!(
+        stock_name.contains("Growth"),
+        "rebuilt stock display name should contain 'Growth' (the original case), \
+         got '{}' -- display name was lost during type-change deletion",
+        stock_name
+    );
+}
+
+// ---- Issue 3 (PR review iter 3): alias positions removed during deletion ----
+
+#[test]
+fn test_apply_deletion_removes_alias_position_from_state() {
+    // Build a LayoutState with an aux and an alias pointing to it (both with positions).
+    // Delete the aux.  The alias's position must also be removed from state.positions.
+    let model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![datamodel::Variable::Aux(datamodel::Aux {
+            ident: "rate".to_string(),
+            equation: datamodel::Equation::Scalar("0.5".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: Some(1),
+        })]
+        .into(),
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+        macro_spec: None,
+    };
+    let mut state = LayoutState::new(&model);
+
+    let aux_uid = state.get_or_alloc_uid("rate");
+    state.elements.push(ViewElement::Aux(view_element::Aux {
+        name: "rate".to_string(),
+        uid: aux_uid,
+        x: 100.0,
+        y: 100.0,
+        label_side: view_element::LabelSide::Bottom,
+        compat: None,
+    }));
+    state.positions.insert(aux_uid, Position::new(100.0, 100.0));
+
+    // Add an alias element with its own position entry
+    let alias_uid = state.uid_manager.alloc("");
+    state.elements.push(ViewElement::Alias(view_element::Alias {
+        uid: alias_uid,
+        alias_of_uid: aux_uid,
+        x: 200.0,
+        y: 200.0,
+        label_side: view_element::LabelSide::Bottom,
+        compat: None,
+    }));
+    state
+        .positions
+        .insert(alias_uid, Position::new(200.0, 200.0));
+
+    assert!(
+        state.positions.contains_key(&alias_uid),
+        "precondition: alias position should exist before deletion"
+    );
+
+    state.apply_deletion("rate");
+
+    assert!(
+        !state.positions.contains_key(&alias_uid),
+        "alias position should be removed from state.positions after aux deletion"
+    );
+    assert!(
+        !state.positions.contains_key(&aux_uid),
+        "aux position should also be removed"
+    );
+    assert!(state.elements.is_empty(), "all elements should be removed");
+}
+
+// ---- Issue 3: group names in UidManager must not collide with variable names ----
+
+#[test]
+fn test_group_uid_does_not_collide_with_variable_uid() {
+    // Build a view with a stock named "production" (uid=10) followed by a group
+    // also named "production" (uid=5).  Without the fix, processing the group
+    // after the stock overwrites the reverse lookup so get_uid("production")
+    // returns 5 (the group) instead of 10 (the stock).
+
+    let model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![datamodel::Variable::Stock(datamodel::Stock {
+            ident: "production".to_string(),
+            equation: datamodel::Equation::Scalar("50".to_string()),
+            documentation: String::new(),
+            units: None,
+            inflows: vec![],
+            outflows: vec![],
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: Some(10),
+        })]
+        .into(),
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+        macro_spec: None,
+    };
+
+    // Stock comes first so its reverse-mapping is established; then the group
+    // (same name, uid=5) appears later and -- without the fix -- overwrites it.
+    let old_view = datamodel::StockFlow {
+        name: None,
+        elements: vec![
+            ViewElement::Stock(view_element::Stock {
+                uid: 10,
+                name: "production".to_string(),
+                x: 100.0,
+                y: 100.0,
+                label_side: view_element::LabelSide::Bottom,
+                compat: None,
+            }),
+            ViewElement::Group(view_element::Group {
+                uid: 5,
+                name: "production".to_string(),
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 200.0,
+                is_mdl_view_marker: false,
+            }),
+        ]
+        .into(),
+        view_box: datamodel::Rect::default(),
+        zoom: 1.0,
+        use_lettered_polarity: false,
+        font: None,
+        sketch_compat: None,
+    };
+
+    let state = LayoutState::from_existing_view(&old_view, &model);
+
+    // get_uid("production") must return the stock's UID (10), not the group's (5)
+    let uid = state
+        .uid_manager
+        .get_uid("production")
+        .expect("production should have a UID");
+    assert_eq!(
+        uid, 10,
+        "get_uid('production') should return the stock's UID (10), not the group's (5)"
+    );
+}
+
+// ---- Issue 4 (PR review iter 4): cloud positions not recorded when create_flow_view_element ----
+// ---- creates clouds for new flows in incremental_layout                                     ----
+
+#[test]
+fn test_incremental_new_flow_cloud_positions_recorded() {
+    // Start with a model that has just one stock (no flows), generate an initial layout,
+    // then add a new outflow with a cloud sink.  After incremental_layout, verify that
+    // the cloud's coordinates match the settled flow endpoint, not a stale creation position.
+    //
+    // Before the fix, create_flow_view_element called build_clouds_for_flow which pushed
+    // clouds into state.elements but never added their positions to state.positions.
+    // settle_new_elements therefore could not seed initial positions for the cloud nodes.
+    // When the flow center later moved during SFDP, the flow element and its flow points
+    // were shifted by dx/dy, but the cloud stayed at its original creation coordinates
+    // because it had no entry in state.positions and was skipped by the update loop.
+
+    let initial_model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![datamodel::Variable::Stock(datamodel::Stock {
+            ident: "tank".to_string(),
+            equation: datamodel::Equation::Scalar("100".to_string()),
+            documentation: String::new(),
+            units: None,
+            inflows: vec![],
+            outflows: vec![],
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: Some(1),
+        })]
+        .into(),
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+        macro_spec: None,
+    };
+
+    let initial_project = test_project(initial_model);
+    let old_view =
+        generate_layout(&initial_project, TEST_MODEL, None).expect("initial layout should succeed");
+
+    // Verify that the stock is placed at a reasonable position (not origin).
+    let tank_pos = old_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Stock(s) if canonicalize(&s.name).as_ref() == "tank" => Some((s.x, s.y)),
+            _ => None,
+        })
+        .expect("tank stock should be in initial view");
+
+    assert!(
+        tank_pos.0 > 0.0 && tank_pos.1 > 0.0,
+        "tank stock should have positive coordinates in initial view, got {:?}",
+        tank_pos
+    );
+
+    // Patch: add a new flow "drain" that flows out of tank (sink is a cloud).
+    let patched_model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "tank".to_string(),
+                equation: datamodel::Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec!["drain".to_string()],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(1),
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "drain".to_string(),
+                equation: datamodel::Equation::Scalar("10".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(2),
+            }),
+        ]
+        .into(),
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+        macro_spec: None,
+    };
+    let patched_project = test_project(patched_model);
+
+    let patch = simlin_base::project_patch::ModelPatch {
+        name: TEST_MODEL.to_string(),
+        ops: vec![
+            simlin_base::project_patch::ModelOperation::UpdateStockFlows {
+                ident: "tank".to_string(),
+                inflows: vec![],
+                outflows: vec!["drain".to_string()],
+            },
+            simlin_base::project_patch::ModelOperation::UpsertFlow(datamodel::Flow {
+                ident: "drain".to_string(),
+                equation: datamodel::Equation::Scalar("10".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(2),
+            }),
+        ],
+    };
+
+    let new_view = incremental_layout(&old_view, &patched_project, TEST_MODEL, &patch, None)
+        .expect("incremental layout should succeed after adding a flow with cloud endpoint");
+
+    // Locate the flow and its cloud in the new view.
+    let drain_elem = new_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "drain" => Some(f.clone()),
+            _ => None,
+        })
+        .expect("drain flow should be present in new view");
+
+    let clouds: Vec<_> = new_view
+        .elements
+        .iter()
+        .filter_map(|e| match e {
+            ViewElement::Cloud(c) if c.flow_uid == drain_elem.uid => Some(c.clone()),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        clouds.len(),
+        1,
+        "drain flow (outflow from tank with cloud sink) should have exactly one cloud, got {}",
+        clouds.len()
+    );
+
+    let cloud = &clouds[0];
+
+    // The cloud must not be stranded at (0, 0).  In a layout where tank is at a
+    // positive position, a cloud that was properly settled will be near the flow
+    // endpoint which itself is near the tank.  Checking that cloud (x,y) are
+    // non-zero is sufficient to detect the "not recorded" defect.
+    assert!(
+        cloud.x != 0.0 || cloud.y != 0.0,
+        "cloud for 'drain' should not be at the origin (0, 0); \
+         positions were not recorded in state.positions before settle_new_elements ran. \
+         cloud uid={}, x={}, y={}",
+        cloud.uid,
+        cloud.x,
+        cloud.y,
+    );
+
+    // The cloud connects the flow's sink endpoint: flow.points.last() is the sink.
+    // After settling, the cloud's (x, y) must track the sink flow point.
+    // Without the fix the update loop skips the cloud (no entry in state.positions),
+    // so the cloud stays at its initial creation position while flow.points shift.
+    let sink_point = drain_elem.points.last().expect("flow must have points");
+    let cloud_to_sink_dist =
+        ((cloud.x - sink_point.x).powi(2) + (cloud.y - sink_point.y).powi(2)).sqrt();
+    assert!(
+        cloud_to_sink_dist < 5.0,
+        "cloud for 'drain' should be at the sink flow point (within 5 units), \
+         but was {}px away. cloud=({},{}) sink_point=({},{})",
+        cloud_to_sink_dist,
+        cloud.x,
+        cloud.y,
+        sink_point.x,
+        sink_point.y,
+    );
+}
+
+/// When a stock with flows is kind-changed to an aux (via UpsertAux, no
+/// DeleteVariable), flows that were attached to the stock must be rebuilt
+/// with cloud endpoints. The old stock UID is reused by the new aux element,
+/// so the flow endpoint check must detect this as a topology change.
+#[test]
+fn test_incremental_kind_change_stock_to_aux_resets_attached_flows() {
+    let initial_model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "tank".to_string(),
+                equation: datamodel::Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec!["fill".to_string()],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(1),
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "fill".to_string(),
+                equation: datamodel::Equation::Scalar("10".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(2),
+            }),
+        ]
+        .into(),
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+        macro_spec: None,
+    };
+
+    let initial_project = test_project(initial_model);
+    let old_view =
+        generate_layout(&initial_project, TEST_MODEL, None).expect("initial layout should succeed");
+
+    // Verify the flow's sink endpoint is attached to the stock
+    let fill_flow = old_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "fill" => Some(f),
+            _ => None,
+        })
+        .expect("fill flow must exist in initial view");
+    let tank_uid = old_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Stock(s) if canonicalize(&s.name).as_ref() == "tank" => Some(s.uid),
+            _ => None,
+        })
+        .expect("tank stock must exist in initial view");
+    assert!(
+        fill_flow.points.last().unwrap().attached_to_uid == Some(tank_uid),
+        "fill's sink must be attached to tank in initial view"
+    );
+
+    // Patch: change stock "tank" to aux "tank" (no DeleteVariable, no explicit flow reset)
+    let mut patched_project = initial_project.clone();
+    let model = patched_project.get_model_mut(TEST_MODEL).unwrap();
+    model.variables.retain(|v| v.get_ident() != "tank");
+    model
+        .variables
+        .push(datamodel::Variable::Aux(datamodel::Aux {
+            ident: "tank".to_string(),
+            equation: datamodel::Equation::Scalar("100".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: Some(1),
+        }));
+    let patch = simlin_base::project_patch::ModelPatch {
+        name: TEST_MODEL.to_string(),
+        ops: vec![simlin_base::project_patch::ModelOperation::UpsertAux(
+            datamodel::Aux {
+                ident: "tank".to_string(),
+                equation: datamodel::Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: Some(1),
+            },
+        )],
+    };
+
+    let new_view = incremental_layout(&old_view, &patched_project, TEST_MODEL, &patch, None)
+        .expect("incremental layout after kind change should succeed");
+
+    // The flow "fill" must NOT be attached to the aux element (old tank UID).
+    // It should have cloud endpoints since the aux has no inflows/outflows.
+    let fill_in_new = new_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "fill" => Some(f),
+            _ => None,
+        })
+        .expect("fill flow should exist in new view");
+
+    let still_attached_to_tank_uid = fill_in_new
+        .points
+        .iter()
+        .any(|pt| pt.attached_to_uid == Some(tank_uid));
+    assert!(
+        !still_attached_to_tank_uid,
+        "fill flow must NOT be attached to the old tank UID after kind change to aux. \
+         The flow should have been rebuilt with cloud endpoints. points: {:?}",
+        fill_in_new.points
+    );
+
+    // There should be cloud elements for the flow's endpoints
+    let fill_clouds: Vec<_> = new_view
+        .elements
+        .iter()
+        .filter(|e| matches!(e, ViewElement::Cloud(c) if c.flow_uid == fill_in_new.uid))
+        .collect();
+    assert!(
+        !fill_clouds.is_empty(),
+        "fill flow should have cloud endpoints after stock-to-aux kind change"
+    );
+}
+
+/// apply_rename must format the new label with line breaks, matching
+/// the format used by element creation paths.
+#[test]
+fn test_apply_rename_formats_label() {
+    let model = simple_model();
+    let project = test_project(model.clone());
+    let layout = generate_best_layout(&project, TEST_MODEL, None).expect("layout should succeed");
+
+    let mut state = LayoutState::from_existing_view(&layout, &model);
+    state.apply_rename("birth_rate", "total_birth_rate", "Total Birth Rate");
+
+    let renamed = state.elements.iter().find_map(|e| match e {
+        ViewElement::Aux(a) if a.name.contains("Total") => Some(a),
+        _ => None,
+    });
+    assert!(renamed.is_some(), "renamed element should exist");
+    let name = &renamed.unwrap().name;
+    let expected = format_label_with_line_breaks("Total Birth Rate");
+    assert_eq!(
+        name, &expected,
+        "renamed label should be formatted with line breaks, got '{name}'"
+    );
+}
+
+/// diff_connectors must preserve links that terminate on alias UIDs.
+/// In imported Vensim/XMILE views, causal links often target aliases.
+/// The dep graph uses primary variable UIDs, so alias-targeted links
+/// must be recognized as semantically equivalent.
+#[test]
+fn test_diff_connectors_preserves_alias_links() {
+    let mut state = LayoutState {
+        uid_manager: UidManager::new(),
+        display_names: HashMap::new(),
+        elements: Vec::new(),
+        positions: HashMap::new(),
+        flow_templates: HashMap::new(),
+        cloud_ident_to_uid: HashMap::new(),
+        cloud_ident_to_flow_ident: HashMap::new(),
+        flow_ident_to_clouds: HashMap::new(),
+    };
+
+    // Variable "a" (uid=1) depends on "b" (uid=2)
+    state.uid_manager.add(1, "a");
+    state.uid_manager.add(2, "b");
+    state.display_names.insert("a".into(), "a".into());
+    state.display_names.insert("b".into(), "b".into());
+
+    state.elements.push(ViewElement::Aux(view_element::Aux {
+        name: "a".into(),
+        uid: 1,
+        x: 100.0,
+        y: 100.0,
+        label_side: LabelSide::Bottom,
+        compat: None,
+    }));
+    state.positions.insert(1, Position::new(100.0, 100.0));
+
+    state.elements.push(ViewElement::Aux(view_element::Aux {
+        name: "b".into(),
+        uid: 2,
+        x: 300.0,
+        y: 100.0,
+        label_side: LabelSide::Bottom,
+        compat: None,
+    }));
+    state.positions.insert(2, Position::new(300.0, 100.0));
+
+    // Alias of "b" at uid=10
+    let alias_uid = 10;
+    state.uid_manager.add(alias_uid, "");
+    state.elements.push(ViewElement::Alias(view_element::Alias {
+        uid: alias_uid,
+        alias_of_uid: 2,
+        x: 200.0,
+        y: 200.0,
+        label_side: LabelSide::Bottom,
+        compat: None,
+    }));
+    state
+        .positions
+        .insert(alias_uid, Position::new(200.0, 200.0));
+
+    // Existing link from "b" primary (uid=2) to alias of "b" is not interesting.
+    // What matters: link from "a" to alias_of_b (instead of from "a" to "b" primary)
+    let link_uid = state.uid_manager.alloc("");
+    state.elements.push(ViewElement::Link(view_element::Link {
+        uid: link_uid,
+        from_uid: 2,
+        to_uid: 1,
+        shape: view_element::LinkShape::Arc(45.0),
+        polarity: None,
+    }));
+
+    // Replace with a link from alias_of_b to "a"
+    state
+        .elements
+        .retain(|e| !matches!(e, ViewElement::Link(_)));
+    let alias_link_uid = state.uid_manager.alloc("");
+    state.elements.push(ViewElement::Link(view_element::Link {
+        uid: alias_link_uid,
+        from_uid: alias_uid, // from alias of b
+        to_uid: 1,           // to a
+        shape: view_element::LinkShape::Arc(30.0),
+        polarity: None,
+    }));
+
+    // Metadata: "a" depends on "b" (dep_graph: a -> [b])
+    let mut metadata = ComputedMetadata::new_empty();
+    metadata
+        .dep_graph
+        .insert("a".to_string(), ["b".to_string()].into_iter().collect());
+
+    diff_connectors(&mut state, &metadata, |_, _| true, |_| false);
+
+    // The link from alias_of_b to "a" should be preserved (not replaced by b->a)
+    let alias_link = state
+        .elements
+        .iter()
+        .find(|e| matches!(e, ViewElement::Link(l) if l.from_uid == alias_uid && l.to_uid == 1));
+    assert!(
+        alias_link.is_some(),
+        "link from alias of b (uid={}) to a (uid=1) should be preserved",
+        alias_uid
+    );
+
+    // The original arc shape should be preserved
+    if let Some(ViewElement::Link(l)) = alias_link {
+        assert!(
+            matches!(l.shape, view_element::LinkShape::Arc(angle) if (angle - 30.0).abs() < 0.01),
+            "alias link shape should be preserved, got {:?}",
+            l.shape
+        );
+    }
+}
+
+/// When a patch contains only view ops (UpsertView/DeleteView), the
+/// incremental layout must return the old view unchanged. The
+/// diff_connectors and optimize_labels passes should not run.
+#[test]
+fn test_incremental_layout_view_only_patch_returns_unchanged() {
+    let model = simple_model();
+    let project = test_project(model.clone());
+    let old_view =
+        generate_layout(&project, TEST_MODEL, None).expect("initial layout should succeed");
+
+    // Move an element to a distinctive position
+    let mut modified_view = old_view.clone();
+    modified_view.elements.rewrite(|elements| {
+        for elem in elements.iter_mut() {
+            if let ViewElement::Aux(a) = elem
+                && canonicalize(&a.name).as_ref() == "birth_rate"
+            {
+                a.x = 5555.0;
+                a.y = 4444.0;
+            }
+        }
+    });
+
+    // Create a view-only patch
+    let patch = simlin_base::project_patch::ModelPatch {
+        name: TEST_MODEL.to_string(),
+        ops: vec![simlin_base::project_patch::ModelOperation::UpsertView {
+            index: 0,
+            view: datamodel::View::StockFlow(old_view.clone()),
+        }],
+    };
+
+    let result = incremental_layout(&modified_view, &project, TEST_MODEL, &patch, None)
+        .expect("incremental layout should succeed");
+
+    // The view should be returned unchanged (same as modified_view, not rebuilt)
+    let birth_rate = result
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Aux(a) if canonicalize(&a.name).as_ref() == "birth_rate" => Some(a),
+            _ => None,
+        })
+        .expect("birth_rate should be in result");
+
+    assert!(
+        (birth_rate.x - 5555.0).abs() < 0.01 && (birth_rate.y - 4444.0).abs() < 0.01,
+        "view-only patch should return the old view unchanged, got ({}, {})",
+        birth_rate.x,
+        birth_rate.y
+    );
+}
+
+/// The view box is the editor's viewport (pan offset + canvas size), not the
+/// content bounds: an incremental pass must hand it back verbatim even when
+/// the elements now sit outside it (here, one moved to negative
+/// coordinates), otherwise every kernel-side edit snaps the user's pan back
+/// and re-sizes the box away from the canvas, which the editor answers with
+/// a refit -- the diagram jumps on every "Updated from Python".
+#[test]
+fn test_build_stock_flow_from_state_keeps_the_viewport_verbatim() {
+    let model = simple_model();
+    let project = test_project(model.clone());
+    let mut layout =
+        generate_best_layout(&project, TEST_MODEL, None).expect("layout should succeed");
+    // A panned, resized viewport that no bounds computation would produce.
+    layout.view_box = datamodel::Rect {
+        x: -321.5,
+        y: 77.25,
+        width: 1234.0,
+        height: 567.0,
+    };
+
+    let mut state = LayoutState::from_existing_view(&layout, &model);
+    for elem in &mut state.elements {
+        if let ViewElement::Aux(a) = elem
+            && canonicalize(&a.name).as_ref() == "birth_rate"
+        {
+            a.x = -100.0;
+            a.y = -50.0;
+            let uid = a.uid;
+            state.positions.insert(uid, Position::new(-100.0, -50.0));
+        }
+    }
+
+    let result = build_stock_flow_from_state(state, &layout);
+    assert_eq!(result.view_box, layout.view_box);
+}
+
+/// The same contract through the public entry point: an incremental layout
+/// for a patch that adds a variable keeps the old view's viewport.
+#[test]
+fn test_incremental_layout_keeps_the_viewport() {
+    let model = simple_model();
+    let project = test_project(model.clone());
+    let mut old_view =
+        generate_best_layout(&project, TEST_MODEL, None).expect("layout should succeed");
+    old_view.view_box = datamodel::Rect {
+        x: -321.5,
+        y: 77.25,
+        width: 1234.0,
+        height: 567.0,
+    };
+
+    let mut new_model = model.clone();
+    new_model
+        .variables
+        .push(datamodel::Variable::Aux(datamodel::Aux {
+            ident: "far_away".to_string(),
+            equation: datamodel::Equation::Scalar("1".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: None,
+        }));
+    let new_project = test_project(new_model);
+    let patch = simlin_base::project_patch::ModelPatch {
+        name: TEST_MODEL.to_string(),
+        ops: vec![simlin_base::project_patch::ModelOperation::UpsertAux(
+            datamodel::Aux {
+                ident: "far_away".to_string(),
+                equation: datamodel::Equation::Scalar("1".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            },
+        )],
+    };
+    let result = incremental_layout(&old_view, &new_project, TEST_MODEL, &patch, None)
+        .expect("incremental layout should succeed");
+    assert!(
+        result.elements.iter().any(
+            |e| matches!(e, ViewElement::Aux(a) if canonicalize(&a.name).as_ref() == "far_away")
+        ),
+        "the new variable was placed"
+    );
+    assert_eq!(result.view_box, old_view.view_box);
+}
+
+// ---------------------------------------------------------------------------
+// P1: New top/bottom flows must be seeded from their attachment point
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_incremental_new_side_flow_valve_on_pipe() {
+    // When a waste flow is added incrementally to a stock that already has a
+    // chain outflow, the waste flow's valve must lie on its vertical pipe,
+    // not at the generic horizontal seed position.
+    let initial_model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_a".to_string(),
+                equation: datamodel::Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec!["chain_flow".to_string()],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_b".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec!["chain_flow".to_string()],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "chain_flow".to_string(),
+                equation: datamodel::Equation::Scalar("10".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+        ]
+        .into(),
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+        macro_spec: None,
+    };
+    let initial_project = test_project(initial_model);
+    let old_view = generate_layout(&initial_project, TEST_MODEL, None).expect("initial layout");
+
+    // Add waste_flow as a new outflow from stock_a
+    let mut patched_project = initial_project.clone();
+    let model = patched_project.get_model_mut(TEST_MODEL).unwrap();
+    model.variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            if let datamodel::Variable::Stock(s) = var
+                && s.ident == "stock_a"
+            {
+                s.outflows.push("waste_flow".to_string());
+            }
+        }
+    });
+    model
+        .variables
+        .push(datamodel::Variable::Flow(datamodel::Flow {
+            ident: "waste_flow".to_string(),
+            equation: datamodel::Equation::Scalar("5".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: None,
+        }));
+
+    let patch = simlin_base::project_patch::ModelPatch {
+        name: TEST_MODEL.to_string(),
+        ops: vec![
+            simlin_base::project_patch::ModelOperation::UpsertFlow(datamodel::Flow {
+                ident: "waste_flow".to_string(),
+                equation: datamodel::Equation::Scalar("5".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            simlin_base::project_patch::ModelOperation::UpdateStockFlows {
+                ident: "stock_a".to_string(),
+                inflows: vec![],
+                outflows: vec!["chain_flow".to_string(), "waste_flow".to_string()],
+            },
+        ],
+    };
+
+    let new_view = incremental_layout(&old_view, &patched_project, TEST_MODEL, &patch, None)
+        .expect("incremental layout");
+
+    let stock_a = new_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Stock(s) if canonicalize(&s.name).as_ref() == "stock_a" => Some(s),
+            _ => None,
+        })
+        .expect("stock_a");
+
+    let waste = new_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_flow" => Some(f),
+            _ => None,
+        })
+        .expect("waste_flow");
+
+    // The waste flow valve must be below the stock
+    assert!(
+        waste.y > stock_a.y + 5.0,
+        "waste_flow valve y ({}) should be below stock_a y ({})",
+        waste.y,
+        stock_a.y,
+    );
+
+    // The valve x must be near the pipe's x (within stock width)
+    let half_w = LayoutConfig::default().stock_width / 2.0;
+    assert!(
+        (waste.x - waste.points[0].x).abs() < half_w,
+        "waste_flow valve x ({}) should be near pipe x ({}) -- valve must be on the pipe",
+        waste.x,
+        waste.points[0].x,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A preserved side flow keeps its slot when a sibling joins its face
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_incremental_add_second_side_flow_takes_its_own_face() {
+    // Start with: stock_a -> chain_flow -> stock_b, stock_a -> waste_a -> cloud
+    // Then add waste_b. waste_a keeps its bottom face untouched; waste_b takes
+    // the free top face instead of squeezing onto the bottom face beside it,
+    // where the two valves would overlap.
+    let initial_model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_a".to_string(),
+                equation: datamodel::Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec!["chain_flow".to_string(), "waste_a".to_string()],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_b".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec!["chain_flow".to_string()],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "chain_flow".to_string(),
+                equation: datamodel::Equation::Scalar("10".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "waste_a".to_string(),
+                equation: datamodel::Equation::Scalar("3".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+        ]
+        .into(),
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+        macro_spec: None,
+    };
+    let initial_project = test_project(initial_model);
+    let old_view = generate_layout(&initial_project, TEST_MODEL, None).expect("initial layout");
+
+    // Verify waste_a's attach point before: should be at offset 0.5
+    let old_waste_a = old_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_a" => Some(f),
+            _ => None,
+        })
+        .expect("waste_a in old view");
+    let old_stock_a = old_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Stock(s) if canonicalize(&s.name).as_ref() == "stock_a" => Some(s),
+            _ => None,
+        })
+        .expect("stock_a in old view");
+    let old_attach_x = old_waste_a.points[0].x;
+    let old_expected_mid = old_stock_a.x; // offset 0.5 = stock center
+    assert!(
+        (old_attach_x - old_expected_mid).abs() < 1.0,
+        "before: waste_a attach x ({}) should be at stock center ({})",
+        old_attach_x,
+        old_expected_mid,
+    );
+
+    // Now add waste_b
+    let mut patched_project = initial_project.clone();
+    let model = patched_project.get_model_mut(TEST_MODEL).unwrap();
+    model.variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            if let datamodel::Variable::Stock(s) = var
+                && s.ident == "stock_a"
+            {
+                s.outflows.push("waste_b".to_string());
+            }
+        }
+    });
+    model
+        .variables
+        .push(datamodel::Variable::Flow(datamodel::Flow {
+            ident: "waste_b".to_string(),
+            equation: datamodel::Equation::Scalar("2".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: None,
+        }));
+
+    let patch = simlin_base::project_patch::ModelPatch {
+        name: TEST_MODEL.to_string(),
+        ops: vec![
+            simlin_base::project_patch::ModelOperation::UpsertFlow(datamodel::Flow {
+                ident: "waste_b".to_string(),
+                equation: datamodel::Equation::Scalar("2".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            simlin_base::project_patch::ModelOperation::UpdateStockFlows {
+                ident: "stock_a".to_string(),
+                inflows: vec![],
+                outflows: vec![
+                    "chain_flow".to_string(),
+                    "waste_a".to_string(),
+                    "waste_b".to_string(),
+                ],
+            },
+        ],
+    };
+
+    let new_view = incremental_layout(&old_view, &patched_project, TEST_MODEL, &patch, None)
+        .expect("incremental layout");
+
+    let flow_named = |view: &datamodel::StockFlow, name: &str| {
+        view.elements
+            .iter()
+            .find_map(|e| match e {
+                ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == name => Some(f.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{name} in view"))
+    };
+
+    // waste_a is a sibling the patch did not touch: it comes back byte for
+    // byte, pipe, valve and label side.
+    let new_waste_a = flow_named(&new_view, "waste_a");
+    assert_eq!(new_waste_a, flow_named(&old_view, "waste_a"));
+
+    // waste_b leaves from the top face, on the opposite side of the stock
+    // (incremental layout never moves a stock the patch did not touch).
+    let new_waste_b = flow_named(&new_view, "waste_b");
+    assert!(
+        new_waste_b.y < old_stock_a.y - 5.0,
+        "waste_b valve y ({}) should be above stock_a y ({})",
+        new_waste_b.y,
+        old_stock_a.y,
+    );
+    let valve_gap =
+        ((new_waste_a.x - new_waste_b.x).powi(2) + (new_waste_a.y - new_waste_b.y).powi(2)).sqrt();
+    assert!(
+        valve_gap > 2.0 * simlin_diagram::constants::AUX_RADIUS,
+        "the two valves must not overlap: {valve_gap}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P2: A preserved cloud flow keeps its face when its stock's chain is removed
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_incremental_remove_chain_keeps_cloud_flow_in_place() {
+    // Start with: stock_a -> chain_flow -> stock_b, stock_a -> waste_flow -> cloud
+    // waste_flow is on Bottom because chain_flow exists.
+    // Then remove chain_flow and stock_b. waste_flow stays where it is.
+    let initial_model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_a".to_string(),
+                equation: datamodel::Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec!["chain_flow".to_string(), "waste_flow".to_string()],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_b".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec!["chain_flow".to_string()],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "chain_flow".to_string(),
+                equation: datamodel::Equation::Scalar("10".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "waste_flow".to_string(),
+                equation: datamodel::Equation::Scalar("5".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+        ]
+        .into(),
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+        macro_spec: None,
+    };
+    let initial_project = test_project(initial_model);
+    let old_view = generate_layout(&initial_project, TEST_MODEL, None).expect("initial layout");
+
+    // Verify waste_flow starts vertical (below stock, as side flow)
+    let old_waste = old_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_flow" => Some(f),
+            _ => None,
+        })
+        .expect("waste_flow in old view");
+    let old_stock = old_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Stock(s) if canonicalize(&s.name).as_ref() == "stock_a" => Some(s),
+            _ => None,
+        })
+        .expect("stock_a in old view");
+    assert!(
+        old_waste.y > old_stock.y + 5.0,
+        "waste_flow should initially be below stock_a (side flow)"
+    );
+
+    // Now remove chain_flow and stock_b
+    let mut patched_project = initial_project.clone();
+    let model = patched_project.get_model_mut(TEST_MODEL).unwrap();
+    model
+        .variables
+        .retain(|v| v.get_ident() != "chain_flow" && v.get_ident() != "stock_b");
+    model.variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            if let datamodel::Variable::Stock(s) = var
+                && s.ident == "stock_a"
+            {
+                s.outflows = vec!["waste_flow".to_string()];
+            }
+        }
+    });
+
+    let patch = simlin_base::project_patch::ModelPatch {
+        name: TEST_MODEL.to_string(),
+        ops: vec![
+            simlin_base::project_patch::ModelOperation::DeleteVariable {
+                ident: "chain_flow".to_string(),
+            },
+            simlin_base::project_patch::ModelOperation::DeleteVariable {
+                ident: "stock_b".to_string(),
+            },
+            simlin_base::project_patch::ModelOperation::UpdateStockFlows {
+                ident: "stock_a".to_string(),
+                inflows: vec![],
+                outflows: vec!["waste_flow".to_string()],
+            },
+        ],
+    };
+
+    let new_view = incremental_layout(&old_view, &patched_project, TEST_MODEL, &patch, None)
+        .expect("incremental layout");
+
+    // waste_flow is a sibling the patch did not touch. With the chain gone a
+    // fresh layout would put it on the right face, but it keeps the bottom
+    // one: it comes back byte for byte.
+    let waste_flow = |view: &datamodel::StockFlow| {
+        view.elements
+            .iter()
+            .find_map(|e| match e {
+                ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_flow" => {
+                    Some(f.clone())
+                }
+                _ => None,
+            })
+            .expect("waste_flow in view")
+    };
+    assert_eq!(waste_flow(&new_view), waste_flow(&old_view));
+}
+
+// ---------------------------------------------------------------------------
+// P2: Resnap must preserve off-center top/bottom attachment positions
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_resnap_preserves_vertical_flow_offset() {
+    // Create a flow attached to the bottom of a stock at an off-center position.
+    // After resnap, the x position should be preserved, not snapped to center.
+    let config = LayoutConfig::default();
+    let half_w = config.stock_width / 2.0;
+    let half_h = config.stock_height / 2.0;
+
+    let stock_uid = 1;
+    let flow_uid = 2;
+    let cloud_uid = 3;
+    let stock_x = 200.0;
+    let stock_y = 100.0;
+    // Offset 1/3: should attach at stock_x - half_w + stock_w * (1/3)
+    let attach_x = stock_x - half_w + config.stock_width * (1.0 / 3.0);
+    let valve_x = attach_x;
+    let valve_y = stock_y + half_h + 50.0;
+
+    let resnap_model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_a".to_string(),
+                equation: datamodel::Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec!["waste_flow".to_string()],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "waste_flow".to_string(),
+                equation: datamodel::Equation::Scalar("5".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+        ]
+        .into(),
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+        macro_spec: None,
+    };
+    let mut state = LayoutState::new(&resnap_model);
+    state.elements.push(ViewElement::Stock(view_element::Stock {
+        name: "stock_a".to_string(),
+        uid: stock_uid,
+        x: stock_x,
+        y: stock_y,
+        label_side: LabelSide::Bottom,
+        compat: None,
+    }));
+    state
+        .positions
+        .insert(stock_uid, Position::new(stock_x, stock_y));
+
+    state.elements.push(ViewElement::Flow(view_element::Flow {
+        name: "waste_flow".to_string(),
+        uid: flow_uid,
+        x: valve_x,
+        y: valve_y,
+        label_side: LabelSide::Left,
+        points: vec![
+            FlowPoint {
+                x: attach_x,
+                y: stock_y + half_h,
+                attached_to_uid: Some(stock_uid),
+            },
+            FlowPoint {
+                x: attach_x,
+                y: valve_y + 50.0,
+                attached_to_uid: None,
+            },
+        ],
+        compat: None,
+        label_compat: None,
+    }));
+    state
+        .positions
+        .insert(flow_uid, Position::new(valve_x, valve_y));
+
+    state.elements.push(ViewElement::Cloud(view_element::Cloud {
+        uid: cloud_uid,
+        flow_uid,
+        x: attach_x,
+        y: valve_y + 50.0,
+        compat: None,
+    }));
+
+    resnap_flow_endpoints(&mut state, &config, |_| true);
+
+    let flow = state
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if f.uid == flow_uid => Some(f),
+            _ => None,
+        })
+        .expect("flow should exist after resnap");
+
+    let attached_pt = flow
+        .points
+        .iter()
+        .find(|pt| pt.attached_to_uid == Some(stock_uid))
+        .expect("flow should have point attached to stock");
+
+    // The x position should be preserved (not snapped to stock center)
+    assert!(
+        (attached_pt.x - attach_x).abs() < 0.5,
+        "resnap should preserve off-center x ({}) but got ({})",
+        attach_x,
+        attached_pt.x,
+    );
+
+    // The y should still be at the stock bottom edge
+    assert!(
+        (attached_pt.y - (stock_y + half_h)).abs() < 0.5,
+        "resnap should keep y at stock bottom edge ({}) but got ({})",
+        stock_y + half_h,
+        attached_pt.y,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P2: Stock-to-stock flows must use the generic seed, not attachment position
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_incremental_chain_flow_seeded_between_stocks() {
+    // When a stock-to-stock flow is added incrementally, its valve should
+    // be between the two stocks, not to the left of the source stock.
+    let initial_model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_a".to_string(),
+                equation: datamodel::Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_b".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+        ]
+        .into(),
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+        macro_spec: None,
+    };
+    let initial_project = test_project(initial_model);
+    let old_view = generate_layout(&initial_project, TEST_MODEL, None).expect("initial layout");
+
+    let stock_a_x = old_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Stock(s) if canonicalize(&s.name).as_ref() == "stock_a" => Some(s.x),
+            _ => None,
+        })
+        .expect("stock_a");
+    let stock_b_x = old_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Stock(s) if canonicalize(&s.name).as_ref() == "stock_b" => Some(s.x),
+            _ => None,
+        })
+        .expect("stock_b");
+
+    // Add chain_flow: stock_a -> chain_flow -> stock_b
+    let mut patched_project = initial_project.clone();
+    let model = patched_project.get_model_mut(TEST_MODEL).unwrap();
+    model.variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            match var {
+                datamodel::Variable::Stock(s) if s.ident == "stock_a" => {
+                    s.outflows = vec!["chain_flow".to_string()];
+                }
+                datamodel::Variable::Stock(s) if s.ident == "stock_b" => {
+                    s.inflows = vec!["chain_flow".to_string()];
+                }
+                _ => {}
+            }
+        }
+    });
+    model
+        .variables
+        .push(datamodel::Variable::Flow(datamodel::Flow {
+            ident: "chain_flow".to_string(),
+            equation: datamodel::Equation::Scalar("10".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: None,
+        }));
+
+    let patch = simlin_base::project_patch::ModelPatch {
+        name: TEST_MODEL.to_string(),
+        ops: vec![
+            simlin_base::project_patch::ModelOperation::UpsertFlow(datamodel::Flow {
+                ident: "chain_flow".to_string(),
+                equation: datamodel::Equation::Scalar("10".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            simlin_base::project_patch::ModelOperation::UpdateStockFlows {
+                ident: "stock_a".to_string(),
+                inflows: vec![],
+                outflows: vec!["chain_flow".to_string()],
+            },
+            simlin_base::project_patch::ModelOperation::UpdateStockFlows {
+                ident: "stock_b".to_string(),
+                inflows: vec!["chain_flow".to_string()],
+                outflows: vec![],
+            },
+        ],
+    };
+
+    let new_view = incremental_layout(&old_view, &patched_project, TEST_MODEL, &patch, None)
+        .expect("incremental layout");
+
+    let chain_flow = new_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "chain_flow" => Some(f),
+            _ => None,
+        })
+        .expect("chain_flow");
+
+    // The flow valve should be between the two stocks, not to the left
+    // of the source stock or to the right of the sink stock.
+    let min_x = stock_a_x.min(stock_b_x);
+    let max_x = stock_a_x.max(stock_b_x);
+    assert!(
+        chain_flow.x >= min_x - 10.0 && chain_flow.x <= max_x + 10.0,
+        "chain_flow x ({}) should be between stock_a ({}) and stock_b ({})",
+        chain_flow.x,
+        stock_a_x,
+        stock_b_x,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P2: Adding a sibling keeps a hand-reordered face exactly as it was
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_incremental_add_side_flow_keeps_reordered_siblings_in_place() {
+    // Three side outflows beside a chain flow: waste_a and waste_c share the
+    // bottom face (waste_b holds the top). Construct a view where waste_c is
+    // visually LEFT of waste_a (non-alphabetical order). Adding waste_d must
+    // leave every sibling exactly as drawn, the swapped order included.
+
+    // First, build an initial model with chain + waste_a + waste_b + waste_c
+    let initial_model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_a".to_string(),
+                equation: datamodel::Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec![
+                    "chain_flow".to_string(),
+                    "waste_a".to_string(),
+                    "waste_b".to_string(),
+                    "waste_c".to_string(),
+                ],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_b".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec!["chain_flow".to_string()],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "chain_flow".to_string(),
+                equation: datamodel::Equation::Scalar("10".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "waste_a".to_string(),
+                equation: datamodel::Equation::Scalar("3".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "waste_b".to_string(),
+                equation: datamodel::Equation::Scalar("2".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "waste_c".to_string(),
+                equation: datamodel::Equation::Scalar("1".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+        ]
+        .into(),
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+        macro_spec: None,
+    };
+    let initial_project = test_project(initial_model);
+    let base_view = generate_layout(&initial_project, TEST_MODEL, None).expect("base layout");
+
+    // Manually swap waste_a and waste_c attachment points to create
+    // non-alphabetical positional ordering (waste_c to the left).
+    let mut swapped_view = base_view.clone();
+    let wa_attach_x = swapped_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_a" => {
+                f.points.first().map(|p| p.x)
+            }
+            _ => None,
+        })
+        .expect("waste_a attach x");
+    let wc_attach_x = swapped_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_c" => {
+                f.points.first().map(|p| p.x)
+            }
+            _ => None,
+        })
+        .expect("waste_c attach x");
+
+    // Swap the x positions of waste_a and waste_b (valve and pipe points)
+    swapped_view.elements.rewrite(|elements| {
+        for elem in elements.iter_mut() {
+            match elem {
+                ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_a" => {
+                    f.x += wc_attach_x - wa_attach_x;
+                    for pt in &mut f.points {
+                        pt.x += wc_attach_x - wa_attach_x;
+                    }
+                }
+                ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_c" => {
+                    f.x += wa_attach_x - wc_attach_x;
+                    for pt in &mut f.points {
+                        pt.x += wa_attach_x - wc_attach_x;
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+
+    // Verify: waste_b should now be to the left of waste_a
+    let swapped_wa_x = swapped_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_a" => {
+                f.points.first().map(|p| p.x)
+            }
+            _ => None,
+        })
+        .unwrap();
+    let swapped_wc_x = swapped_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_c" => {
+                f.points.first().map(|p| p.x)
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        swapped_wc_x < swapped_wa_x,
+        "precondition: waste_c ({}) should be left of waste_a ({})",
+        swapped_wc_x,
+        swapped_wa_x,
+    );
+
+    // Now add waste_d
+    let mut patched_project = initial_project.clone();
+    let model = patched_project.get_model_mut(TEST_MODEL).unwrap();
+    model.variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            if let datamodel::Variable::Stock(s) = var
+                && s.ident == "stock_a"
+            {
+                s.outflows.push("waste_d".to_string());
+            }
+        }
+    });
+    model
+        .variables
+        .push(datamodel::Variable::Flow(datamodel::Flow {
+            ident: "waste_d".to_string(),
+            equation: datamodel::Equation::Scalar("1".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: None,
+        }));
+
+    let patch = simlin_base::project_patch::ModelPatch {
+        name: TEST_MODEL.to_string(),
+        ops: vec![
+            simlin_base::project_patch::ModelOperation::UpsertFlow(datamodel::Flow {
+                ident: "waste_d".to_string(),
+                equation: datamodel::Equation::Scalar("1".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            simlin_base::project_patch::ModelOperation::UpdateStockFlows {
+                ident: "stock_a".to_string(),
+                inflows: vec![],
+                outflows: vec![
+                    "chain_flow".to_string(),
+                    "waste_a".to_string(),
+                    "waste_b".to_string(),
+                    "waste_c".to_string(),
+                    "waste_d".to_string(),
+                ],
+            },
+        ],
+    };
+
+    let new_view = incremental_layout(&swapped_view, &patched_project, TEST_MODEL, &patch, None)
+        .expect("incremental layout");
+
+    // waste_a, waste_b and waste_c are siblings the patch did not touch: they
+    // come back byte for byte, the swapped order included, and waste_d's stock
+    // end lands on none of theirs.
+    let flow_named = |view: &datamodel::StockFlow, name: &str| {
+        view.elements
+            .iter()
+            .find_map(|e| match e {
+                ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == name => Some(f.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{name} in view"))
+    };
+    for name in ["waste_a", "waste_b", "waste_c"] {
+        assert!(
+            flow_named(&new_view, name) == flow_named(&swapped_view, name),
+            "{name} must come back byte for byte"
+        );
+    }
+    let wd = flow_named(&new_view, "waste_d").points[0].clone();
+    for name in ["waste_a", "waste_b", "waste_c"] {
+        let end = flow_named(&swapped_view, name).points[0].clone();
+        assert!(
+            (wd.x - end.x).hypot(wd.y - end.y) > 1.0,
+            "waste_d's end ({}, {}) must not land on {name}'s ({}, {})",
+            wd.x,
+            wd.y,
+            end.x,
+            end.y,
+        );
+    }
+    assert!(
+        swapped_wc_x < swapped_wa_x,
+        "fixture: waste_c stays left of waste_a"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P1: DeleteVariable without UpdateStockFlows leaves siblings in place
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_incremental_delete_flow_without_update_stock_flows() {
+    // Start with: stock_a -> chain_flow -> stock_b, stock_a -> waste_flow -> cloud
+    // Delete chain_flow and stock_b using only DeleteVariable (no UpdateStockFlows).
+    // waste_flow is a sibling the patch did not touch and stays where it is.
+    let initial_model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_a".to_string(),
+                equation: datamodel::Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec!["chain_flow".to_string(), "waste_flow".to_string()],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_b".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec!["chain_flow".to_string()],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "chain_flow".to_string(),
+                equation: datamodel::Equation::Scalar("10".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "waste_flow".to_string(),
+                equation: datamodel::Equation::Scalar("5".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+        ]
+        .into(),
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+        macro_spec: None,
+    };
+    let initial_project = test_project(initial_model);
+    let old_view = generate_layout(&initial_project, TEST_MODEL, None).expect("initial layout");
+
+    // Build patched model: remove chain_flow and stock_b, update stock_a
+    let mut patched_project = initial_project.clone();
+    let model = patched_project.get_model_mut(TEST_MODEL).unwrap();
+    model
+        .variables
+        .retain(|v| v.get_ident() != "chain_flow" && v.get_ident() != "stock_b");
+    model.variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            if let datamodel::Variable::Stock(s) = var
+                && s.ident == "stock_a"
+            {
+                s.outflows = vec!["waste_flow".to_string()];
+            }
+        }
+    });
+
+    // Patch has ONLY DeleteVariable, no UpdateStockFlows
+    let patch = simlin_base::project_patch::ModelPatch {
+        name: TEST_MODEL.to_string(),
+        ops: vec![
+            simlin_base::project_patch::ModelOperation::DeleteVariable {
+                ident: "chain_flow".to_string(),
+            },
+            simlin_base::project_patch::ModelOperation::DeleteVariable {
+                ident: "stock_b".to_string(),
+            },
+        ],
+    };
+
+    let new_view = incremental_layout(&old_view, &patched_project, TEST_MODEL, &patch, None)
+        .expect("incremental layout");
+
+    // waste_flow is a sibling the patch did not touch: deleting the chain
+    // through DeleteVariable alone leaves it where it was.
+    let waste_flow = |view: &datamodel::StockFlow| {
+        view.elements
+            .iter()
+            .find_map(|e| match e {
+                ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "waste_flow" => {
+                    Some(f.clone())
+                }
+                _ => None,
+            })
+            .expect("waste_flow in view")
+    };
+    assert_eq!(waste_flow(&new_view), waste_flow(&old_view));
+}
+
+// ---------------------------------------------------------------------------
+// P2: Multiple horizontal cloud flows must not overlap
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_layout_two_horizontal_cloud_outflows_spaced() {
+    // Stock with 2 cloud outflows and no chain flow: the first leaves the
+    // right face, the second drops out of the bottom face, so the valves
+    // do not collide.
+    let model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "a".to_string(),
+                equation: datamodel::Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec!["f1".to_string(), "f2".to_string()],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "f1".to_string(),
+                equation: datamodel::Equation::Scalar("5".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "f2".to_string(),
+                equation: datamodel::Equation::Scalar("3".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+        ]
+        .into(),
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+        macro_spec: None,
+    };
+    let project = test_project(model);
+    let result = generate_layout(&project, TEST_MODEL, None).unwrap();
+
+    let f1 = find_flow(&result, "f1").expect("f1");
+    let f2 = find_flow(&result, "f2").expect("f2");
+
+    let stock = find_stock(&result, "a").expect("stock a");
+    assert!(
+        f1.x > stock.x + 5.0 && (f1.y - stock.y).abs() < 1.0,
+        "f1 should leave the right face"
+    );
+    assert!(
+        f2.y > stock.y + 5.0 && (f2.x - stock.x).abs() < 1.0,
+        "f2 should leave the bottom face"
+    );
+
+    let dist = ((f1.x - f2.x).powi(2) + (f1.y - f2.y).powi(2)).sqrt();
+    assert!(
+        dist > 2.0 * simlin_diagram::constants::AUX_RADIUS,
+        "f1 ({}, {}) and f2 ({}, {}) should not overlap (dist={})",
+        f1.x,
+        f1.y,
+        f2.x,
+        f2.y,
+        dist,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P2: Adding a second chain outflow must not corrupt the existing chain flow
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_incremental_add_second_chain_preserves_first() {
+    // Start with: stock_a -> chain_ab -> stock_b
+    // Add: stock_a -> chain_ac -> stock_c
+    // chain_ab should remain between stock_a and stock_b, not get rebuilt
+    // off-center.
+    let initial_model = datamodel::Model {
+        name: TEST_MODEL.to_string(),
+        sim_specs: None,
+        variables: vec![
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_a".to_string(),
+                equation: datamodel::Equation::Scalar("100".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec![],
+                outflows: vec!["chain_ab".to_string()],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Stock(datamodel::Stock {
+                ident: "stock_b".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec!["chain_ab".to_string()],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            datamodel::Variable::Flow(datamodel::Flow {
+                ident: "chain_ab".to_string(),
+                equation: datamodel::Equation::Scalar("10".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+        ]
+        .into(),
+        views: Vec::new(),
+        loop_metadata: Vec::new(),
+        groups: Vec::new(),
+        macro_spec: None,
+    };
+    let initial_project = test_project(initial_model);
+    let old_view = generate_layout(&initial_project, TEST_MODEL, None).expect("initial layout");
+
+    let old_chain_ab = old_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "chain_ab" => Some(f.clone()),
+            _ => None,
+        })
+        .expect("chain_ab in old view");
+
+    // Add stock_c and chain_ac
+    let mut patched_project = initial_project.clone();
+    let model = patched_project.get_model_mut(TEST_MODEL).unwrap();
+    model.variables.rewrite(|variables| {
+        for var in variables.iter_mut() {
+            if let datamodel::Variable::Stock(s) = var
+                && s.ident == "stock_a"
+            {
+                s.outflows.push("chain_ac".to_string());
+            }
+        }
+    });
+    model
+        .variables
+        .push(datamodel::Variable::Stock(datamodel::Stock {
+            ident: "stock_c".to_string(),
+            equation: datamodel::Equation::Scalar("0".to_string()),
+            documentation: String::new(),
+            units: None,
+            inflows: vec!["chain_ac".to_string()],
+            outflows: vec![],
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: None,
+        }));
+    model
+        .variables
+        .push(datamodel::Variable::Flow(datamodel::Flow {
+            ident: "chain_ac".to_string(),
+            equation: datamodel::Equation::Scalar("5".to_string()),
+            documentation: String::new(),
+            units: None,
+            gf: None,
+            compat: datamodel::Compat::default(),
+            ai_state: None,
+            uid: None,
+        }));
+
+    let patch = simlin_base::project_patch::ModelPatch {
+        name: TEST_MODEL.to_string(),
+        ops: vec![
+            simlin_base::project_patch::ModelOperation::UpsertStock(datamodel::Stock {
+                ident: "stock_c".to_string(),
+                equation: datamodel::Equation::Scalar("0".to_string()),
+                documentation: String::new(),
+                units: None,
+                inflows: vec!["chain_ac".to_string()],
+                outflows: vec![],
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            simlin_base::project_patch::ModelOperation::UpsertFlow(datamodel::Flow {
+                ident: "chain_ac".to_string(),
+                equation: datamodel::Equation::Scalar("5".to_string()),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                compat: datamodel::Compat::default(),
+                ai_state: None,
+                uid: None,
+            }),
+            simlin_base::project_patch::ModelOperation::UpdateStockFlows {
+                ident: "stock_a".to_string(),
+                inflows: vec![],
+                outflows: vec!["chain_ab".to_string(), "chain_ac".to_string()],
+            },
+        ],
+    };
+
+    let new_view = incremental_layout(&old_view, &patched_project, TEST_MODEL, &patch, None)
+        .expect("incremental layout");
+
+    let new_chain_ab = new_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Flow(f) if canonicalize(&f.name).as_ref() == "chain_ab" => Some(f.clone()),
+            _ => None,
+        })
+        .expect("chain_ab in new view");
+
+    // chain_ab should still connect stock_a to stock_b -- its endpoints
+    // should reference the same stock UIDs and its valve y should be
+    // near the stocks' y (horizontal).
+    let stock_a = new_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Stock(s) if canonicalize(&s.name).as_ref() == "stock_a" => Some(s),
+            _ => None,
+        })
+        .expect("stock_a");
+    let stock_b = new_view
+        .elements
+        .iter()
+        .find_map(|e| match e {
+            ViewElement::Stock(s) if canonicalize(&s.name).as_ref() == "stock_b" => Some(s),
+            _ => None,
+        })
+        .expect("stock_b");
+
+    // Valve should be between the two stocks
+    let min_x = stock_a.x.min(stock_b.x);
+    let max_x = stock_a.x.max(stock_b.x);
+    assert!(
+        new_chain_ab.x >= min_x - 5.0 && new_chain_ab.x <= max_x + 5.0,
+        "chain_ab valve x ({}) should be between stock_a ({}) and stock_b ({})",
+        new_chain_ab.x,
+        stock_a.x,
+        stock_b.x,
+    );
+
+    // Valve y should be near the stock y (horizontal flow, not offset)
+    assert!(
+        (new_chain_ab.y - stock_a.y).abs() < 5.0,
+        "chain_ab valve y ({}) should be near stock_a y ({}) -- chain flows should not be offset",
+        new_chain_ab.y,
+        stock_a.y,
+    );
+
+    // Endpoints should still reference both stocks
+    assert_eq!(
+        old_chain_ab.points.len(),
+        new_chain_ab.points.len(),
+        "chain_ab should have same number of points"
+    );
+}

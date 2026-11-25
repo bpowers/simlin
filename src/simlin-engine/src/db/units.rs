@@ -41,15 +41,16 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use salsa::Accumulator;
 
-use crate::common::{Canonical, Ident, IdentMap, IdentSet};
-use crate::datamodel;
 use crate::db::var_fragment::{helper_dimensions, source_dimensions};
 use crate::db::{
     Db, Diagnostic, DiagnosticError, DiagnosticSeverity, SourceModel, SourceProject,
-    SourceVariable, SourceVariableKind, model_implicit_var_info, model_written_variables,
-    project_dimensions_context, project_units_context, source_model_is_stdlib,
+    SourceVariable, model_implicit_var_info, model_written_variables, project_dimensions_context,
+    project_units_context, source_model_is_stdlib,
 };
 use crate::units_check::UnitModel;
+use crate::variable::SourceVariableKind;
+use simlin_base::common::{Canonical, Ident, IdentMap, IdentSet};
+use simlin_base::datamodel;
 
 /// Collect the identifiers that must share units because they sit in the
 /// "value branches" of an `if isModuleInput(x) then x else y` conditional.
@@ -77,10 +78,10 @@ use crate::units_check::UnitModel;
 /// correct conservative behaviour: without a structural value-swap marker
 /// we have no basis for unit equivalence.
 fn init_value_equivalence_group(
-    ast: &crate::ast::Ast<crate::ast::Expr2>,
+    ast: &simlin_base::ast::Ast<simlin_base::ast::Expr2>,
 ) -> IdentSet<Ident<Canonical>> {
-    use crate::ast::{Ast, Expr2};
-    use crate::builtins::BuiltinFn;
+    use simlin_base::ast::{Ast, Expr2};
+    use simlin_base::builtins::BuiltinFn;
 
     /// If `expr` is a bare `Var`, insert its identifier into `out`.  A bare
     /// reference directly under the if-then-else is the stdlib's signal
@@ -116,7 +117,7 @@ fn init_value_equivalence_group(
             Expr2::Op2(_, l, r, _, _) => find_value_branches(l, out) || find_value_branches(r, out),
             Expr2::Op1(_, e, _, _) => find_value_branches(e, out),
             Expr2::App(builtin, _, _) => {
-                use crate::builtins::{BuiltinContents, walk_builtin_expr};
+                use simlin_base::builtins::{BuiltinContents, walk_builtin_expr};
                 let mut found = false;
                 walk_builtin_expr(builtin, |c| {
                     if let BuiltinContents::Expr(inner) | BuiltinContents::LookupTable(inner) = c
@@ -129,7 +130,7 @@ fn init_value_equivalence_group(
             }
             Expr2::Subscript(_, args, _, _) => {
                 for arg in args {
-                    if let crate::ast::IndexExpr2::Expr(e) = arg
+                    if let simlin_base::ast::IndexExpr2::Expr(e) = arg
                         && find_value_branches(e, out)
                     {
                         return true;
@@ -271,7 +272,7 @@ pub(crate) fn unit_model(db: &dyn Db, model: SourceModel, project: SourceProject
 /// templates that only make sense when instantiated with concrete inputs.
 #[salsa::tracked]
 pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject) {
-    use crate::common::ErrorCode;
+    use simlin_base::common::ErrorCode;
 
     // Skip stdlib models -- they are generic and unit checking doesn't
     // apply until instantiated with concrete inputs. The gate is the crate's
@@ -349,7 +350,7 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
         // the GUI's error panel): a plain-language sentence naming those
         // variables, not the raw `1 == unit-expression` constraint dump.
         let (sources, friendly) = match &inference.conflicts[0] {
-            crate::common::UnitError::InferenceError {
+            simlin_base::common::UnitError::InferenceError {
                 sources, details, ..
             } => (
                 sources.clone(),
@@ -370,7 +371,7 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
             variable: None,
             owner: None,
             severity: DiagnosticSeverity::Warning,
-            error: DiagnosticError::Unit(crate::common::UnitError::InferenceError {
+            error: DiagnosticError::Unit(simlin_base::common::UnitError::InferenceError {
                 code: ErrorCode::UnitMismatch,
                 sources,
                 details: Some(detail),
@@ -438,7 +439,7 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
                 for init_dep_set in &stock_init_deps {
                     // Collect (src_units, input) pairs for inputs that bind to
                     // variables in this stock's init dep set.
-                    let mut group_units: Vec<(Ident<Canonical>, &crate::datamodel::UnitMap)> =
+                    let mut group_units: Vec<(Ident<Canonical>, &simlin_base::datamodel::UnitMap)> =
                         Vec::new();
                     for input in inputs {
                         if !init_dep_set.contains(&input.dst) {
@@ -464,9 +465,9 @@ pub fn check_model_units(db: &dyn Db, model: SourceModel, project: SourceProject
                                     owner: None,
                                     severity: DiagnosticSeverity::Warning,
                                     error: DiagnosticError::Unit(
-                                        crate::common::UnitError::ConsistencyError(
+                                        simlin_base::common::UnitError::ConsistencyError(
                                             ErrorCode::UnitMismatch,
-                                            crate::builtins::Loc::default(),
+                                            simlin_base::builtins::Loc::default(),
                                             Some(format!(
                                                 "module '{}': argument '{}' has units '{}' \
                                                  but argument '{}' has units '{}' \
@@ -572,12 +573,12 @@ fn check_conveyor_param_units(
     model_name: &str,
     target_model: &UnitModel,
     units_ctx: &crate::units::Context,
-    inferred_units: &IdentMap<Ident<Canonical>, crate::datamodel::UnitMap>,
+    inferred_units: &IdentMap<Ident<Canonical>, simlin_base::datamodel::UnitMap>,
 ) {
-    use crate::ast::Ast;
-    use crate::common::{ErrorCode, UnitError};
-    use crate::datamodel::UnitMap;
     use crate::units::{UnitOp, Units, combine};
+    use simlin_base::ast::Ast;
+    use simlin_base::common::{ErrorCode, UnitError};
+    use simlin_base::datamodel::UnitMap;
 
     // One synthesized parameter-expression aux awaiting unit checking.
     struct SynthParam {
@@ -727,7 +728,7 @@ fn check_conveyor_param_units(
     // Nothing synthesized here enters a memo: the auxes must not add
     // constraints to the model under analysis, or reach another reader.
     let dim_ctx = project_dimensions_context(db, project);
-    let mut shapes: crate::common::IdentMap<Ident<Canonical>, crate::compiler::fragment::DepShape> =
+    let mut shapes: simlin_base::common::IdentMap<Ident<Canonical>, simlin_base::ast::DepShape> =
         Default::default();
     for (name, sv) in model.variables(db) {
         if sv.kind(db) != SourceVariableKind::Module {
@@ -744,7 +745,7 @@ fn check_conveyor_param_units(
                 .or_insert_with(|| helper_dimensions(db, project, meta));
         }
     }
-    let scope = crate::ast::LoweringScope {
+    let scope = simlin_base::ast::LoweringScope {
         dimensions: dim_ctx,
         shapes: &shapes,
         model_name: target_model.name.as_str(),
@@ -795,7 +796,7 @@ fn check_conveyor_param_units(
                 severity: DiagnosticSeverity::Warning,
                 error: DiagnosticError::Unit(UnitError::ConsistencyError(
                     ErrorCode::UnitMismatch,
-                    crate::builtins::Loc::default(),
+                    simlin_base::builtins::Loc::default(),
                     Some(detail),
                     None,
                 )),
@@ -824,13 +825,13 @@ mod tests {
     fn module_with_empty_model_name_does_not_panic() {
         let sim_specs = sim_specs_with_units("parsec");
 
-        let mod_inst = crate::datamodel::Variable::Module(crate::datamodel::Module {
+        let mod_inst = simlin_base::datamodel::Variable::Module(simlin_base::datamodel::Module {
             ident: "mod_inst".to_string(),
             model_name: String::new(),
             documentation: String::new(),
             units: None,
             references: vec![],
-            compat: crate::datamodel::Compat::default(),
+            compat: simlin_base::datamodel::Compat::default(),
             ai_state: None,
             uid: None,
         });
@@ -862,8 +863,8 @@ mod tests {
     /// the entry that diverged -- not through the gated whole-project path.
     #[test]
     fn module_cycle_unit_checks_without_diverging() {
-        use crate::common::ErrorCode;
         use crate::testutils::x_module_named;
+        use simlin_base::common::ErrorCode;
 
         let sim_specs = sim_specs_with_units("parsec");
         let model_a = x_model(
@@ -910,15 +911,15 @@ mod tests {
         inflows: &[&str],
         outflows: &[&str],
         units: Option<&str>,
-        conv: crate::datamodel::Conveyor,
-    ) -> crate::datamodel::Variable {
-        let compat = crate::datamodel::Compat {
+        conv: simlin_base::datamodel::Conveyor,
+    ) -> simlin_base::datamodel::Variable {
+        let compat = simlin_base::datamodel::Compat {
             conveyor: Some(conv),
             ..Default::default()
         };
-        crate::datamodel::Variable::Stock(crate::datamodel::Stock {
+        simlin_base::datamodel::Variable::Stock(simlin_base::datamodel::Stock {
             ident: ident.to_string(),
-            equation: crate::datamodel::Equation::Scalar(init.to_string()),
+            equation: simlin_base::datamodel::Equation::Scalar(init.to_string()),
             documentation: String::new(),
             units: units.map(|s| s.to_owned()),
             inflows: inflows.iter().map(|s| s.to_string()).collect(),
@@ -930,10 +931,10 @@ mod tests {
     }
 
     /// A leak-marked outflow carrying a leak `fraction` expression.
-    fn leak_flow(ident: &str, fraction: &str) -> crate::datamodel::Variable {
+    fn leak_flow(ident: &str, fraction: &str) -> simlin_base::datamodel::Variable {
         let mut var = crate::testutils::x_flow(ident, "0", None);
-        if let crate::datamodel::Variable::Flow(flow) = &mut var {
-            flow.compat.leakage = Some(crate::datamodel::Leakage {
+        if let simlin_base::datamodel::Variable::Flow(flow) = &mut var {
+            flow.compat.leakage = Some(simlin_base::datamodel::Leakage {
                 fraction: Some(fraction.to_string()),
                 integers: false,
                 zone_start: None,
@@ -945,8 +946,8 @@ mod tests {
 
     /// A `<conveyor>` block with the given transit time and everything else at
     /// its documented default.
-    fn conveyor_with_len(transit_time: &str) -> crate::datamodel::Conveyor {
-        crate::datamodel::Conveyor {
+    fn conveyor_with_len(transit_time: &str) -> simlin_base::datamodel::Conveyor {
+        simlin_base::datamodel::Conveyor {
             transit_time: transit_time.to_string(),
             capacity: None,
             inflow_limit: None,
@@ -971,7 +972,7 @@ mod tests {
     /// Drive `check_model_units` over a project's `main` model and return the
     /// conveyor unit diagnostics -- the `Unit` warnings whose detail names a
     /// conveyor (so ordinary unit warnings are excluded).
-    fn conveyor_unit_warnings(project: &crate::datamodel::Project) -> Vec<Diagnostic> {
+    fn conveyor_unit_warnings(project: &simlin_base::datamodel::Project) -> Vec<Diagnostic> {
         let db = SimlinDb::default();
         let sync = sync_from_datamodel(&db, project);
         let source = sync.models["main"].source;
@@ -984,9 +985,9 @@ mod tests {
 
     /// A conveyor project with one stock, an inflow, and a primary outflow.
     fn conveyor_project(
-        stock: crate::datamodel::Variable,
-        extra: Vec<crate::datamodel::Variable>,
-    ) -> crate::datamodel::Project {
+        stock: simlin_base::datamodel::Variable,
+        extra: Vec<simlin_base::datamodel::Variable>,
+    ) -> simlin_base::datamodel::Project {
         use crate::testutils::{x_flow, x_model, x_project};
         let mut vars = vec![
             stock,

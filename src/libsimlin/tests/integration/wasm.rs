@@ -29,7 +29,7 @@ type Inst = Stored<ModuleAddr>;
 
 /// A small scalar stock-and-flow model: a constant inflow fills a stock. Used as
 /// the supported-model fixture (it runs through the wasm backend cleanly).
-fn simple_model() -> simlin_engine::datamodel::Project {
+fn simple_model() -> simlin_base::datamodel::Project {
     TestProject::new("ffi_wasm")
         .with_sim_time(0.0, 10.0, 1.0)
         .aux("inflow_rate", "2", None)
@@ -1209,7 +1209,7 @@ fn links_from_wasm_match_vm() {
         simlin_free_links(vm_links_ptr);
 
         // The link *set* (from, to, polarity) must be identical; the VM and
-        // wasm both drive the same `engine::analysis::model_links` over the same
+        // wasm both drive the same `simlin_engine::analysis::model_links` over the same
         // structure, so any divergence here is a regression.  Map the C-ABI
         // polarity enum to an Ord-able u8 for sorting.
         let polarity_to_u8 = |p: SimlinLinkPolarity| -> u8 {
@@ -1236,7 +1236,7 @@ fn links_from_wasm_match_vm() {
 
         // Build (from, to) → (raw, relative) score-series maps for the
         // comparison.  Both series must match the VM backend by construction
-        // (the shared `engine::analysis::model_links` relative-score pass runs
+        // (the shared `simlin_engine::analysis::model_links` relative-score pass runs
         // identically for both backends), so this is the AC5.1 parity guard
         // extended to the GH #652 relative series.
         let mut wasm_map: std::collections::HashMap<(String, String), (Vec<f64>, Vec<f64>)> =

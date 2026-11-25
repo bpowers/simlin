@@ -20,10 +20,10 @@ use std::result::Result as StdResult;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use simlin_engine::buffa::Message;
-use simlin_engine::common::ErrorKind;
-use simlin_engine::data_provider::FilesystemDataProvider;
-use simlin_engine::datamodel::Project as DatamodelProject;
+use simlin_base::common::ErrorKind;
+use simlin_base::datamodel::Project as DatamodelProject;
+use simlin_base::{Error, ErrorCode, Result, Results, datamodel};
+use simlin_engine::build_sim;
 use simlin_engine::db::{
     LtmOverlay, PersistentSyncState, SimlinDb, SourceProject, collect_all_diagnostics,
     compile_project_incremental, model_detected_loops, parse_source_variable, sync_from_datamodel,
@@ -33,11 +33,13 @@ use simlin_engine::errors::{
     FormattedError, FormattedErrorKind, FormattedErrors, collect_formatted_errors,
     format_simulation_error,
 };
-use simlin_engine::{Error, ErrorCode, Result, Results, build_sim, datamodel, project_io, serde};
-use simlin_engine::{
+use simlin_formats::buffa::Message;
+use simlin_formats::data_provider::FilesystemDataProvider;
+use simlin_formats::{
     load_csv, load_dat, open_vensim, open_vensim_with_data, open_xmile, to_mdl_with_warnings,
     to_xmile,
 };
+use simlin_formats::{project_io, serde};
 
 mod gen_stdlib;
 mod vdf_dump;
@@ -143,7 +145,7 @@ enum Command {
         stdlib_dir: PathBuf,
 
         /// Output file path
-        #[arg(long, short, default_value = "src/simlin-engine/src/stdlib.gen.rs")]
+        #[arg(long, short, default_value = "src/simlin-base/src/stdlib.gen.rs")]
         output: PathBuf,
     },
 
@@ -203,9 +205,9 @@ fn render_diagram(
 ) -> StdResult<Vec<u8>, String> {
     match format {
         RenderFormat::Svg => {
-            simlin_engine::diagram::render_svg(project, model_name).map(String::into_bytes)
+            simlin_diagram::render_svg(project, model_name).map(String::into_bytes)
         }
-        RenderFormat::Scene => simlin_engine::diagram::build_scene(project, model_name)
+        RenderFormat::Scene => simlin_diagram::build_scene(project, model_name)
             .and_then(|scene| scene.to_json())
             .map(String::into_bytes),
     }
@@ -268,12 +270,12 @@ fn open_model(input: &InputArgs) -> (DatamodelProject, Option<VisibleStocks>) {
         InputFormat::Xmile => (open_xmile(&mut BufReader::new(bytes.as_slice())), None),
         InputFormat::Systems => {
             let contents = model_text(&file_path, bytes);
-            let systems_model = simlin_engine::systems::parse(&contents)
+            let systems_model = simlin_formats::systems::parse(&contents)
                 .unwrap_or_else(|e| die!("model '{}' parse error: {}", &file_path, e));
-            let visible = simlin_engine::systems::translate::visible_stocks(&systems_model);
-            let project = simlin_engine::systems::translate::translate(
+            let visible = simlin_formats::systems::translate::visible_stocks(&systems_model);
+            let project = simlin_formats::systems::translate::translate(
                 &systems_model,
-                simlin_engine::systems::translate::DEFAULT_ROUNDS,
+                simlin_formats::systems::translate::DEFAULT_ROUNDS,
             );
             (project, Some(visible))
         }
@@ -392,7 +394,7 @@ fn print_filtered_tsv(results: &Results, visible: &VisibleStocks) {
 /// Each timestep produces two rows: "reference" and "simlin", showing
 /// the reference and simulation values side by side for visible stocks only.
 fn print_filtered_tsv_comparison(results: &Results, reference: &Results, visible: &VisibleStocks) {
-    use simlin_engine::common::{Canonical, Ident};
+    use simlin_base::common::{Canonical, Ident};
 
     // Build columns: (display_name, sim_offset, ref_offset) triples.
     // Time is always at offset 0 in the engine's results layout, and no
@@ -660,7 +662,7 @@ fn print_equations(project: &DatamodelProject, output: Option<PathBuf>) {
     let models = sync.project.models(&db);
 
     for model_name in model_names.iter() {
-        let canonical_name = simlin_engine::canonicalize(model_name);
+        let canonical_name = simlin_base::canonicalize(model_name);
         let source_model = match models.get(canonical_name.as_ref()) {
             Some(m) => *m,
             None => continue,
@@ -980,10 +982,7 @@ mod render_tests {
             match format {
                 RenderFormat::Svg => {
                     assert!(text.starts_with("<svg "), "{text}");
-                    assert_eq!(
-                        text,
-                        simlin_engine::diagram::render_svg(&project, "main").unwrap()
-                    );
+                    assert_eq!(text, simlin_diagram::render_svg(&project, "main").unwrap());
                 }
                 RenderFormat::Scene => {
                     assert!(
@@ -1013,7 +1012,7 @@ mod render_tests {
 #[cfg(test)]
 mod open_vensim_model_tests {
     use super::*;
-    use simlin_engine::common::{Canonical, Ident};
+    use simlin_base::common::{Canonical, Ident};
 
     /// Compile and run a datamodel project to completion, returning the
     /// first row of results. Mirrors the CLI's non-LTM `run_simulation`

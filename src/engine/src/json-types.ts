@@ -5,7 +5,7 @@
 /**
  * JSON-compatible types for the simlin patch API.
  *
- * These types match the Rust JSON types in src/simlin-engine/src/json.rs
+ * These types match the Rust JSON types in src/simlin-formats/src/json.rs
  * and are used for serializing patches to send to the simulation engine.
  */
 
@@ -33,7 +33,7 @@ export interface JsonGraphicalFunction {
 /**
  * External-data reference (Vensim GET DIRECT DATA / CONSTANTS / LOOKUPS /
  * SUBSCRIPT). Field names and the `kind` string values match the Rust
- * `json::JsonDataSource` serializer in src/simlin-engine/src/json.rs
+ * `json::JsonDataSource` serializer in src/simlin-formats/src/json.rs
  * (`#[serde(rename_all = "camelCase")]`; kind is one of
  * `data`/`constants`/`lookups`/`subscript`).
  */
@@ -562,6 +562,43 @@ export interface UpdateStockFlowsPayload {
 }
 
 /**
+ * Payload for set equation operation: a scalar's equation (a stock's initial
+ * value), or the equation every element of an arrayed variable follows.
+ * Everything else about the variable -- its dimensions, its elements' own
+ * equations -- stays as it is.
+ */
+export interface SetEquationPayload {
+  ident: string;
+  equation: string;
+}
+
+/**
+ * Payload for set units operation; an empty string clears the units.
+ */
+export interface SetUnitsPayload {
+  ident: string;
+  units: string;
+}
+
+/**
+ * Payload for set notes operation: the variable's documentation; an empty
+ * string clears it.
+ */
+export interface SetNotesPayload {
+  ident: string;
+  notes: string;
+}
+
+/**
+ * Payload for set lookup operation: the variable's lookup table; `null` removes
+ * it. Its equation, and any lookups its elements have of their own, stay.
+ */
+export interface SetLookupPayload {
+  ident: string;
+  lookup: JsonGraphicalFunction | null;
+}
+
+/**
  * Payload for set sim specs operation.
  */
 export interface SetSimSpecsPayload {
@@ -636,6 +673,26 @@ export interface UpdateStockFlowsOp {
   payload: UpdateStockFlowsPayload;
 }
 
+export interface SetEquationOp {
+  type: 'setEquation';
+  payload: SetEquationPayload;
+}
+
+export interface SetUnitsOp {
+  type: 'setUnits';
+  payload: SetUnitsPayload;
+}
+
+export interface SetNotesOp {
+  type: 'setNotes';
+  payload: SetNotesPayload;
+}
+
+export interface SetLookupOp {
+  type: 'setLookup';
+  payload: SetLookupPayload;
+}
+
 /**
  * Union type for model operations.
  */
@@ -648,7 +705,11 @@ export type JsonModelOperation =
   | RenameVariableOp
   | UpsertViewOp
   | DeleteViewOp
-  | UpdateStockFlowsOp;
+  | UpdateStockFlowsOp
+  | SetEquationOp
+  | SetUnitsOp
+  | SetNotesOp
+  | SetLookupOp;
 
 /**
  * Union type for project operations.

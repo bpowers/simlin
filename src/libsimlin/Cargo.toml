@@ -22,14 +22,14 @@ crate-type = ["staticlib", "rlib", "cdylib"]
 # stack plus an embedded font is ~17% of the optimized wasm binary, and no
 # browser code calls simlin_project_render_png.
 default = ["png_render", "agent_tools"]
-debug-derive = ["simlin-engine/debug-derive"]
-file_io = ["simlin-engine/file_io"]
-ext_data = ["simlin-engine/ext_data"]
-png_render = ["simlin-engine/png_render"]
+file_io = ["simlin-formats/file_io"]
+ext_data = ["simlin-formats/ext_data"]
+png_render = ["simlin-diagram/png_render"]
 # The agent tool entry points (`simlin_tools_describe`,
 # `simlin_tool_session_*`). On by default for native hosts; the browser wasm
-# bundle's --no-default-features build leaves them out, as it does png_render.
-agent_tools = ["simlin-engine/agent_tools"]
+# bundle's --no-default-features build leaves them out, as it does png_render
+# (they are about 5% of that bundle).
+agent_tools = ["dep:simlin-tools"]
 # Use mimalloc as the global allocator. Off by default; enabled by native
 # consumers of the cdylib/staticlib (pysimlin via cffi, C/C++ FFI) where the
 # allocation-heavy engine compile path benefits. Irrelevant to the wasm32
@@ -39,7 +39,15 @@ agent_tools = ["simlin-engine/agent_tools"]
 mimalloc = ["dep:mimalloc"]
 
 [dependencies]
+simlin-base = { version = "0.1", path = "../simlin-base" }
+simlin-diagram = { version = "0.1", path = "../simlin-diagram" }
+simlin-edit = { version = "0.1", path = "../simlin-edit" }
+simlin-formats = { version = "0.1", path = "../simlin-formats", default-features = false }
+simlin-layout = { version = "0.1", path = "../simlin-layout" }
 simlin-engine = { version = "0.1", path = "../simlin-engine", default-features = false }
+simlin-save-check = { version = "0.1", path = "../simlin-save-check" }
+simlin-tools = { version = "0.1", path = "../simlin-tools", default-features = false, optional = true }
+simlin-wasmgen = { version = "0.1", path = "../simlin-wasmgen" }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 anyhow = "1.0"
@@ -52,20 +60,20 @@ mimalloc = { version = "0.1", optional = true }
 wasmalloc = "0.1.1"
 
 [dev-dependencies]
-# Self dev-dependency, as the engine has one: turns on `file_io` for this
+# Self dev-dependency: turns on `file_io` for this
 # crate's own test targets, so the tests of what reads external data files
 # (a `data_dir`) run under a plain `cargo test`, without turning it on for
 # any production build. `default-features = false` keeps the edge to exactly
 # that feature, since features unify over every edge.
 simlin = { path = ".", default-features = false, features = ["file_io"] }
 # Second edge onto the engine, adding EXACTLY `test-support` (the `TestProject`
-# model builder its integration tests use as `engine::test_common`). Keeping it
+# model builder its integration tests use). Keeping it
 # in dev-dependencies is what stops that builder from being compiled into the
 # shipped cdylib/staticlib; `default-features = false` mirrors the normal edge
 # above, since feature selection is a union over every edge and a defaults edge
 # here would silently re-enable them for test builds.
 simlin-engine = { version = "0.1", path = "../simlin-engine", default-features = false, features = ["test-support"] }
-# Pure-Rust no_std wasm interpreter (the same DLR-FT rev simlin-engine pins),
+# Pure-Rust no_std wasm interpreter (the same DLR-FT rev simlin-wasmgen pins),
 # used by the `tests/integration/wasm.rs` integration test to validate and execute the blob
 # `simlin_model_compile_to_wasm` returns and check it against the returned
 # layout. Dev-only: dev-dependencies are never built into the cdylib/staticlib

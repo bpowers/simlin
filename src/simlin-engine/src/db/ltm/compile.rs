@@ -17,10 +17,10 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use crate::canonicalize;
-use crate::common::{Canonical, Ident, IdentMap};
+use simlin_base::canonicalize;
+use simlin_base::common::{Canonical, Ident, IdentMap};
 
-use crate::compiler::fragment::{DepShape, FragmentInput, lower_fragment};
+use crate::compiler::fragment::{FragmentInput, lower_fragment};
 use crate::db::var_fragment::{dimensions_named, model_dep_shape, source_dep_shape};
 use crate::db::{
     Db, Diagnostic, DiagnosticError, LtmLinkId, LtmSyntheticVar, RefShape, SourceModel,
@@ -28,6 +28,7 @@ use crate::db::{
     compile_phase_to_per_var_bytecodes, lowered_variable_by_name, project_converted_dimensions,
     project_datamodel_dims, project_dimensions_context, variable_tables,
 };
+use simlin_base::ast::DepShape;
 
 use super::parse::{parse_ltm_equation, scalarize_ltm_equation};
 use super::{
@@ -160,8 +161,7 @@ pub(crate) fn shaped_link_score_executions() -> usize {
 /// caller re-reads this memoized value -- and so re-records the edge and its
 /// warning in the freshly-built `LtmWarnings` -- on every
 /// `model_ltm_variables` evaluation, whether the query body re-ran or not.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ShapedLinkScore {
     /// The link-score variable was generated. `helpers` carries the
     /// companion synthetic variables the score reads at their current-step
@@ -223,9 +223,9 @@ pub fn shaped_link_score<'db>(
     model: SourceModel,
     project: SourceProject,
 ) -> ShapedLinkScore {
-    use crate::common::{Canonical, Ident};
     use crate::db::LtmSyntheticVar;
     use crate::db::module_link_score_equation;
+    use simlin_base::common::{Canonical, Ident};
 
     #[cfg(test)]
     SHAPED_LINK_SCORE_EXECUTIONS.with(|c| c.set(c.get() + 1));
@@ -318,11 +318,11 @@ pub fn shaped_link_score<'db>(
     // deps with no resolvable source variable (implicit/synthetic names)
     // are omitted -- the recognizer keeps its permissive legacy collapse
     // for those.
-    let dep_dims: HashMap<String, Vec<crate::dimensions::Dimension>> = to_var
+    let dep_dims: HashMap<String, Vec<simlin_base::dimensions::Dimension>> = to_var
         .ast()
         .map(|ast| {
-            use crate::ast::Ast;
-            let target_ast_dims: &[crate::dimensions::Dimension] = match ast {
+            use simlin_base::ast::Ast;
+            let target_ast_dims: &[simlin_base::dimensions::Dimension] = match ast {
                 Ast::Scalar(_) => &[],
                 Ast::ApplyToAll(dims, _) | Ast::Arrayed(dims, _, _, _) => dims,
             };
@@ -629,7 +629,7 @@ fn lower_ltm_variable(
     // the fragment pass reports the equation.
     let typed = parsed
         .ast()
-        .map(|ast| crate::ast::typed_ast(ast, dim_context));
+        .map(|ast| simlin_base::ast::typed_ast(ast, dim_context));
     let classified = typed
         .as_ref()
         .and_then(|typed| typed.as_ref().ok())
@@ -642,7 +642,7 @@ fn lower_ltm_variable(
         DepShape::var(
             parsed
                 .get_dimensions()
-                .map(<[crate::dimensions::Dimension]>::to_vec)
+                .map(<[simlin_base::dimensions::Dimension]>::to_vec)
                 .unwrap_or_default(),
         ),
     );
@@ -676,7 +676,7 @@ fn lower_ltm_variable(
     }
 
     let model_ident: Ident<Canonical> = Ident::new(model.name(db));
-    let scope = crate::ast::LoweringScope {
+    let scope = simlin_base::ast::LoweringScope {
         dimensions: dim_context,
         shapes: &deps,
         model_name: model_ident.as_str(),
@@ -895,7 +895,7 @@ pub(crate) fn compile_ltm_equation_fragment(
 /// the equation and left `ast: None`. Report that upstream rejection when it
 /// is there, since "empty equation" describes a formula that was printed in
 /// full.
-fn lowering_failure_reason(input: &FragmentInput<'_>, err: &crate::common::Error) -> String {
+fn lowering_failure_reason(input: &FragmentInput<'_>, err: &simlin_base::common::Error) -> String {
     match fatal_summary(input.target.fatal_diagnostics()) {
         Some(failures) => format!("could not be lowered: {failures}"),
         None => format!("could not be lowered: {err}"),

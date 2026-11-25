@@ -1,7 +1,7 @@
 """cattrs converter configuration for JSON serialization.
 
 Maps the unified public variable types (``simlin.types``: Stock, Flow, Aux,
-Module) to and from the engine's wire JSON (src/simlin-engine/src/json.rs),
+Module) to and from the engine's wire JSON (src/simlin-formats/src/json.rs),
 and configures cattrs for the remaining wire dataclasses (views, sim specs,
 patches).
 
@@ -17,7 +17,7 @@ on purpose:
   arrayed-level ``activeInitial`` merge into the one public ``Compat``;
 - ``uid`` is never written: the engine preserves an existing variable's uid
   when an upsert payload has none and mints one for new variables
-  (src/simlin-engine/src/patch.rs, upsert_variable).
+  (src/simlin-edit/src/patch.rs, upsert_variable).
 """
 
 from __future__ import annotations

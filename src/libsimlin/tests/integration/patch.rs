@@ -7,7 +7,6 @@ use std::ptr;
 
 use simlin::*;
 use simlin_engine::test_common::TestProject;
-use simlin_engine::{self as engine};
 
 use crate::common::{expect_no_error, open_project_from_datamodel};
 
@@ -204,7 +203,7 @@ fn test_project_apply_patch_upsert_flow() {
 #[test]
 fn test_project_apply_patch_queue_model_accepts_benign_edit() {
     let xml = include_str!("../../../../test/queues/queue_drain.xmile");
-    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+    let datamodel = simlin_formats::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
         .expect("parse queue_drain.xmile");
     let proj = open_project_from_datamodel(&datamodel);
 
@@ -269,7 +268,7 @@ fn test_project_apply_patch_queue_model_accepts_benign_edit() {
 #[test]
 fn test_project_apply_patch_conveyor_model_accepts_benign_edit() {
     let xml = include_str!("../../../../test/conveyors/minimal_conveyor.xmile");
-    let datamodel = engine::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+    let datamodel = simlin_formats::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
         .expect("parse minimal_conveyor.xmile");
     let proj = open_project_from_datamodel(&datamodel);
 
@@ -328,7 +327,7 @@ fn test_project_apply_patch_upsert_module() {
     // Create a project with a submodel that the module can reference
     let mut datamodel = TestProject::new("json_patch_module").build_datamodel();
     // Add a submodel to the project
-    let submodel = engine::datamodel::Model {
+    let submodel = simlin_base::datamodel::Model {
         name: "SubModel".to_string(),
         sim_specs: None,
         variables: vec![].into(),
@@ -1079,7 +1078,7 @@ fn test_apply_patch_null_data_with_length() {
 fn test_apply_patch_multiple_models() {
     // Create a project with multiple models
     let mut datamodel = TestProject::new("multi_model").build_datamodel();
-    let second_model = engine::datamodel::Model {
+    let second_model = simlin_base::datamodel::Model {
         name: "SecondModel".to_string(),
         sim_specs: None,
         variables: vec![].into(),
@@ -1804,14 +1803,14 @@ fn test_patch_with_preexisting_unit_warnings_succeeds() {
     {
         let db = unsafe { (*proj).lock_db() };
         let source_project = db.current_source_project().unwrap();
-        let diags = engine::db::collect_all_diagnostics(
+        let diags = simlin_engine::db::collect_all_diagnostics(
             &db,
             source_project,
             simlin_engine::db::LtmOverlay::Off,
         );
         let has_unit_diags = diags.iter().any(|d| {
-            d.severity == engine::db::DiagnosticSeverity::Warning
-                && matches!(d.error, engine::db::DiagnosticError::Unit(_))
+            d.severity == simlin_engine::db::DiagnosticSeverity::Warning
+                && matches!(d.error, simlin_engine::db::DiagnosticError::Unit(_))
         });
         assert!(has_unit_diags, "expected unit warnings in the model");
     }
@@ -1908,7 +1907,7 @@ fn test_unrelated_patch_then_sim_specs_keeps_unit_warnings() {
     let unit_warning_count = |proj: *mut SimlinProject| -> usize {
         let db = unsafe { (*proj).lock_db() };
         let source_project = db.current_source_project().unwrap();
-        let diags = engine::db::collect_all_diagnostics(
+        let diags = simlin_engine::db::collect_all_diagnostics(
             &db,
             source_project,
             simlin_engine::db::LtmOverlay::Off,
@@ -1916,8 +1915,8 @@ fn test_unrelated_patch_then_sim_specs_keeps_unit_warnings() {
         diags
             .iter()
             .filter(|d| {
-                d.severity == engine::db::DiagnosticSeverity::Warning
-                    && matches!(d.error, engine::db::DiagnosticError::Unit(_))
+                d.severity == simlin_engine::db::DiagnosticSeverity::Warning
+                    && matches!(d.error, simlin_engine::db::DiagnosticError::Unit(_))
             })
             .count()
     };
@@ -2064,14 +2063,14 @@ fn test_patch_introducing_new_unit_warning_rejected() {
     {
         let db = unsafe { (*proj).lock_db() };
         let source_project = db.current_source_project().unwrap();
-        let diags = engine::db::collect_all_diagnostics(
+        let diags = simlin_engine::db::collect_all_diagnostics(
             &db,
             source_project,
             simlin_engine::db::LtmOverlay::Off,
         );
         let has_unit_diags = diags.iter().any(|d| {
-            matches!(d.error, engine::db::DiagnosticError::Unit(_))
-                && d.severity == engine::db::DiagnosticSeverity::Warning
+            matches!(d.error, simlin_engine::db::DiagnosticError::Unit(_))
+                && d.severity == simlin_engine::db::DiagnosticSeverity::Warning
         });
         assert!(!has_unit_diags, "should not have unit warnings initially");
     }
@@ -2562,10 +2561,10 @@ fn test_apply_patch_set_loop_name() {
         for (i, var) in variables.iter_mut().enumerate() {
             let uid = (i as i32) + 1;
             match var {
-                engine::datamodel::Variable::Stock(s) => s.uid = Some(uid),
-                engine::datamodel::Variable::Flow(f) => f.uid = Some(uid),
-                engine::datamodel::Variable::Aux(a) => a.uid = Some(uid),
-                engine::datamodel::Variable::Module(m) => m.uid = Some(uid),
+                simlin_base::datamodel::Variable::Stock(s) => s.uid = Some(uid),
+                simlin_base::datamodel::Variable::Flow(f) => f.uid = Some(uid),
+                simlin_base::datamodel::Variable::Aux(a) => a.uid = Some(uid),
+                simlin_base::datamodel::Variable::Module(m) => m.uid = Some(uid),
             }
         }
     });

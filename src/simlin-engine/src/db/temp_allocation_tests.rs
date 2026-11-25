@@ -76,7 +76,7 @@
 //! deliberate exception: it hand-builds a non-dense expression list that no
 //! lowering produces, to pin the emitter's loud refusal of one.
 
-use crate::common::IdentMap;
+use simlin_base::common::IdentMap;
 use std::collections::BTreeSet;
 
 use super::var_fragment::{ExplicitFragment, explicit_fragment_input};
@@ -697,7 +697,7 @@ fn gf_fixture(consumers: &str) -> TestProject {
          SAVEPER = 1 ~~|\n\
          TIME STEP = 1 ~~|\n"
     );
-    TestProject::from_datamodel(crate::open_vensim(&mdl).expect("the fixture MDL parses"))
+    TestProject::from_datamodel(simlin_formats::open_vensim(&mdl).expect("the fixture MDL parses"))
 }
 
 /// `LOOKUP(g, Time)` over the three-element table holder takes a temp of its
@@ -842,15 +842,15 @@ fn a2a_per_element_hoist_beside_a_shared_operand() {
 /// the emitter must refuse it loudly rather than drop the temp's size.
 #[test]
 fn emitter_refuses_a_non_dense_temp_id() {
-    use crate::ast::{ArrayView, Loc};
     use crate::compiler::{ModuleCtx, VarRef};
     use crate::db::assemble::compile_phase_to_per_var_bytecodes_reporting;
+    use simlin_base::ast::{ArrayView, Loc};
 
     let model_name = Ident::new("main");
     let inputs: BTreeSet<Ident<Canonical>> = BTreeSet::new();
     let var_sizes = crate::compiler::VarSizes::default();
     let tables = IdentMap::default();
-    let dimensions: Vec<crate::dimensions::Dimension> = Vec::new();
+    let dimensions: Vec<simlin_base::dimensions::Dimension> = Vec::new();
     // The phase-invariant context `FragmentInput::emit_ctx` builds, spelled out
     // because this input has no `FragmentInput` -- it is the shape no lowering
     // produces.

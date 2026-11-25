@@ -2,10 +2,10 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-use crate::canonicalize;
-use crate::datamodel::{AiInformation, AiState, Equation, Model, Module, Project, Variable};
 use ed25519::Signature;
 use ed25519::signature::Verifier;
+use simlin_base::canonicalize;
+use simlin_base::datamodel::{AiInformation, AiState, Equation, Model, Module, Project, Variable};
 
 pub fn verify<V: Verifier<Signature>>(
     project: &Project,

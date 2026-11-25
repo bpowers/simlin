@@ -4,18 +4,18 @@
 
 use smallvec::SmallVec;
 
-use crate::ast::{ArrayView, BinaryOp, Loc};
 use crate::bytecode::{
     BuiltinId, DimId, DimListId, DimensionInfo, GraphicalFunctionId, LookupMode, ModuleId,
     ModuleInputOffset, NameId, Op2, RuntimeSparseMapping, TempId, VariableOffset, ViewId,
 };
-use crate::common::{
+use crate::snapshot_arg::{SnapshotAccess, SnapshotArg, SnapshotIndex};
+use simlin_base::ast::{ArrayView, BinaryOp, Loc};
+use simlin_base::common::{
     Canonical, ErrorCode, ErrorKind, Ident, IdentMap, MismatchedRead, Result, canonicalize,
 };
-use crate::dimensions::Dimension;
-use crate::sim_err;
-use crate::snapshot_arg::{SnapshotAccess, SnapshotArg, SnapshotIndex};
-use crate::vm::{DT_OFF, FINAL_TIME_OFF, INITIAL_TIME_OFF, TIME_OFF};
+use simlin_base::dimensions::Dimension;
+use simlin_base::results::{DT_OFF, FINAL_TIME_OFF, INITIAL_TIME_OFF, TIME_OFF};
+use simlin_base::sim_err;
 
 use super::dimensions::UnaryOp;
 use super::expr::{BuiltinFn, Expr, SubscriptIndex, Table, VarRef};
@@ -140,12 +140,12 @@ fn static_slot(arg: &Expr) -> Option<VarRef> {
 /// two positions, and because both messages must stay refusals rather than
 /// approximations: reading one element's snapshot and broadcasting it where an
 /// array was written is a plausible array of wrong numbers.
-fn refuse_unaddressable_snapshot(arg: &Expr) -> crate::Error {
+fn refuse_unaddressable_snapshot(arg: &Expr) -> simlin_base::Error {
     match arg {
         // A temp has no snapshot: nothing copies `temp_storage` into
         // `prev_values`, so a computed array's previous value is simply not
         // recorded anywhere.
-        Expr::TempArray(_, _, _) => crate::Error::new(
+        Expr::TempArray(_, _, _) => simlin_base::Error::new(
             ErrorKind::Simulation,
             ErrorCode::NotSimulatable,
             Some(
@@ -157,7 +157,7 @@ fn refuse_unaddressable_snapshot(arg: &Expr) -> crate::Error {
         // Everything else is an expression that `find_expr_array_view` gave a
         // shape but that did not lower to a view over storage -- there is no
         // snapshot of an expression either.
-        other => crate::Error::new(
+        other => simlin_base::Error::new(
             ErrorKind::Simulation,
             ErrorCode::NotSimulatable,
             Some(format!(
@@ -224,7 +224,7 @@ fn reject_snapshot_priority_profile(profile: &Expr) -> Result<()> {
 /// the first step, and a `-0.0` fallback IS reachable -- not as the literal
 /// `-0`, which is a negation of `0` that constant folding turns back into
 /// `+0.0`, but as `0 * -1`, the shape `compiler::fold` is documented to produce.
-/// See the float-equality position on [`crate::ast::Literal`]; both spellings
+/// See the float-equality position on [`simlin_base::ast::Literal`]; both spellings
 /// are pinned by
 /// `array_operand_materialization_tests::a_non_default_array_previous_fallback_declines_loudly`.
 fn is_default_previous_fallback(fallback: &Expr) -> bool {
@@ -247,7 +247,7 @@ pub(super) struct Compiler<'module> {
     /// large LTM builds), and `Compiler::new` interns every dimension and
     /// element name up front -- with a linear-scan intern that was O(D^2)
     /// string comparisons per fragment (GH #655).
-    name_ids: crate::common::IdentMap<String, NameId>,
+    name_ids: simlin_base::common::IdentMap<String, NameId>,
     static_views: Vec<SymbolicStaticView>,
     dim_lists: Vec<(u8, [u16; 4])>,
     // Iteration context - set when compiling inside AssignTemp
@@ -290,11 +290,11 @@ fn array_in_scalar_position<T>(dims: &[usize]) -> Result<T> {
 /// does, so `Compiler::walk_expr` -- which recurses once per operand of a long
 /// expression -- holds no more than the call in its frame.
 #[inline(never)]
-fn view_in_scalar_position(base: &VarRef, view: &ArrayView, loc: Loc) -> crate::Error {
+fn view_in_scalar_position(base: &VarRef, view: &ArrayView, loc: Loc) -> simlin_base::Error {
     if view.dim_names.len() != view.dims.len() || view.dim_names.iter().any(String::is_empty) {
         return array_in_scalar_position::<()>(&view.dims).unwrap_err();
     }
-    crate::Error::refused_read(
+    simlin_base::Error::refused_read(
         MismatchedRead {
             variable: base.name.as_str().to_string(),
             unpaired: view.dim_names.clone(),
@@ -308,11 +308,11 @@ fn view_in_scalar_position(base: &VarRef, view: &ArrayView, loc: Loc) -> crate::
 /// ([`view_in_scalar_position`]), or, for any other argument, an array value
 /// where one is consumed.
 #[inline(never)]
-fn snapshot_in_scalar_position(builtin: &BuiltinFn) -> crate::Error {
+fn snapshot_in_scalar_position(builtin: &BuiltinFn) -> simlin_base::Error {
     if let Some((Expr::StaticSubscript(base, view, loc), _)) = super::snapshot_view_arg(builtin) {
         return view_in_scalar_position(base, view, *loc);
     }
-    crate::Error::new(
+    simlin_base::Error::new(
         ErrorKind::Simulation,
         ErrorCode::NotSimulatable,
         Some(
@@ -478,7 +478,7 @@ impl<'module> Compiler<'module> {
             //
             // No wasm-backend parity test accompanies the VM regression test
             // (`array_tests::…::elm_map_dynamic_source_subscript_uses_full_variable_extent_vm`)
-            // because the backends cannot diverge here: `wasmgen::vector`
+            // because the backends cannot diverge here: `simlin_wasmgen::vector`
             // rejects a dynamically-subscripted ELM MAP source outright
             // (`source_view.runtime_off_local.is_some()` =>
             // `WasmGenError::Unsupported`), so this shape never reaches wasm
@@ -656,7 +656,7 @@ impl<'module> Compiler<'module> {
         }
         let table_ident = base.name.clone();
         let base_gf = *self.table_base_ids.get(&table_ident).ok_or_else(|| {
-            crate::Error::new(
+            simlin_base::Error::new(
                 ErrorKind::Simulation,
                 ErrorCode::BadTable,
                 Some(format!(
@@ -1274,7 +1274,7 @@ impl<'module> Compiler<'module> {
 
                     // Look up the base_gf for this table variable
                     let base_gf = *self.table_base_ids.get(&table_ident).ok_or_else(|| {
-                        crate::Error::new(
+                        simlin_base::Error::new(
                             ErrorKind::Simulation,
                             ErrorCode::BadTable,
                             Some(format!("no graphical function found for '{table_ident}'")),
@@ -2115,7 +2115,7 @@ fn const_element_offset(expr: &Expr, table_count: u16) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::Loc;
+    use simlin_base::ast::Loc;
 
     /// Owner for the borrows a minimal, dimension-free [`ModuleCtx`] needs.
     /// The runlists are empty -- the tests call `walk_expr` directly, so the
@@ -2274,7 +2274,7 @@ mod tests {
             compiler.full_source_len(&Expr::StaticSubscript(
                 VarRef::base(Ident::new("d")),
                 scalar_view.clone(),
-                crate::ast::Loc::default(),
+                simlin_base::ast::Loc::default(),
             )),
             6
         );
@@ -2286,7 +2286,7 @@ mod tests {
             compiler.full_source_len(&Expr::StaticSubscript(
                 VarRef::new(Ident::new("d"), 4),
                 scalar_view,
-                crate::ast::Loc::default(),
+                simlin_base::ast::Loc::default(),
             )),
             1
         );

@@ -6,13 +6,11 @@
 //
 //! Async tool implementations exposed to MCP transports.
 //!
-//! Each tool is an `async fn` parameterised over `A: ProjectAccess` so
-//! the same code path serves both the stdio binary (with a stateless
-//! filesystem-backed access impl) and the Phase 6 HTTP host (with a
-//! `ProjectRegistry`-backed impl).  The functions are deliberately
-//! transport-agnostic — they take a typed input, return a typed output,
-//! and surface failures via `AccessError`.  rmcp glue (Task 6) wraps
-//! these in `CallToolResult`.
+//! Each tool is an `async fn` parameterised over `A: ProjectAccess`, so it
+//! does not know which backing store it reads and writes.  The functions
+//! are deliberately transport-agnostic — they take a typed input, return a
+//! typed output, and surface failures via `AccessError`.  The rmcp glue in
+//! [`crate::server`] wraps these in `CallToolResult`.
 
 pub mod create_model;
 pub mod edit_model;

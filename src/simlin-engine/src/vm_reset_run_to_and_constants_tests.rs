@@ -9,8 +9,8 @@
 //! items.
 
 use super::*;
-use crate::datamodel;
 use crate::test_common::TestProject;
+use simlin_base::datamodel;
 
 fn pop_model() -> TestProject {
     TestProject::new("pop_model")

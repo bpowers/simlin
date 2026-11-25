@@ -37,7 +37,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
-use simlin_engine::editing::{self, Point};
+use simlin_edit::editing::{self, Point};
 
 use crate::ffi_error::SimlinError;
 use crate::lock_order::{self, Event, Rank};
@@ -149,7 +149,7 @@ pub(crate) unsafe fn shares_datamodel(a: *mut SimlinProject, b: *mut SimlinProje
 
 pub(crate) unsafe fn datamodel_of(
     proj: *mut SimlinProject,
-) -> Arc<simlin_engine::datamodel::Project> {
+) -> Arc<simlin_base::datamodel::Project> {
     (*proj).datamodel.lock().unwrap().shared()
 }
 
@@ -1090,7 +1090,7 @@ unsafe fn run_compile_to_wasm(call: &Call) -> String {
     // The layout's name map is compared as a map: its entries come out in
     // the order of the compiled program's offset map, a `HashMap`, which
     // differs between two databases.
-    let layout = simlin_engine::wasmgen::WasmLayout::deserialize(&layout).map(|layout| {
+    let layout = simlin_wasmgen::WasmLayout::deserialize(&layout).map(|layout| {
         let mut names = layout.var_offsets;
         names.sort();
         (
@@ -1154,7 +1154,7 @@ unsafe fn wasm_results() -> (Vec<u8>, Vec<u8>) {
     expect_no_error(err, "compiling to wasm");
     simlin_model_unref(model);
     simlin_project_unref(other);
-    let parsed = simlin_engine::wasmgen::WasmLayout::deserialize(&layout).expect("a wasm layout");
+    let parsed = simlin_wasmgen::WasmLayout::deserialize(&layout).expect("a wasm layout");
     let slab = vec![0u8; parsed.n_chunks * parsed.n_slots * 8];
     (slab, layout)
 }

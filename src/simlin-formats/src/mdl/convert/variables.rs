@@ -1,0 +1,3398 @@
+// Copyright 2026 The Simlin Authors. All rights reserved.
+// Use of this source code is governed by the Apache License,
+// Version 2.0, that can be found in the LICENSE file.
+
+//! Variable building methods for MDL to datamodel conversion.
+
+use std::collections::{BTreeSet, HashMap};
+
+use simlin_base::datamodel::{
+    self, Compat, Equation, GraphicalFunction, GraphicalFunctionKind, GraphicalFunctionScale,
+    Model, ModelGroup, Project, Variable, View,
+};
+
+use crate::import_losses::ImportWarning;
+use crate::mdl::settings::{PostEquationParser, custom_output_losses};
+use crate::mdl::view;
+
+use crate::mdl::ast::{CallKind, Equation as MdlEquation, Expr, FullEquation, Lhs, Subscript};
+use crate::mdl::builtins::{eq_lower_space, to_lower_space};
+use crate::mdl::xmile_compat::{quoted_space_to_underbar, space_to_underbar};
+
+use super::ConversionContext;
+use super::helpers::{canonical_name, cartesian_product, extract_metadata, extract_units, get_lhs};
+use super::multi_output::MultiOutputMaterialization;
+use super::types::{ConvertError, SymbolInfo, VariableType};
+use crate::mdl::xmile_compat::format_number;
+
+impl<'input> ConversionContext<'input> {
+    /// Build the final Project from collected symbols, with what the file
+    /// holds that it does not keep: the sketch's losses, view by view, then
+    /// the custom graphs, tables and reports.
+    ///
+    /// `materialization` carries the multi-output macro-invocation
+    /// materialization computed in Pass 6.5 (Module + binding Auxes to add,
+    /// and the LHS symbols whose normal build must be skipped).
+    pub(super) fn build_project(
+        self,
+        materialization: &MultiOutputMaterialization,
+    ) -> Result<(Project, Vec<ImportWarning>), ConvertError> {
+        let (model, mut losses) = self.build_model("main", materialization)?;
+        if self.report_losses {
+            losses.extend(self.control_losses());
+            let outputs = PostEquationParser::new(self.post_equations).custom_outputs();
+            losses.extend(custom_output_losses(&outputs));
+        }
+
+        Ok((
+            Project {
+                name: String::new(),
+                sim_specs: self.sim_specs.build(),
+                dimensions: self.dimensions,
+                units: self.unit_equivs,
+                models: vec![model],
+                source: None,
+                ai_information: None,
+            },
+            losses,
+        ))
+    }
+
+    /// Build a single `datamodel::Model` (named `name`) from the collected
+    /// symbols, synthetic flows, groups, and views.
+    ///
+    /// This is the model-building core extracted from `build_project`: the
+    /// `"main"` model is `build_model("main", &materialization)`, and a macro
+    /// body is built as `build_model(&macro_name, &Default::default())` on a
+    /// scoped sub-context (a macro body cannot contain a multi-output macro
+    /// invocation, so it passes an empty materialization). The returned model
+    /// always has `sim_specs: None` and `macro_spec: None`; project-level
+    /// fields (sim_specs, dimensions, units) stay in `build_project`, and the
+    /// macro path attaches the `MacroSpec` afterward.
+    ///
+    /// `materialization.skip_symbols` lists the LHS symbols whose selected
+    /// equation is a multi-output macro invocation: their normal build is
+    /// skipped (the multi-output `Expr::App` must never reach
+    /// `build_equation` / the formatter), and `materialization.variables`
+    /// (the Module + binding Auxes) is appended instead.
+    pub(super) fn build_model(
+        &self,
+        name: &str,
+        materialization: &MultiOutputMaterialization,
+    ) -> Result<(Model, Vec<ImportWarning>), ConvertError> {
+        let mut variables: Vec<Variable> = Vec::with_capacity(self.symbols.len());
+
+        // In name order, not the symbol map's: the first variable that fails
+        // is the import's error, and a file imports one way on every run.
+        let mut symbols: Vec<(&String, &SymbolInfo<'_>)> = self.symbols.iter().collect();
+        symbols.sort_by(|a, b| a.0.cmp(b.0));
+        for (var_name, info) in symbols {
+            // Skip unwanted variables (control vars)
+            if info.unwanted {
+                continue;
+            }
+
+            // Skip a symbol whose selected equation is a multi-output macro
+            // invocation -- it is replaced by the materialized Module +
+            // binding Auxes appended below. (Compared on canonical name; the
+            // materializer keys `skip_symbols` on `canonical_name`.)
+            if materialization
+                .skip_symbols
+                .contains(&canonical_name(var_name))
+            {
+                continue;
+            }
+
+            // Skip subscript definitions (they're in dimensions)
+            let is_subscript_def = info.equations.iter().any(|eq| {
+                matches!(
+                    eq.equation,
+                    MdlEquation::SubscriptDef(_, _) | MdlEquation::Equivalence(_, _, _)
+                )
+            });
+            if is_subscript_def {
+                continue;
+            }
+
+            // Check if this variable has element-specific equations (x[a]=1; x[b]=2)
+            // If so, build an Arrayed equation from all element-specific equations
+            if let Some(var) = self.build_variable_with_elements(var_name, info)? {
+                variables.push(var);
+            } else {
+                // Fall back to single-equation handling
+                // PurgeAFOEq: If multiple equations and first is A FUNCTION OF or EmptyRhs, skip it
+                let eq = self.select_equation(&info.equations);
+                if let Some(eq) = eq
+                    && let Some(var) = self.build_variable(var_name, info, eq)?
+                {
+                    variables.push(var);
+                }
+            }
+        }
+
+        // Add synthetic flow variables
+        for synthetic in &self.synthetic_flows {
+            let flow = Variable::Flow(datamodel::Flow {
+                ident: quoted_space_to_underbar(&synthetic.name),
+                equation: synthetic.equation.clone(),
+                documentation: String::new(),
+                units: None,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat: datamodel::Compat::default(),
+            });
+            variables.push(flow);
+        }
+
+        // Append the materialized multi-output macro invocations: one
+        // input-only Variable::Module plus its primary/additional binding
+        // Auxes (and any hoisted expression-argument auxes) per invocation.
+        // Empty for a macro body (no multi-output invocations there).
+        variables.extend(materialization.variables.iter().cloned());
+
+        // Sort variables by canonical name for deterministic output
+        variables.sort_by_cached_key(|a| canonical_name(a.get_ident()));
+
+        // Build groups with unique names
+        let groups = self.build_groups();
+
+        // Build views from parsed sketch data
+        let (views, losses) = self.build_views();
+
+        Ok((
+            Model {
+                name: name.to_string(),
+                sim_specs: None,
+                variables: variables.into(),
+                views,
+                loop_metadata: vec![],
+                groups,
+                macro_spec: None,
+            },
+            losses,
+        ))
+    }
+
+    /// Build ModelGroup instances from collected group info.
+    /// Ensures unique group names that don't conflict with symbol namespace.
+    /// Matches xmutil's AdjustGroupNames algorithm (Model.cpp:479-503).
+    fn build_groups(&self) -> Vec<ModelGroup> {
+        if self.groups.is_empty() {
+            return vec![];
+        }
+
+        // Collect all names in symbol namespace for conflict checking:
+        // - Equation variable names
+        // - Dimension element names
+        let mut namespace: std::collections::HashSet<String> =
+            self.symbols.keys().cloned().collect();
+
+        // Add dimension element names to namespace
+        for dim in &self.dimensions {
+            if let simlin_base::datamodel::DimensionElements::Named(names) = &dim.elements {
+                for name in names {
+                    namespace.insert(canonical_name(name));
+                }
+            }
+        }
+
+        // First pass: make names unique (xmutil preserves spaces, uses " 1" suffix)
+        let mut final_names: Vec<String> = Vec::with_capacity(self.groups.len());
+        for group in &self.groups {
+            // Preserve the original name (don't convert spaces to underscores)
+            let mut name = group.name.clone();
+
+            // Make name unique: check against namespace and earlier groups
+            // xmutil uses case-insensitive comparison via ToLowerSpace
+            loop {
+                let canonical = canonical_name(&name);
+                let conflicts_namespace = namespace.contains(&canonical);
+                let conflicts_earlier_group =
+                    final_names.iter().any(|n| canonical_name(n) == canonical);
+
+                if !conflicts_namespace && !conflicts_earlier_group {
+                    break;
+                }
+                // xmutil appends " 1" (with space), not "_1"
+                name = format!("{} 1", name);
+            }
+
+            final_names.push(name);
+        }
+
+        // Second pass: build ModelGroup instances with parent names
+        self.groups
+            .iter()
+            .enumerate()
+            .map(|(i, group)| {
+                let parent = group.parent_index.map(|idx| final_names[idx].clone());
+                let members = group
+                    .members
+                    .iter()
+                    .map(|m| quoted_space_to_underbar(m))
+                    .collect();
+
+                ModelGroup {
+                    name: final_names[i].clone(),
+                    doc: None,
+                    parent,
+                    members,
+                    run_enabled: false,
+                }
+            })
+            .collect()
+    }
+
+    /// Build views from parsed sketch data, with what the sketch holds that
+    /// they do not keep when `report_losses` is set.
+    fn build_views(&self) -> (Vec<View>, Vec<ImportWarning>) {
+        if self.views.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+
+        // Build symbol namespace for view title deduplication:
+        // includes variable names and dimension names.
+        // Groups are NOT included: xmutil's MakeViewNamesUnique uses
+        // GetNameSpace()->Find() which only contains symbols/dimensions,
+        // not groups (groups are adjusted separately by AdjustGroupNames).
+        let mut all_names: std::collections::HashSet<String> =
+            self.symbols.keys().cloned().collect();
+        for dim in &self.dimensions {
+            all_names.insert(to_lower_space(&dim.name));
+        }
+
+        if self.report_losses {
+            view::build_views_reporting(self.views.clone(), &self.symbols, &all_names)
+        } else {
+            let views = view::build_views(self.views.clone(), &self.symbols, &all_names);
+            (views, Vec::new())
+        }
+    }
+
+    /// Select the appropriate equation from a list, implementing PurgeAFOEq logic.
+    ///
+    /// This matches xmutil's `PurgeAFOEq` algorithm:
+    /// 1. First pass: drop all equations with no expression (EmptyRhs)
+    /// 2. Second pass: if multiple equations remain and first is AFO, drop it
+    /// 3. Return first remaining equation
+    pub(super) fn select_equation<'a>(
+        &self,
+        equations: &'a [FullEquation<'input>],
+    ) -> Option<&'a FullEquation<'input>> {
+        if equations.is_empty() {
+            return None;
+        }
+
+        // First pass: collect non-empty equations
+        let non_empty: Vec<&FullEquation<'input>> = equations
+            .iter()
+            .filter(|eq| !self.is_empty_rhs(&eq.equation))
+            .collect();
+
+        if non_empty.is_empty() {
+            // All equations are empty, return the first one anyway
+            return Some(&equations[0]);
+        }
+
+        if non_empty.len() == 1 {
+            return Some(non_empty[0]);
+        }
+
+        // Multiple non-empty equations: check if first is A FUNCTION OF
+        if self.is_afo_expr_in_eq(&non_empty[0].equation) {
+            // Skip the AFO placeholder, use the next equation
+            return Some(non_empty[1]);
+        }
+
+        Some(non_empty[0])
+    }
+
+    /// Settle the dimensions of a variable whose equations define the element
+    /// keys `keys` (comma-joined), each axis over the dimension of exactly
+    /// the elements defined on it (`axis_dimension`): `dims` holds the
+    /// dimension the left-hand sides resolve each axis to and is replaced,
+    /// `lhs_subscripts` are each equation's left-hand subscripts as written,
+    /// and `unsettled` the axes the left-hand sides disagree on. False when
+    /// no declared dimension holds the elements defined on such an axis: no
+    /// one dimension is the variable's there.
+    ///
+    /// The one owner of an arrayed variable's dimensions on import, for a
+    /// variable and for the net flow made of a stock's equations alike, so
+    /// the two are over the same dimensions.
+    pub(super) fn settle_dimensions<'k>(
+        &self,
+        dims: &mut [String],
+        keys: impl Iterator<Item = &'k String> + Clone,
+        lhs_subscripts: &[&[String]],
+        unsettled: &BTreeSet<usize>,
+    ) -> bool {
+        for (axis, dim) in dims.iter_mut().enumerate() {
+            let defined: BTreeSet<String> = keys
+                .clone()
+                .filter_map(|key| key.split(',').nth(axis).map(canonical_name))
+                .collect();
+            let named: Vec<String> = lhs_subscripts
+                .iter()
+                .filter_map(|subs| subs.get(axis))
+                .filter(|sub| self.subscript_names_a_dimension(sub))
+                .map(|sub| canonical_name(sub))
+                .collect();
+            match self.axis_dimension(&named, &defined) {
+                Some(chosen) => *dim = chosen,
+                None if unsettled.contains(&axis) => return false,
+                None => {}
+            }
+        }
+        true
+    }
+
+    /// Does this raw LHS subscript name a subscript RANGE (a dimension or a
+    /// subrange) rather than a single element?
+    ///
+    /// The one place that question is answered, because two answers would
+    /// diverge: the per-element `element_offsets` computation needs it to skip
+    /// pinned axes, and [`Self::build_variable_with_elements`]'s collapse gate
+    /// needs it to read apply-to-all intent off the source spelling. A subrange
+    /// is registered in `dimension_elements` like any other dimension, so both
+    /// qualify.
+    fn subscript_names_a_dimension(&self, subscript: &str) -> bool {
+        self.dimension_elements
+            .contains_key(&canonical_name(subscript))
+    }
+
+    /// True when these per-element slots ARE a single apply-to-all equation:
+    /// they cover the dimensions' full cartesian product and agree on equation
+    /// text, initial text and graphical function.
+    ///
+    /// Both halves are load-bearing. Agreement is what makes the collapse
+    /// lossless -- slots that differ carry per-element information (a numeric
+    /// list, `:EXCEPT:` overrides, or the per-element row/col offsets
+    /// `external_data::adjust_call_for_element` bakes into an arrayed
+    /// `GET DIRECT`, which is why those keep their slots). Full coverage is what
+    /// makes it faithful: a partial cover (some elements of the dimension having
+    /// no equation at all) is not an apply-to-all, and turning it into one would
+    /// invent equations for the missing elements.
+    fn slots_are_one_apply_to_all(
+        &self,
+        dims: &[String],
+        elements: &[(String, String, Option<String>, Option<GraphicalFunction>)],
+    ) -> bool {
+        let Some((_, first_eq, first_initial, _)) = elements.first() else {
+            return false;
+        };
+        // `Equation::ApplyToAll` is `(dims, equation)` and has nowhere to put an
+        // INITIAL equation or a graphical function -- an `Arrayed` slot carries
+        // both. So agreement is not enough: a variable whose slots share a
+        // non-`None` initial (an arrayed `ACTIVE INITIAL`) must keep its slots,
+        // or the collapse silently drops the initial and the variable starts the
+        // run from its active equation instead.
+        if first_initial.is_some() {
+            return false;
+        }
+        let agree = elements
+            .iter()
+            .all(|(_, eq, initial, gf)| eq == first_eq && initial.is_none() && gf.is_none());
+        if !agree {
+            return false;
+        }
+        let expected: usize = dims
+            .iter()
+            .map(|d| {
+                self.dimension_elements
+                    .get(&canonical_name(d))
+                    .map_or(0, |elems| elems.len())
+            })
+            .product();
+        expected > 0 && elements.len() == expected
+    }
+
+    /// Build a variable from its subscripted equations, each defining the
+    /// elements its left-hand side names. Returns None for a variable with no
+    /// subscripted equation, or one whose left-hand sides do not agree on its
+    /// dimensions, which `build_variable` then builds from one equation.
+    ///
+    /// The equations it merges:
+    /// - an element's own: `x[a1] = 5`
+    /// - an apply-to-all with element overrides: `x[DimA] = 1`, `x[a1] = 2`
+    /// - mixed element and dimension subscripts: `x[a1, DimB] = expr`
+    /// - a number list or tabbed array, whose numbers go to the left-hand
+    ///   side's elements in row-major order: `x[a1, DimB] = 1, 2`. A variable
+    ///   may have several (Vensim writes an array of three or more dimensions
+    ///   as one list per element of the leading ones), or lists beside
+    ///   ordinary equations.
+    fn build_variable_with_elements(
+        &self,
+        name: &str,
+        info: &SymbolInfo<'_>,
+    ) -> Result<Option<Variable>, super::types::ConvertError> {
+        let valid_eqs: Vec<&FullEquation<'_>> = info
+            .equations
+            .iter()
+            .filter(|eq| !self.is_empty_rhs(&eq.equation))
+            .filter(|eq| !self.is_afo_expr_in_eq(&eq.equation))
+            .collect();
+
+        if valid_eqs.is_empty() {
+            return Ok(None);
+        }
+
+        // Classify equations and determine parent dimensions
+        struct ExpandedEquation<'a> {
+            eq: &'a FullEquation<'a>,
+            element_keys: Vec<String>, // Cartesian product of expanded subscripts
+            lhs_subscripts: Vec<String>, // LHS subscript names (raw, for context building)
+            has_except: bool,
+        }
+
+        let mut expanded_eqs: Vec<ExpandedEquation<'_>> = Vec::new();
+        let mut parent_dims: Option<Vec<String>> = None;
+        let mut unsettled_axes: BTreeSet<usize> = BTreeSet::new();
+        let mut has_subscripted_eq = false;
+        let mut has_except_eq = false;
+        let mut has_non_except_eq = false;
+
+        for eq in &valid_eqs {
+            if let Some(lhs) = get_lhs(&eq.equation) {
+                if lhs.subscripts.is_empty() {
+                    // Scalar equation - can't mix with subscripted
+                    if has_subscripted_eq {
+                        return Ok(None);
+                    }
+                    continue;
+                }
+
+                has_subscripted_eq = true;
+
+                // Expand each subscript (element -> single element, dimension -> all elements)
+                let mut dims: Vec<String> = Vec::new();
+                let mut expanded_elements: Vec<Vec<String>> = Vec::new();
+
+                for s in &lhs.subscripts {
+                    let sub_name = match s {
+                        Subscript::Element(n, _) | Subscript::BangElement(n, _) => n.as_ref(),
+                    };
+
+                    if let Some((dim, elements)) = self.expand_subscript(sub_name) {
+                        dims.push(dim);
+                        expanded_elements.push(elements);
+                    } else {
+                        // Unknown subscript - fall back to normal handling
+                        return Ok(None);
+                    }
+                }
+
+                // The equations must agree on how many dimensions the
+                // variable has. On each axis where their left-hand sides
+                // resolve to different dimensions, the equations span
+                // different subranges of one parent, or elements whose
+                // owners differ; the axis is then decided by the elements
+                // defined on it (`axis_dimension`, below).
+                if let Some(ref mut existing_dims) = parent_dims {
+                    if existing_dims.len() != dims.len() {
+                        return Ok(None);
+                    }
+                    for (axis, (existing, new)) in existing_dims.iter_mut().zip(&dims).enumerate() {
+                        if existing == new {
+                            continue;
+                        }
+                        if self.normalize_dimension(existing) == self.normalize_dimension(new) {
+                            // Subranges of one parent take the parent (an
+                            // alias dimension keeps its own name).
+                            *existing = self.resolve_subrange_to_parent(&canonical_name(existing));
+                        } else {
+                            unsettled_axes.insert(axis);
+                        }
+                    }
+                } else {
+                    parent_dims = Some(dims);
+                }
+
+                // Collect raw LHS subscript names for element context building
+                let lhs_subscripts: Vec<String> = lhs
+                    .subscripts
+                    .iter()
+                    .map(|s| match s {
+                        Subscript::Element(n, _) | Subscript::BangElement(n, _) => n.to_string(),
+                    })
+                    .collect();
+
+                // Compute Cartesian product of expanded elements
+                let mut element_keys = cartesian_product(&expanded_elements)?;
+
+                // Filter out excepted element keys when EXCEPT is present
+                let eq_has_except = lhs.except.is_some();
+                if let Some(ref except) = lhs.except {
+                    has_except_eq = true;
+                    let mut excepted_keys = std::collections::HashSet::new();
+                    for bracket_group in &except.subscripts {
+                        let mut except_expanded: Vec<Vec<String>> = Vec::new();
+                        for s in bracket_group {
+                            let sub_name = match s {
+                                Subscript::Element(n, _) | Subscript::BangElement(n, _) => {
+                                    n.as_ref()
+                                }
+                            };
+                            if let Some((_dim, elements)) = self.expand_subscript(sub_name) {
+                                except_expanded.push(elements);
+                            }
+                        }
+                        if !except_expanded.is_empty() {
+                            for key in cartesian_product(&except_expanded)? {
+                                excepted_keys.insert(key);
+                            }
+                        }
+                    }
+                    element_keys.retain(|k| !excepted_keys.contains(k));
+                }
+
+                if !eq_has_except && !element_keys.is_empty() {
+                    has_non_except_eq = true;
+                }
+                expanded_eqs.push(ExpandedEquation {
+                    eq,
+                    element_keys,
+                    lhs_subscripts,
+                    has_except: eq_has_except,
+                });
+            } else {
+                return Ok(None);
+            }
+        }
+
+        // If no subscripted equations found, use normal handling
+        if !has_subscripted_eq {
+            return Ok(None);
+        }
+
+        let mut parent_dims = match parent_dims {
+            Some(dims) => dims,
+            None => return Ok(None),
+        };
+        if parent_dims.is_empty() {
+            return Ok(None);
+        }
+
+        // Build element map: key -> (equation_string, initial_equation, gf)
+        // Later equations override earlier ones (element-specific overrides apply-to-all)
+        let mut element_map: HashMap<String, (String, Option<String>, Option<GraphicalFunction>)> =
+            HashMap::new();
+
+        // Track the default equation text for EXCEPT semantics.
+        // When an equation has :EXCEPT:, its RHS becomes the default for all
+        // non-excepted elements.
+        let mut default_equation: Option<String> = None;
+
+        // Per-element substitution is needed when there are multiple equations
+        // (element-specific, multi-subrange, or overrides), or when EXCEPT is
+        // present (non-excepted elements need dimension references substituted).
+        let needs_substitution = expanded_eqs.len() > 1 || has_except_eq;
+
+        for exp_eq in &expanded_eqs {
+            // A list's numbers, one per element its left-hand side defines
+            // (less those it excepts), in order. Which number a list of
+            // another length gives an element would be a guess, so such a
+            // list is refused; whether Vensim refuses it too is unverified.
+            let listed = match &exp_eq.eq.equation {
+                MdlEquation::NumberList(_, values) | MdlEquation::TabbedArray(_, values) => {
+                    if values.len() != exp_eq.element_keys.len() {
+                        return Err(super::types::ConvertError::Other(format!(
+                            "'{name}' lists {} numbers for the {} elements its left-hand side defines",
+                            values.len(),
+                            exp_eq.element_keys.len()
+                        )));
+                    }
+                    Some(values.as_slice())
+                }
+                _ => None,
+            };
+
+            // When this equation has EXCEPT, capture its unsubstituted RHS as the
+            // default equation text (metadata for the Equation::Arrayed). A
+            // list has no equation text to be a default: it defines the
+            // elements it does not except, each by its own number.
+            if exp_eq.has_except && listed.is_none() {
+                let empty_ctx = crate::mdl::xmile_compat::ElementContext {
+                    substitutions: HashMap::new(),
+                    subrange_mappings: HashMap::new(),
+                };
+                let (raw_eq, _, _) = self.build_equation_rhs_with_context(
+                    name,
+                    &exp_eq.eq.equation,
+                    info.var_type == VariableType::Stock,
+                    &empty_ctx,
+                    &[],
+                )?;
+                default_equation = Some(raw_eq);
+            }
+
+            for (position, key) in exp_eq.element_keys.iter().enumerate() {
+                if let Some(values) = listed {
+                    let text = format_number(values[position]);
+                    element_map.insert(key.clone(), (text, None, None));
+                    continue;
+                }
+
+                // Split element key to get per-dimension element names
+                let element_parts: Vec<&str> = key.split(',').collect();
+                debug_assert_eq!(
+                    element_parts.len(),
+                    exp_eq.lhs_subscripts.len(),
+                    "element key parts count must match LHS subscript count"
+                );
+
+                // Build per-element context for substitution (only when needed)
+                let ctx = if needs_substitution {
+                    self.build_element_context(&exp_eq.lhs_subscripts, &element_parts)
+                } else {
+                    crate::mdl::xmile_compat::ElementContext {
+                        substitutions: HashMap::new(),
+                        subrange_mappings: HashMap::new(),
+                    }
+                };
+
+                // Compute element offsets for arrayed GET DIRECT resolution.
+                // Only include varying dimensions (where the LHS subscript is
+                // a dimension name), not pinned subscripts (specific element
+                // names like "B1"). adjust_call_for_element maps the last two
+                // offsets to row/col, so including pinned dims would shift the
+                // varying-dimension offsets to the wrong positions.
+                let element_offsets: Vec<usize> = element_parts
+                    .iter()
+                    .zip(exp_eq.lhs_subscripts.iter())
+                    .filter(|(_, sub)| self.subscript_names_a_dimension(sub))
+                    .map(|(elem, sub)| self.element_index_in_dimension(elem, sub).unwrap_or(0))
+                    .collect();
+
+                let (eq_str, initial_eq, gf) = self.build_equation_rhs_with_context(
+                    name,
+                    &exp_eq.eq.equation,
+                    info.var_type == VariableType::Stock,
+                    &ctx,
+                    &element_offsets,
+                )?;
+
+                element_map.insert(key.clone(), (eq_str, initial_eq, gf));
+            }
+        }
+
+        let lhs_subscripts: Vec<&[String]> = expanded_eqs
+            .iter()
+            .map(|e| e.lhs_subscripts.as_slice())
+            .collect();
+        if !self.settle_dimensions(
+            &mut parent_dims,
+            element_map.keys(),
+            &lhs_subscripts,
+            &unsettled_axes,
+        ) {
+            return Ok(None);
+        }
+
+        // Each element is keyed by its canonical name, as every reader of a
+        // datamodel stores one (`CanonicalElementName::from_subscript`); the
+        // spelling the file gives it is its dimension's.
+        let mut elements: Vec<(String, String, Option<String>, Option<GraphicalFunction>)> =
+            element_map
+                .into_iter()
+                .map(|(key, (eq_str, initial_eq, gf))| {
+                    (canonical_element_key(&key), eq_str, initial_eq, gf)
+                })
+                .collect();
+        elements.sort_by(|a, b| a.0.cmp(&b.0));
+
+        if elements.is_empty() {
+            return Ok(None);
+        }
+
+        // Format dimension names -- parent_dims are already normalized to
+        // parent dimensions when equations span different subranges
+        let formatted_dims: Vec<String> = parent_dims
+            .iter()
+            .map(|d| self.get_formatted_dimension_name(d))
+            .collect();
+
+        // The default applies only where every element already has a slot,
+        // so an excepted element nothing defines stays undefined (the
+        // engine's rule, unverified against Vensim).
+        let every_element_has_a_slot = parent_dims
+            .iter()
+            .map(|dim| {
+                self.dimension_elements
+                    .get(&canonical_name(dim))
+                    .map_or(0, Vec::len)
+            })
+            .product::<usize>()
+            == elements.len();
+        let has_except_default = has_except_eq
+            && has_non_except_eq
+            && default_equation.is_some()
+            && every_element_has_a_slot;
+        // Was the MDL source a SINGLE apply-to-all equation? That -- not
+        // whether the expanded slots happen to agree -- is what licenses
+        // collapsing, and the difference is not academic: an arrayed
+        // `GET DIRECT CONSTANTS` reads its per-element values from a file, so
+        // its slots agreeing is a property of the DATA, and collapsing on that
+        // basis would make the imported structure change when the spreadsheet
+        // does. Those keep their slots, as do EXCEPT equations and
+        // element-specific overrides.
+        //
+        // The external-data test is the WHOLE opaque-placeholder family
+        // (`is_external_data_placeholder`), not just the `GET DIRECT` calls this
+        // module can resolve. An UNRESOLVABLE one -- `GET XLS DATA` with no
+        // `DataProvider`, the commonest shape in the checked-in corpus -- leaves
+        // an empty equation in every slot, and collapsing that yields
+        // `ApplyToAll(dims, "")`, which is an `EmptyEquation` error where the
+        // `Arrayed` form imported cleanly. It costs the readers too: a variable
+        // with no parseable equation has no dimensions, so a consumer's
+        // `SUM(v[Dim!])` then fails as `CantSubscriptScalar`. Measured on four
+        // corpus models (`groupon 1-3`, `get_with_missing_values_xlsx`), which
+        // gained failing variables until this test was widened.
+        //
+        // The gate also asks the SOURCE SPELLING, not just the expanded slots:
+        // every LHS subscript must name a subscript RANGE. Coverage arithmetic
+        // cannot substitute for that, because a SINGLETON dimension makes it
+        // vacuous -- with `DimA: a1`, the element-specific `x[a1] = 5` produces
+        // one slot, which is the whole cartesian product, and collapsed to
+        // `ApplyToAll([DimA], "5")`. That loses the source's meaning twice over:
+        // the writer re-renders it as `x[DimA] = 5`, and a later dimension edit
+        // adding `a2` silently extends an equation the MDL never wrote for it.
+        // Asking the spelling is also simply what "apply-to-all" means, so the
+        // other blocks (a pinned axis, mixed spellings) become principled rather
+        // than incidental consequences of counting elements.
+        //
+        // A number list is per-element data by its spelling, like the
+        // external data above: that its numbers agree today does not make it
+        // one equation.
+        let single_apply_to_all = expanded_eqs.len() == 1
+            && !has_except_eq
+            && default_equation.is_none()
+            && !expanded_eqs.iter().any(|e| {
+                matches!(
+                    e.eq.equation,
+                    MdlEquation::NumberList(_, _) | MdlEquation::TabbedArray(_, _)
+                )
+            })
+            && expanded_eqs.iter().all(|e| {
+                e.lhs_subscripts
+                    .iter()
+                    .all(|sub| self.subscript_names_a_dimension(sub))
+            })
+            && !expanded_eqs.iter().any(|e| {
+                let eq_str = match &e.eq.equation {
+                    MdlEquation::Regular(_, expr) | MdlEquation::Data(_, Some(expr)) => {
+                        self.formatter.format_expr(expr)
+                    }
+                    // A `Data` equation with no expression is Vensim's
+                    // implicit-data form: opaque for the same reason.
+                    MdlEquation::Data(_, None) => return true,
+                    _ => return false,
+                };
+                super::external_data::is_external_data_placeholder(&eq_str)
+            });
+        let equation =
+            if single_apply_to_all && self.slots_are_one_apply_to_all(&formatted_dims, &elements) {
+                // One MDL apply-to-all equation is ONE equation. Every subscripted
+                // LHS is expanded to the cartesian product of its subscripts above,
+                // so `y[DimA] = <rhs>` arrived here as N slots all carrying the same
+                // `<rhs>`; that is the same equation written N times, and writing it
+                // once is both the faithful translation and the only form a
+                // dimension reference survives. Vensim's `DimA` in an expression is
+                // the element's 1-based POSITION, and a per-element slot has no
+                // active apply-to-all dimension for it to resolve against -- so
+                // `y[DimA] = VECTOR ELM MAP(x[three], (DimA - 1))`, legal Vensim and
+                // correct through our XMILE reader, failed to compile through this
+                // one. Collapsing loses nothing by construction (see
+                // `slots_are_one_apply_to_all` for the two things `ApplyToAll`
+                // cannot carry), and it is what xmutil emits here.
+                Equation::ApplyToAll(formatted_dims.clone(), elements[0].1.clone())
+            } else {
+                Equation::Arrayed(
+                    formatted_dims.clone(),
+                    elements,
+                    default_equation,
+                    has_except_default,
+                )
+            };
+
+        // Build the variable
+        let ident = quoted_space_to_underbar(name);
+        let (documentation, units) = extract_metadata(&info.equations);
+
+        // Extract GET DIRECT data_source from original equation for compat
+        // persistence. Arrayed GET DIRECT variables share the same data
+        // source across all elements; we extract it from the first equation.
+        let data_source = expanded_eqs.iter().find_map(|exp_eq| {
+            let eq_str = match &exp_eq.eq.equation {
+                MdlEquation::Regular(_, expr) => self.formatter.format_expr(expr),
+                MdlEquation::Data(_, Some(expr)) => self.formatter.format_expr(expr),
+                _ => return None,
+            };
+            if super::external_data::is_get_direct_ref(&eq_str) {
+                self.extract_get_direct_data_source(&eq_str)
+            } else {
+                None
+            }
+        });
+        let compat = datamodel::Compat {
+            data_source,
+            ..Default::default()
+        };
+
+        match info.var_type {
+            VariableType::Stock => Ok(Some(Variable::Stock(datamodel::Stock {
+                ident,
+                equation,
+                documentation,
+                units,
+                inflows: info.inflows.clone(),
+                outflows: info.outflows.clone(),
+                ai_state: None,
+                uid: None,
+                compat,
+            }))),
+            VariableType::Flow => Ok(Some(Variable::Flow(datamodel::Flow {
+                ident,
+                equation,
+                documentation,
+                units,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat,
+            }))),
+            VariableType::Aux => Ok(Some(Variable::Aux(datamodel::Aux {
+                ident,
+                equation,
+                documentation,
+                units,
+                gf: None,
+                ai_state: None,
+                uid: None,
+                compat,
+            }))),
+        }
+    }
+
+    /// Build the equation RHS string with per-element substitution context.
+    /// Dimension references in the equation are substituted with specific element names.
+    ///
+    /// `element_offsets` provides the 0-based position within each dimension
+    /// for arrayed variables, used to adjust GET DIRECT cell references.
+    fn build_equation_rhs_with_context(
+        &self,
+        var_name: &str,
+        eq: &MdlEquation<'_>,
+        is_stock: bool,
+        ctx: &crate::mdl::xmile_compat::ElementContext,
+        element_offsets: &[usize],
+    ) -> Result<(String, Option<String>, Option<GraphicalFunction>), super::types::ConvertError>
+    {
+        match eq {
+            MdlEquation::Regular(_, expr) => {
+                if is_stock && let Some(initial) = self.extract_integ_initial(expr) {
+                    return Ok((
+                        self.formatter.format_expr_with_context(initial, ctx),
+                        None,
+                        None,
+                    ));
+                }
+                if let Some((equation_expr, initial_expr)) = self.extract_active_initial(expr) {
+                    let eq_str = self.formatter.format_expr_with_context(equation_expr, ctx);
+                    let initial_str = self.formatter.format_expr_with_context(initial_expr, ctx);
+                    return Ok((eq_str, Some(initial_str), None));
+                }
+                let eq_str = self.formatter.format_expr_with_context(expr, ctx);
+                // GET DIRECT CONSTANTS uses `=` (not `:=`), so it is parsed
+                // as Regular rather than Data. Detect the opaque reference
+                // and resolve it through the data provider.
+                if super::external_data::is_get_direct_ref(&eq_str) {
+                    return self.try_resolve_data_equation(&eq_str, element_offsets);
+                }
+                Ok((eq_str, None, None))
+            }
+            // A bare lookup table imports as the canonical lookup-only form: an
+            // empty equation + a graphical function (no functional input). It is
+            // a static table indexed by callers, not a value-bearing variable
+            // (issue #606). The legacy `"0+0"` sentinel is still ACCEPTED on read
+            // (see `datamodel::is_empty_or_sentinel`) for already-serialized models.
+            MdlEquation::Lookup(_, table) => Ok((
+                String::new(),
+                None,
+                Some(self.build_graphical_function(var_name, table)),
+            )),
+            MdlEquation::WithLookup(_, input, table) => Ok((
+                self.formatter.format_expr_with_context(input, ctx),
+                None,
+                Some(self.build_graphical_function(var_name, table)),
+            )),
+            MdlEquation::EmptyRhs(_, _) => Ok((String::new(), None, None)),
+            MdlEquation::Implicit(_) => {
+                let gf = self.make_default_lookup();
+                Ok(("TIME".to_string(), None, Some(gf)))
+            }
+            MdlEquation::Data(_, expr) => {
+                let eq_str = expr
+                    .as_ref()
+                    .map(|e| self.formatter.format_expr_with_context(e, ctx))
+                    .unwrap_or_default();
+                self.try_resolve_data_equation(&eq_str, element_offsets)
+            }
+            // A list's elements take its numbers where its left-hand side
+            // is expanded, and a subscript definition is a dimension, not a
+            // variable, so neither has an expression to format here; a
+            // caller that asks is refused rather than answered with a guess.
+            MdlEquation::TabbedArray(_, _)
+            | MdlEquation::NumberList(_, _)
+            | MdlEquation::SubscriptDef(_, _)
+            | MdlEquation::Equivalence(_, _, _) => Err(super::types::ConvertError::Other(format!(
+                "'{var_name}' has an equation that is not an expression where one is needed"
+            ))),
+        }
+    }
+
+    /// Build an ElementContext for per-element equation substitution.
+    /// Maps each LHS dimension to the specific element being computed.
+    ///
+    /// Shared with the synthetic-net-flow path
+    /// (`stocks::build_synthetic_flow_equation`, #559) so a synthesized
+    /// `<stock>_net_flow` resolves its rate per element with the SAME
+    /// subscript-range-mapping logic the regular arrayed-equation path
+    /// uses, instead of cloning the raw subrange-sliced rate string.
+    pub(super) fn build_element_context(
+        &self,
+        lhs_subscripts: &[String],
+        element_parts: &[&str],
+    ) -> crate::mdl::xmile_compat::ElementContext {
+        use crate::mdl::xmile_compat::ElementContext;
+        use simlin_base::common::CanonicalDimensionName;
+        use simlin_base::common::CanonicalElementName;
+
+        debug_assert_eq!(
+            lhs_subscripts.len(),
+            element_parts.len(),
+            "LHS subscript count must match element parts count"
+        );
+
+        let mut substitutions = HashMap::new();
+        // The LHS's dimensions in the order it names them: where several
+        // could give a dimension the LHS does not name its element, the first
+        // does.
+        let mut lhs_dims: Vec<String> = Vec::new();
+
+        for (sub_name, elem_name) in lhs_subscripts.iter().zip(element_parts.iter()) {
+            let dim_canonical = canonical_name(sub_name);
+            // Only add substitution if the subscript is a dimension (not already a
+            // specific element). If it's already an element, the equation already
+            // references it by name and no substitution is needed.
+            if self.dimension_elements.contains_key(&dim_canonical) {
+                if !lhs_dims.contains(&dim_canonical) {
+                    lhs_dims.push(dim_canonical.clone());
+                }
+                substitutions.insert(dim_canonical, space_to_underbar(elem_name));
+            }
+        }
+
+        // Build subrange mappings for dimensions not directly on the LHS
+        let subrange_mappings = self.build_subrange_mappings(&substitutions, &lhs_dims);
+
+        // Build cross-dimension mapping substitutions: a dimension that maps
+        // to or from a dimension with an element takes the element the
+        // mapping gives. For example, if DimD maps to DimA and we're
+        // iterating at DimA=A2, then DimD -> D1 (where D1 is the DimD
+        // element that maps to A2). This resolves in rounds, each consulting
+        // only the dimensions resolved before it -- the LHS's own first, in
+        // its order, then each earlier round's by name -- so a dimension
+        // mapped to another resolved one resolves too, along the fewest
+        // mappings, and the result never depends on the order a hash map
+        // yields the dimensions in.
+        let dims_ctx = self.dimensions_context();
+        let mut resolved: Vec<(CanonicalDimensionName, CanonicalElementName)> = lhs_dims
+            .iter()
+            .map(|dim| {
+                (
+                    CanonicalDimensionName::from_raw(dim),
+                    CanonicalElementName::from_raw(&substitutions[dim]),
+                )
+            })
+            .collect();
+        let mut pending: Vec<(&String, CanonicalDimensionName)> = self
+            .dimension_elements
+            .keys()
+            .filter(|dim| {
+                !substitutions.contains_key(*dim) && !subrange_mappings.contains_key(*dim)
+            })
+            .map(|dim| (dim, CanonicalDimensionName::from_raw(dim)))
+            .collect();
+        loop {
+            let mut round: Vec<(&String, CanonicalDimensionName, CanonicalElementName)> =
+                Vec::new();
+            pending.retain(|(dim_canonical, dim_name)| {
+                let mapped = resolved.iter().find_map(|(from_name, from_elem)| {
+                    if !dims_ctx.has_mapping_to(dim_name, from_name)
+                        && !dims_ctx.has_mapping_to(from_name, dim_name)
+                    {
+                        return None;
+                    }
+                    dims_ctx.translate_via_mapping(dim_name, from_name, from_elem)
+                });
+                match mapped {
+                    Some(elem) => {
+                        round.push((dim_canonical, dim_name.clone(), elem));
+                        false
+                    }
+                    None => true,
+                }
+            });
+            if round.is_empty() {
+                break;
+            }
+            round.sort_by(|a, b| a.0.cmp(b.0));
+            for (dim, dim_name, elem) in round {
+                substitutions.insert(dim.clone(), elem.as_str().to_string());
+                resolved.push((dim_name, elem));
+            }
+        }
+
+        ElementContext {
+            substitutions,
+            subrange_mappings,
+        }
+    }
+
+    /// Build subrange mappings for dimensions that are not directly on the LHS
+    /// but can be resolved positionally through a parent or sibling subrange
+    /// that IS on the LHS. `lhs_dims` are the keys of `substitutions` in the
+    /// order the LHS names them.
+    fn build_subrange_mappings(
+        &self,
+        substitutions: &HashMap<String, String>,
+        lhs_dims: &[String],
+    ) -> HashMap<String, crate::mdl::xmile_compat::SubrangeMapping> {
+        use crate::mdl::xmile_compat::SubrangeMapping;
+
+        let mut mappings = HashMap::new();
+
+        for (dim_canonical, elements) in &self.dimension_elements {
+            // Skip dimensions already in substitutions (they're directly on the LHS)
+            if substitutions.contains_key(dim_canonical) {
+                continue;
+            }
+
+            // Skip empty dimensions
+            if elements.is_empty() {
+                continue;
+            }
+
+            // Check if this dimension is a subrange
+            let parent_canonical = self.resolve_subrange_to_parent(dim_canonical);
+            if parent_canonical == *dim_canonical {
+                // Not a subrange
+                continue;
+            }
+
+            // Case 1: the parent dimension is directly in substitutions
+            if substitutions.contains_key(&parent_canonical) {
+                if let Some(parent_elements) = self.dimension_elements.get(&parent_canonical) {
+                    mappings.insert(
+                        dim_canonical.clone(),
+                        SubrangeMapping {
+                            lhs_dim_canonical: parent_canonical,
+                            lhs_dim_elements: parent_elements.clone(),
+                            own_elements: elements.clone(),
+                        },
+                    );
+                }
+                continue;
+            }
+
+            // Case 2: a sibling subrange of the same parent is in substitutions.
+            // E.g., LHS is upper (subrange of layers), RHS references lower
+            // (also subrange of layers). Map through the sibling -- the first
+            // the LHS names when it holds several.
+            for sub_dim in lhs_dims {
+                let sub_parent = self.resolve_subrange_to_parent(sub_dim);
+                if sub_parent == parent_canonical
+                    && let Some(sibling_elements) = self.dimension_elements.get(sub_dim.as_str())
+                {
+                    mappings.insert(
+                        dim_canonical.clone(),
+                        SubrangeMapping {
+                            lhs_dim_canonical: sub_dim.clone(),
+                            lhs_dim_elements: sibling_elements.clone(),
+                            own_elements: elements.clone(),
+                        },
+                    );
+                    break;
+                }
+            }
+        }
+
+        mappings
+    }
+
+    /// Build a Variable from symbol info.
+    fn build_variable(
+        &self,
+        name: &str,
+        info: &SymbolInfo<'_>,
+        eq: &FullEquation<'_>,
+    ) -> Result<Option<Variable>, super::types::ConvertError> {
+        let ident = quoted_space_to_underbar(name);
+        let documentation = eq
+            .comment
+            .as_ref()
+            .map(|c| c.to_string())
+            .unwrap_or_default();
+        let units = extract_units(eq);
+
+        match info.var_type {
+            VariableType::Stock => {
+                let (equation, compat, _gf) = self.build_equation(&eq.equation, true)?;
+                Ok(Some(Variable::Stock(datamodel::Stock {
+                    ident,
+                    equation,
+                    documentation,
+                    units,
+                    inflows: info.inflows.clone(),
+                    outflows: info.outflows.clone(),
+                    ai_state: None,
+                    uid: None,
+                    compat,
+                })))
+            }
+            VariableType::Flow => {
+                let (equation, compat, gf) = self.build_equation(&eq.equation, false)?;
+                Ok(Some(Variable::Flow(datamodel::Flow {
+                    ident,
+                    equation,
+                    documentation,
+                    units,
+                    gf,
+                    ai_state: None,
+                    uid: None,
+                    compat,
+                })))
+            }
+            VariableType::Aux => {
+                let (equation, compat, gf) = self.build_equation(&eq.equation, false)?;
+                Ok(Some(Variable::Aux(datamodel::Aux {
+                    ident,
+                    equation,
+                    documentation,
+                    units,
+                    gf,
+                    ai_state: None,
+                    uid: None,
+                    compat,
+                })))
+            }
+        }
+    }
+
+    /// Build an Equation from an MDL equation.
+    /// For stocks, extract the initial value from INTEG.
+    /// For ACTIVE INITIAL, split into equation and initial_equation fields.
+    fn build_equation(
+        &self,
+        eq: &MdlEquation<'_>,
+        is_stock: bool,
+    ) -> Result<(Equation, Compat, Option<GraphicalFunction>), super::types::ConvertError> {
+        match eq {
+            MdlEquation::Regular(lhs, expr) => {
+                if is_stock {
+                    // For stocks, extract initial value from INTEG
+                    if let Some(initial) = self.extract_integ_initial(expr) {
+                        let initial_str = self.formatter.format_expr(initial);
+                        let (equation, compat) = self.make_equation(lhs, &initial_str);
+                        return Ok((equation, compat, None));
+                    }
+                }
+
+                // Check for ACTIVE INITIAL and split into equation + initial_equation
+                if let Some((equation_expr, initial_expr)) = self.extract_active_initial(expr) {
+                    let eq_str = self.formatter.format_expr(equation_expr);
+                    let initial_str = self.formatter.format_expr(initial_expr);
+                    let (equation, compat) =
+                        self.make_equation_with_initial(lhs, &eq_str, Some(initial_str));
+                    return Ok((equation, compat, None));
+                }
+
+                let eq_str = self.formatter.format_expr(expr);
+                // GET DIRECT CONSTANTS uses `=` (not `:=`), so it is parsed
+                // as Regular rather than Data. Detect and resolve via the
+                // data provider.
+                if super::external_data::is_get_direct_ref(&eq_str) {
+                    let (resolved_eq, _resolved_compat, gf) =
+                        self.try_resolve_data_equation(&eq_str, &[])?;
+                    let (equation, mut compat) = self.make_equation(lhs, &resolved_eq);
+                    compat.data_source = self.extract_get_direct_data_source(&eq_str);
+                    return Ok((equation, compat, gf));
+                }
+                let (equation, compat) = self.make_equation(lhs, &eq_str);
+                Ok((equation, compat, None))
+            }
+            MdlEquation::Lookup(lhs, table) => {
+                let gf = self.build_graphical_function(&lhs.name, table);
+                // Canonical lookup-only form: empty equation + gf (issue #606).
+                let (equation, compat) = self.make_equation(lhs, "");
+                Ok((equation, compat, Some(gf)))
+            }
+            MdlEquation::WithLookup(lhs, input, table) => {
+                let gf = self.build_graphical_function(&lhs.name, table);
+                let input_str = self.formatter.format_expr(input);
+                let (equation, compat) = self.make_equation(lhs, &input_str);
+                Ok((equation, compat, Some(gf)))
+            }
+            MdlEquation::EmptyRhs(lhs, _) => {
+                let (equation, compat) = self.make_equation(lhs, "");
+                Ok((equation, compat, None))
+            }
+            MdlEquation::Implicit(lhs) => {
+                // Implicit equations become lookups on TIME with a default table
+                let gf = self.make_default_lookup();
+                let (equation, compat) = self.make_equation(lhs, "TIME");
+                Ok((equation, compat, Some(gf)))
+            }
+            MdlEquation::Data(lhs, expr) => {
+                let eq_str = expr
+                    .as_ref()
+                    .map(|e| self.formatter.format_expr(e))
+                    .unwrap_or_default();
+                let (resolved_eq, _resolved_compat, gf) =
+                    self.try_resolve_data_equation(&eq_str, &[])?;
+                let (equation, mut compat) = self.make_equation(lhs, &resolved_eq);
+                compat.data_source = self.extract_get_direct_data_source(&eq_str);
+                Ok((equation, compat, gf))
+            }
+            MdlEquation::TabbedArray(lhs, values) | MdlEquation::NumberList(lhs, values) => {
+                // A list over known subscripts is built element by element
+                // (`build_variable_with_elements`). What reaches here is a
+                // list no element can take a number from: one with no
+                // subscripts, or over a subscript nothing declares. Which of
+                // its numbers the variable would be is a guess, so it is
+                // refused.
+                Err(super::types::ConvertError::Other(format!(
+                    "'{}' lists {} numbers but defines no element to take them",
+                    lhs.name,
+                    values.len()
+                )))
+            }
+            MdlEquation::SubscriptDef(_, _) | MdlEquation::Equivalence(_, _, _) => {
+                Ok((Equation::Scalar(String::new()), Compat::default(), None))
+            }
+        }
+    }
+
+    /// Try to resolve a GET DIRECT reference in a Data equation expression.
+    /// Returns (equation_string, initial_value, graphical_function) matching
+    /// the tuple format used by build_equation_for_element.
+    ///
+    /// `element_offsets` provides the 0-based position within each dimension
+    /// for arrayed variables (empty for scalars).
+    fn try_resolve_data_equation(
+        &self,
+        eq_str: &str,
+        element_offsets: &[usize],
+    ) -> Result<(String, Option<String>, Option<GraphicalFunction>), super::types::ConvertError>
+    {
+        use super::external_data::{ResolvedData, try_resolve_data_expr};
+
+        match try_resolve_data_expr(
+            eq_str,
+            self.data_provider,
+            &self.file_aliases,
+            element_offsets,
+        ) {
+            Some(Ok(ResolvedData::Lookup(eq, gf))) => Ok((eq, None, Some(gf))),
+            Some(Ok(ResolvedData::Constant(value))) => Ok((format_number(value), None, None)),
+            Some(Ok(ResolvedData::Subscript(_))) => {
+                // Subscripts are resolved during dimension building, not here
+                Ok((eq_str.to_string(), None, None))
+            }
+            Some(Err(e)) => Err(e.into()),
+            None => {
+                // Not a GET DIRECT ref. For implicit data variables (no
+                // expression), produce a default lookup on TIME.
+                if eq_str.is_empty() {
+                    let gf = self.make_default_lookup();
+                    Ok(("TIME".to_string(), None, Some(gf)))
+                } else {
+                    Ok((eq_str.to_string(), None, None))
+                }
+            }
+        }
+    }
+
+    /// Parse GET DIRECT metadata from an expression string for compat persistence.
+    /// Resolves file aliases so that roundtripped MDL references actual filenames
+    /// rather than alias tokens (e.g. `?data`) that require settings context.
+    fn extract_get_direct_data_source(
+        &self,
+        eq_str: &str,
+    ) -> Option<simlin_base::datamodel::DataSource> {
+        use super::external_data::{GetDirectCall, parse_get_direct, resolve_file_alias};
+
+        let call = parse_get_direct(eq_str)?;
+        Some(match call {
+            GetDirectCall::Data {
+                file,
+                tab,
+                time_col,
+                data_cell,
+            } => simlin_base::datamodel::DataSource {
+                kind: simlin_base::datamodel::DataSourceKind::Data,
+                file: resolve_file_alias(&file, &self.file_aliases),
+                tab_or_delimiter: tab,
+                row_or_col: time_col,
+                cell: data_cell,
+            },
+            GetDirectCall::Constants {
+                file,
+                tab,
+                row_or_cell,
+                col,
+            } => simlin_base::datamodel::DataSource {
+                kind: simlin_base::datamodel::DataSourceKind::Constants,
+                file: resolve_file_alias(&file, &self.file_aliases),
+                tab_or_delimiter: tab,
+                row_or_col: row_or_cell,
+                cell: col,
+            },
+            GetDirectCall::Lookups {
+                file,
+                tab,
+                x_col,
+                y_cell,
+            } => simlin_base::datamodel::DataSource {
+                kind: simlin_base::datamodel::DataSourceKind::Lookups,
+                file: resolve_file_alias(&file, &self.file_aliases),
+                tab_or_delimiter: tab,
+                row_or_col: x_col,
+                cell: y_cell,
+            },
+            GetDirectCall::Subscript {
+                file,
+                tab,
+                first_cell,
+                last_cell,
+                ..
+            } => simlin_base::datamodel::DataSource {
+                kind: simlin_base::datamodel::DataSourceKind::Subscript,
+                file: resolve_file_alias(&file, &self.file_aliases),
+                tab_or_delimiter: tab,
+                row_or_col: first_cell,
+                cell: last_cell,
+            },
+        })
+    }
+
+    /// Create a default lookup table for implicit equations.
+    /// Per xmutil: `(0,1),(1,1)` is the default table when tbl is NULL.
+    fn make_default_lookup(&self) -> GraphicalFunction {
+        GraphicalFunction {
+            kind: GraphicalFunctionKind::Continuous,
+            x_points: Some(vec![0.0, 1.0]),
+            y_points: vec![1.0, 1.0],
+            x_scale: GraphicalFunctionScale { min: 0.0, max: 1.0 },
+            y_scale: GraphicalFunctionScale { min: 0.0, max: 2.0 },
+        }
+    }
+
+    /// Create an Equation from LHS and equation string, handling subscripts.
+    fn make_equation(&self, lhs: &Lhs<'_>, eq_str: &str) -> (Equation, Compat) {
+        self.make_equation_with_initial(lhs, eq_str, None)
+    }
+
+    /// Create an Equation from LHS, equation string, and optional initial equation.
+    fn make_equation_with_initial(
+        &self,
+        lhs: &Lhs<'_>,
+        eq_str: &str,
+        initial_str: Option<String>,
+    ) -> (Equation, Compat) {
+        let compat = Compat {
+            active_initial: initial_str,
+            ..Compat::default()
+        };
+        if lhs.subscripts.is_empty() {
+            (Equation::Scalar(eq_str.to_string()), compat)
+        } else {
+            // Subscripted equation becomes ApplyToAll
+            let dims: Vec<String> = lhs
+                .subscripts
+                .iter()
+                .map(|s| match s {
+                    Subscript::Element(name, _) | Subscript::BangElement(name, _) => {
+                        space_to_underbar(name)
+                    }
+                })
+                .collect();
+            (Equation::ApplyToAll(dims, eq_str.to_string()), compat)
+        }
+    }
+
+    /// Extract the initial value expression from an INTEG call.
+    fn extract_integ_initial<'a>(&self, expr: &'a Expr<'input>) -> Option<&'a Expr<'input>> {
+        match expr {
+            Expr::App(name, _, args, CallKind::Builtin, _, _) if eq_lower_space(name, "integ") => {
+                // INTEG(rate, initial) - return the initial value
+                if args.len() >= 2 {
+                    return Some(&args[1]);
+                }
+                None
+            }
+            Expr::Paren(inner, _) => self.extract_integ_initial(inner),
+            _ => None,
+        }
+    }
+
+    /// Extract the equation and initial expressions from an ACTIVE INITIAL call.
+    /// ACTIVE INITIAL(equation, initial) -> (equation, initial)
+    fn extract_active_initial<'a>(
+        &self,
+        expr: &'a Expr<'input>,
+    ) -> Option<(&'a Expr<'input>, &'a Expr<'input>)> {
+        match expr {
+            Expr::App(name, _, args, CallKind::Builtin, _, _)
+                if eq_lower_space(name, "active initial") =>
+            {
+                if args.len() >= 2 {
+                    return Some((&args[0], &args[1]));
+                }
+                None
+            }
+            Expr::Paren(inner, _) => self.extract_active_initial(inner),
+            _ => None,
+        }
+    }
+
+    /// Build a GraphicalFunction from a LookupTable.
+    /// The var_name is used to check whether `TABXL` is called on this lookup.
+    fn build_graphical_function(
+        &self,
+        var_name: &str,
+        table: &crate::mdl::ast::LookupTable,
+    ) -> GraphicalFunction {
+        // Every syntax reaches here as pairs: the parser splits a legacy
+        // x-then-y list as it reads it (`LookupTable::transform_legacy`).
+        debug_assert!(table.format == crate::mdl::ast::TableFormat::Pairs);
+        let (x_vals, y_vals) = points_in_x_order(table.x_vals.clone(), table.y_vals.clone());
+        // x-scale: use file-specified range if available, otherwise compute from data
+        let x_scale = if let Some(x_range) = table.x_range {
+            GraphicalFunctionScale {
+                min: x_range.0,
+                max: x_range.1,
+            }
+        } else {
+            let x_min = x_vals.iter().cloned().fold(f64::INFINITY, f64::min);
+            let x_max = x_vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            GraphicalFunctionScale {
+                min: x_min,
+                max: x_max,
+            }
+        };
+
+        // y-scale: use file-specified range if available for roundtrip fidelity,
+        // otherwise compute from data points
+        let y_scale = if let Some(y_range) = table.y_range {
+            GraphicalFunctionScale {
+                min: y_range.0,
+                max: y_range.1,
+            }
+        } else {
+            let y_min = y_vals.iter().cloned().fold(f64::INFINITY, f64::min);
+            let y_max = y_vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let y_max = if (y_min - y_max).abs() < f64::EPSILON {
+                y_min + 1.0
+            } else {
+                y_max
+            };
+            GraphicalFunctionScale {
+                min: y_min,
+                max: y_max,
+            }
+        };
+
+        // The table extrapolates when:
+        // 1. table.extrapolate is set in the lookup definition itself
+        // 2. OR `TABXL` is called on the lookup somewhere (`stocks.rs`'s scan).
+        //    `LOOKUP EXTRAPOLATE` is a call's own reading -- it imports as the
+        //    `LOOKUP_EXTRAPOLATE` builtin -- and leaves the table's kind alone.
+        let should_extrapolate =
+            table.extrapolate || self.extrapolate_lookups.contains(&canonical_name(var_name));
+
+        GraphicalFunction {
+            kind: if should_extrapolate {
+                GraphicalFunctionKind::Extrapolate
+            } else {
+                GraphicalFunctionKind::Continuous
+            },
+            x_points: if x_vals.is_empty() {
+                None
+            } else {
+                Some(x_vals)
+            },
+            y_points: y_vals,
+            x_scale,
+            y_scale,
+        }
+    }
+}
+
+/// A lookup's points in ascending x order, as Vensim reads them whatever order
+/// the file lists them in: Vensim DSS's own run of
+/// `lookup2dim[B,E]((2,-3),(1,-7),(0,-1))` in
+/// `test/test-models/tests/subscripted_lookups/output.tab` answers -1 at 0 and
+/// -4 at 0.5, the curve through `(0,-1),(1,-7),(2,-3)`. The project holds the
+/// points in that order, since the engine's lookups search x and XMILE requires
+/// ascending `<xpts>` (1.0 section 4.1.3).
+///
+/// Vensim's documentation says the same of its own storage: "The Input/Output
+/// pairs are always stored in ascending x order" (vensim.com/documentation,
+/// `ref_editing_lookups.html`, on the lookup editor), and the Vensim 5.10b
+/// release notes (`version_5_10b___-_.html`) say "Out of order XY pairs in
+/// Changes files or loaded into the Lookup Editor via Import Vals could cause
+/// unexpected simulation results without issuing any messages. X vals are now
+/// sorted before use." Neither speaks of a lookup written out of order in a
+/// model file; the output above is what settles that.
+///
+/// The sort is stable and compares x as numbers, so points that share an x (a
+/// vertical step, `-0` and `0` included, which the lookups read as one x) keep
+/// the order they are listed in. Which of them Vensim answers with at that x,
+/// and how it orders them when the list is also out of order, is unverified.
+///
+/// Lists of different lengths pair no points and are left as they are for the
+/// compiler to refuse.
+pub(super) fn points_in_x_order(x_vals: Vec<f64>, y_vals: Vec<f64>) -> (Vec<f64>, Vec<f64>) {
+    if x_vals.len() != y_vals.len() || x_vals.windows(2).all(|pair| pair[0] <= pair[1]) {
+        return (x_vals, y_vals);
+    }
+    let mut points: Vec<(f64, f64)> = x_vals.into_iter().zip(y_vals).collect();
+    // A NaN has no numeric order; `total_cmp` places it so the sort is total,
+    // and the compiler refuses the table for it.
+    points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or_else(|| a.0.total_cmp(&b.0)));
+    points.into_iter().unzip()
+}
+
+#[cfg(test)]
+#[path = "lookup_order_tests.rs"]
+mod lookup_order_tests;
+
+/// The canonical key of an element key the converter builds (`a1,B2`, its
+/// parts as the file spells them): what every reader of a datamodel stores
+/// (`CanonicalElementName::from_subscript`, the one owner).
+pub(super) fn canonical_element_key(key: &str) -> String {
+    simlin_base::common::CanonicalElementName::from_subscript(key)
+        .as_str()
+        .to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{convert_mdl, convert_mdl_with_data};
+    use crate::data_provider::DataProvider;
+    use simlin_base::common::Result;
+    use simlin_base::datamodel::{DataSourceKind, Equation, Variable};
+
+    struct ConstantProvider;
+
+    impl DataProvider for ConstantProvider {
+        fn load_data(
+            &self,
+            _file: &str,
+            _tab_or_delimiter: &str,
+            _time_col_or_row: &str,
+            _cell_label: &str,
+        ) -> Result<Vec<(f64, f64)>> {
+            Ok(vec![])
+        }
+
+        fn load_constant(
+            &self,
+            _file: &str,
+            _tab_or_delimiter: &str,
+            _row_label: &str,
+            _col_label: &str,
+        ) -> Result<f64> {
+            Ok(42.0)
+        }
+
+        fn load_lookup(
+            &self,
+            _file: &str,
+            _tab_or_delimiter: &str,
+            _row_label: &str,
+            _col_label: &str,
+        ) -> Result<Vec<(f64, f64)>> {
+            Ok(vec![])
+        }
+
+        fn load_subscript(
+            &self,
+            _file: &str,
+            _tab_or_delimiter: &str,
+            _first_cell: &str,
+            _last_cell: &str,
+        ) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+    }
+
+    #[test]
+    fn test_stock_conversion() {
+        let mdl = "Stock = INTEG(inflow - outflow, 100)
+~ Units
+~ A stock |
+inflow = 10
+~ Units/Time
+~ Inflow rate |
+outflow = 5
+~ Units/Time
+~ Outflow rate |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        // Find the stock
+        let stock = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "stock");
+        assert!(stock.is_some(), "Should have a stock variable");
+
+        if let Some(Variable::Stock(s)) = stock {
+            assert_eq!(s.inflows, vec!["inflow"]);
+            assert_eq!(s.outflows, vec!["outflow"]);
+        } else {
+            panic!("Expected Stock variable");
+        }
+    }
+
+    #[test]
+    fn test_regular_get_direct_constants_preserves_data_source_metadata() {
+        let mdl = "x = GET DIRECT CONSTANTS('data/a.csv', ',', 'B2')
+~ ~|
+\\\\\\---///
+";
+        let provider = ConstantProvider;
+        let result = convert_mdl_with_data(mdl, Some(&provider));
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            assert!(
+                matches!(&a.equation, Equation::Scalar(eq) if eq == "42"),
+                "GET DIRECT CONSTANTS should resolve to scalar equation"
+            );
+            let data_source = a
+                .compat
+                .data_source
+                .as_ref()
+                .expect("GET DIRECT metadata should be preserved in compat.data_source");
+            assert_eq!(data_source.kind, DataSourceKind::Constants);
+            assert_eq!(data_source.file, "data/a.csv");
+            assert_eq!(data_source.tab_or_delimiter, ",");
+            assert_eq!(data_source.row_or_col, "B2");
+            assert_eq!(data_source.cell, "");
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_get_direct_data_source_resolves_file_alias() {
+        let mdl = "x = GET DIRECT CONSTANTS('?data', ',', 'B2')\n\
+~ ~|\n\
+\\\\\\---/// Sketch information - do not modify anything after this line\n\
+V300\n\
+:L<%^E!@\n\
+30:?data=data/a.csv\n";
+        let provider = ConstantProvider;
+        let result = convert_mdl_with_data(mdl, Some(&provider));
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            let data_source = a
+                .compat
+                .data_source
+                .as_ref()
+                .expect("GET DIRECT metadata should be preserved in compat.data_source");
+            assert_eq!(data_source.kind, DataSourceKind::Constants);
+            assert_eq!(
+                data_source.file, "data/a.csv",
+                "file alias '?data' should be resolved to 'data/a.csv' in DataSource metadata"
+            );
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_subscripted_apply_to_all_equation_stays_one_equation() {
+        // Subscripted equations with dimension subscripts are expanded to Arrayed
+        // so that element-specific overrides can be properly merged.
+        let mdl = "DimA: a1, a2, a3
+~ ~|
+x[DimA] = 5
+~ Units
+~ An arrayed constant |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        // Find x
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            // One apply-to-all MDL equation is ONE equation: `x[DimA] = 5`
+            // used to arrive here as three identical `"5"` slots, which is the
+            // same equation written three times and is the form in which a
+            // dimension reference in the RHS cannot resolve (see
+            // `apply_to_all_tests`).
+            match &a.equation {
+                Equation::ApplyToAll(dims, eq) => {
+                    assert_eq!(dims, &["DimA"]);
+                    assert_eq!(eq, "5");
+                }
+                other => panic!("Expected ApplyToAll equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_implicit_equation_creates_lookup() {
+        let mdl = "data
+~ Units
+~ Exogenous data |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        // Find data
+        let data = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "data");
+        assert!(data.is_some(), "Should have data variable");
+
+        if let Some(Variable::Aux(a)) = data {
+            assert!(a.gf.is_some(), "Should have graphical function");
+            let gf = a.gf.as_ref().unwrap();
+            assert_eq!(gf.x_points, Some(vec![0.0, 1.0]));
+            assert_eq!(gf.y_points, vec![1.0, 1.0]);
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_number_list_conversion() {
+        let mdl = "DimA: a1, a2, a3
+~ ~|
+x[DimA] = 1, 2, 3
+~ Units
+~ Array values |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        // Find x
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            match &a.equation {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
+                    assert_eq!(dims, &["DimA"]);
+                    assert_eq!(elements.len(), 3);
+                    assert_eq!(elements[0].0, "a1");
+                    assert_eq!(elements[0].1, "1");
+                    assert_eq!(elements[1].0, "a2");
+                    assert_eq!(elements[1].1, "2");
+                    assert_eq!(elements[2].0, "a3");
+                    assert_eq!(elements[2].1, "3");
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_a_function_of_purging() {
+        // When multiple equations and first is A FUNCTION OF, use the next one
+        let mdl = "x = A FUNCTION OF(y)
+~ ~|
+x = y * 2
+~ Units
+~ Real equation |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        // Find x
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            match &a.equation {
+                Equation::Scalar(eq) => {
+                    assert_eq!(eq, "y * 2");
+                }
+                other => panic!("Expected Scalar equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_multiple_empty_equations_purged() {
+        // Multiple empty equations followed by a real one: use the real one
+        // [EmptyRhs, EmptyRhs, Regular] -> uses Regular
+        let mdl = "x =
+~ ~|
+x =
+~ ~|
+x = 42
+~ Units
+~ Real equation |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            match &a.equation {
+                Equation::Scalar(eq) => {
+                    assert_eq!(eq, "42", "Should use the real equation, not empty");
+                }
+                other => panic!("Expected Scalar equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_empty_then_afo_then_regular() {
+        // [EmptyRhs, AFO, Regular] -> uses Regular
+        let mdl = "x =
+~ ~|
+x = A FUNCTION OF(y)
+~ ~|
+x = 42
+~ Units
+~ Real equation |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            match &a.equation {
+                Equation::Scalar(eq) => {
+                    assert_eq!(eq, "42", "Should use the real equation");
+                }
+                other => panic!("Expected Scalar equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_regular_equations_first_wins() {
+        // [Regular1, Regular2] -> uses Regular1 (no purge needed)
+        let mdl = "x = 1
+~ Units
+~ First |
+x = 2
+~ Units
+~ Second |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            match &a.equation {
+                Equation::Scalar(eq) => {
+                    assert_eq!(eq, "1", "First regular equation should win");
+                }
+                other => panic!("Expected Scalar equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_2d_number_list_conversion() {
+        // 2D array: x[DimA, DimB] = 1, 2, 3, 4
+        // with DimA: a1, a2 and DimB: b1, b2
+        // -> [(a1,b1)=1, (a1,b2)=2, (a2,b1)=3, (a2,b2)=4] (row-major order)
+        let mdl = "DimA: a1, a2
+~ ~|
+DimB: b1, b2
+~ ~|
+x[DimA, DimB] = 1, 2, 3, 4
+~ Units
+~ 2D array values |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            match &a.equation {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
+                    assert_eq!(dims, &["DimA", "DimB"]);
+                    assert_eq!(elements.len(), 4, "Should have 4 elements");
+                    // Check row-major order: a1,b1=1, a1,b2=2, a2,b1=3, a2,b2=4
+                    // Keys use comma without space to match compiler expectations
+                    assert_eq!(elements[0].0, "a1,b1");
+                    assert_eq!(elements[0].1, "1");
+                    assert_eq!(elements[1].0, "a1,b2");
+                    assert_eq!(elements[1].1, "2");
+                    assert_eq!(elements[2].0, "a2,b1");
+                    assert_eq!(elements[2].1, "3");
+                    assert_eq!(elements[3].0, "a2,b2");
+                    assert_eq!(elements[3].1, "4");
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_1d_number_list_still_works() {
+        // 1D: x[DimA] = 1, 2, 3 with DimA: a1, a2, a3 -> [(a1, 1), (a2, 2), (a3, 3)]
+        let mdl = "DimA: a1, a2, a3
+~ ~|
+x[DimA] = 1, 2, 3
+~ Units
+~ Array values |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        if let Some(Variable::Aux(a)) = x {
+            match &a.equation {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
+                    assert_eq!(dims, &["DimA"]);
+                    assert_eq!(elements.len(), 3);
+                    assert_eq!(elements[0].0, "a1");
+                    assert_eq!(elements[0].1, "1");
+                    assert_eq!(elements[1].0, "a2");
+                    assert_eq!(elements[1].1, "2");
+                    assert_eq!(elements[2].0, "a3");
+                    assert_eq!(elements[2].1, "3");
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_single_element_specific_equation() {
+        // P1: A single element-specific equation like x[a1] = 5 should produce
+        // an Arrayed equation, not ApplyToAll with "a1" as a dimension.
+        let mdl = "DimA: a1, a2, a3
+~ ~|
+x[a1] = 5
+~ Units
+~ Single element definition |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            match &a.equation {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
+                    assert_eq!(dims, &["DimA"]);
+                    assert_eq!(elements.len(), 1);
+                    assert_eq!(elements[0].0, "a1");
+                    assert_eq!(elements[0].1, "5");
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_element_override_with_apply_to_all() {
+        // P2: Apply-to-all with element-specific overrides should merge correctly.
+        // x[DimA] = 1 (default), x[a1] = 2 (override) -> a1=2, a2=1, a3=1
+        let mdl = "DimA: a1, a2, a3
+~ ~|
+x[DimA] = 1
+~ Units
+~ Default |
+x[a1] = 2
+~ Units
+~ Override for a1 |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            match &a.equation {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
+                    assert_eq!(dims, &["DimA"]);
+                    assert_eq!(elements.len(), 3);
+
+                    // Find each element
+                    let a1_eq = elements.iter().find(|(k, _, _, _)| k == "a1");
+                    let a2_eq = elements.iter().find(|(k, _, _, _)| k == "a2");
+                    let a3_eq = elements.iter().find(|(k, _, _, _)| k == "a3");
+
+                    assert!(a1_eq.is_some(), "Should have a1");
+                    assert!(a2_eq.is_some(), "Should have a2");
+                    assert!(a3_eq.is_some(), "Should have a3");
+
+                    // a1 should be overridden to "2"
+                    assert_eq!(a1_eq.unwrap().1, "2", "a1 should be overridden to 2");
+                    // a2 and a3 should have default "1"
+                    assert_eq!(a2_eq.unwrap().1, "1", "a2 should have default 1");
+                    assert_eq!(a3_eq.unwrap().1, "1", "a3 should have default 1");
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_mixed_element_dimension_subscripts() {
+        // High: Mixed element/dimension subscripts like x[a1, DimB] should expand.
+        let mdl = "DimA: a1, a2
+~ ~|
+DimB: b1, b2
+~ ~|
+x[a1, DimB] = 5
+~ Units
+~ Element in first position, dimension in second |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            match &a.equation {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
+                    assert_eq!(dims, &["DimA", "DimB"]);
+                    // a1 * (b1, b2) = 2 elements
+                    assert_eq!(elements.len(), 2);
+
+                    // Elements should be "a1,b1" and "a1,b2"
+                    let keys: Vec<&str> = elements.iter().map(|(k, _, _, _)| k.as_str()).collect();
+                    assert!(keys.contains(&"a1,b1"), "Should have a1,b1");
+                    assert!(keys.contains(&"a1,b2"), "Should have a1,b2");
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_number_list_dim_then_fixed_element() {
+        // v[DimA, B1] = 1, 2, 3: DimA varies (A1,A2,A3), B1 is fixed.
+        // Values map to (A1,B1)=1, (A2,B1)=2, (A3,B1)=3.
+        let mdl = "DimA: A1, A2, A3
+~ ~|
+DimB: B1, B2, B3
+~ ~|
+v[DimA, B1] = 1, 2, 3
+~ ~|
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let v = project.models[0]
+            .variables
+            .iter()
+            .find(|var| var.get_ident() == "v");
+        assert!(v.is_some(), "Should have v variable");
+
+        if let Some(Variable::Aux(a)) = v {
+            match &a.equation {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
+                    // B1 is an element of DimB, so the dims list contains the parent: DimB
+                    assert_eq!(dims, &["DimA", "DimB"]);
+                    assert_eq!(elements.len(), 3);
+                    assert_eq!(elements[0].0, "a1,b1");
+                    assert_eq!(elements[0].1, "1");
+                    assert_eq!(elements[1].0, "a2,b1");
+                    assert_eq!(elements[1].1, "2");
+                    assert_eq!(elements[2].0, "a3,b1");
+                    assert_eq!(elements[2].1, "3");
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_number_list_fixed_element_then_dim() {
+        // w[A1, DimB] = 1, 2, 3: A1 is fixed, DimB varies (B1,B2,B3).
+        // Values map to (A1,B1)=1, (A1,B2)=2, (A1,B3)=3.
+        let mdl = "DimA: A1, A2, A3
+~ ~|
+DimB: B1, B2, B3
+~ ~|
+w[A1, DimB] = 1, 2, 3
+~ ~|
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let w = project.models[0]
+            .variables
+            .iter()
+            .find(|var| var.get_ident() == "w");
+        assert!(w.is_some(), "Should have w variable");
+
+        if let Some(Variable::Aux(a)) = w {
+            match &a.equation {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
+                    // A1 is an element of DimA, so the dims list contains the parent: DimA
+                    assert_eq!(dims, &["DimA", "DimB"]);
+                    assert_eq!(elements.len(), 3);
+                    assert_eq!(elements[0].0, "a1,b1");
+                    assert_eq!(elements[0].1, "1");
+                    assert_eq!(elements[1].0, "a1,b2");
+                    assert_eq!(elements[1].1, "2");
+                    assert_eq!(elements[2].0, "a1,b3");
+                    assert_eq!(elements[2].1, "3");
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_active_initial_scalar() {
+        // Scalar ACTIVE INITIAL should have equation and initial_equation fields
+        let mdl = "x = ACTIVE INITIAL(y * 2, 100)
+~ Units
+~ Variable with active initial |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            match &a.equation {
+                Equation::Scalar(eq) => {
+                    assert_eq!(eq, "y * 2", "Equation should be the first argument");
+                    assert_eq!(
+                        a.compat.active_initial.as_deref(),
+                        Some("100"),
+                        "Initial equation should be in compat.active_initial"
+                    );
+                }
+                other => panic!("Expected Scalar equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_active_initial_apply_to_all() {
+        // Apply-to-all ACTIVE INITIAL: single equation, no per-element substitution.
+        // All elements get the same expression with dimension names preserved.
+        let mdl = "DimA: a1, a2, a3
+~ ~|
+x[DimA] = ACTIVE INITIAL(y[DimA] * 2, 100)
+~ Units
+~ Array with active initial |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            match &a.equation {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
+                    assert_eq!(dims, &["DimA"]);
+                    assert_eq!(elements.len(), 3);
+                    // Single apply-to-all: all elements have the same expression
+                    // with dimension name preserved (no per-element substitution).
+                    for (key, eq, initial_eq, _) in elements {
+                        assert!(
+                            ["a1", "a2", "a3"].contains(&key.as_str()),
+                            "Unexpected key: {}",
+                            key
+                        );
+                        assert_eq!(
+                            eq, "y[DimA] * 2",
+                            "Apply-to-all should preserve dimension name for {}",
+                            key
+                        );
+                        assert_eq!(
+                            initial_eq.as_deref(),
+                            Some("100"),
+                            "Initial equation should be the second argument for {}",
+                            key
+                        );
+                    }
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_active_initial_element_specific() {
+        // Element-specific ACTIVE INITIAL equations
+        let mdl = "DimA: a1, a2, a3
+~ ~|
+x[a1] = ACTIVE INITIAL(y, 10)
+~ Units
+~ Element specific with active initial |
+x[a2] = ACTIVE INITIAL(y * 2, 20)
+~ Units
+~ Another element |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            match &a.equation {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
+                    assert_eq!(dims, &["DimA"]);
+                    assert_eq!(elements.len(), 2, "Should have 2 elements");
+
+                    let a1_eq = elements.iter().find(|(k, _, _, _)| k == "a1");
+                    let a2_eq = elements.iter().find(|(k, _, _, _)| k == "a2");
+
+                    assert!(a1_eq.is_some(), "Should have a1");
+                    assert!(a2_eq.is_some(), "Should have a2");
+
+                    let (_, a1_expr, a1_init, _) = a1_eq.unwrap();
+                    assert_eq!(a1_expr, "y");
+                    assert_eq!(a1_init.as_deref(), Some("10"));
+
+                    let (_, a2_expr, a2_init, _) = a2_eq.unwrap();
+                    assert_eq!(a2_expr, "y * 2");
+                    assert_eq!(a2_init.as_deref(), Some("20"));
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_range_only_units_produces_dimensionless() {
+        let mdl = "x = 5\n~ [0, 100]\n~ Variable with range-only units |\n\\\\\\---///\n";
+        let result = convert_mdl(mdl);
+        let project = result.unwrap();
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        if let Some(Variable::Aux(a)) = x {
+            assert_eq!(a.units.as_deref(), Some("1"));
+        } else {
+            panic!("Expected Aux");
+        }
+    }
+
+    #[test]
+    fn test_units_with_expr_and_range_keeps_expr() {
+        let mdl = "x = 5\n~ Widgets [0, 100]\n~ Variable with units and range |\n\\\\\\---///\n";
+        let result = convert_mdl(mdl);
+        let project = result.unwrap();
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        if let Some(Variable::Aux(a)) = x {
+            assert_eq!(a.units.as_deref(), Some("Widgets"));
+        } else {
+            panic!("Expected Aux");
+        }
+    }
+
+    #[test]
+    fn test_arrayed_variable_range_only_units() {
+        let mdl = "DimA: A1, A2 ~~|
+x[DimA] = 5
+~ [0, 100]
+~ Arrayed variable with range-only units |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        let project = result.unwrap();
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        if let Some(Variable::Aux(a)) = x {
+            assert_eq!(a.units.as_deref(), Some("1"));
+        } else {
+            panic!("Expected Aux");
+        }
+    }
+
+    #[test]
+    fn test_units_from_real_equation_not_afo_placeholder() {
+        // When first equation is A FUNCTION OF (no units) and second has units,
+        // units should come from the second equation.
+        let mdl = "x = A FUNCTION OF(y)
+~ ~|
+x = y * 2
+~ Widgets
+~ Real equation with units |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        let project = result.unwrap();
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        if let Some(Variable::Aux(a)) = x {
+            // Units should come from the real equation, not the AFO placeholder
+            assert_eq!(a.units.as_deref(), Some("Widgets"));
+            // Verify we also got the correct equation
+            assert!(matches!(&a.equation, Equation::Scalar(eq) if eq == "y * 2"));
+        } else {
+            panic!("Expected Aux");
+        }
+    }
+
+    #[test]
+    fn an_empty_right_hand_side_is_no_equation() {
+        // `x =` with nothing after it defines nothing; a number made up for it
+        // would run a model that has no equation for x.
+        let mdl = "x =
+~ Units
+~ Empty equation |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            match &a.equation {
+                Equation::Scalar(eq) => {
+                    assert_eq!(eq, "", "an empty right-hand side is no equation");
+                }
+                other => panic!("Expected Scalar equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn an_empty_subscripted_right_hand_side_is_no_equation() {
+        let mdl = "DimA: a1, a2
+~ ~|
+x[DimA] =
+~ Units
+~ Empty subscripted equation |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            match &a.equation {
+                Equation::ApplyToAll(dims, eq) => {
+                    assert_eq!(dims, &["DimA"]);
+                    assert_eq!(eq, "", "an empty right-hand side is no equation");
+                }
+                other => panic!("Expected ApplyToAll equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_units_from_real_equation_when_afo_has_units() {
+        // When first equation is A FUNCTION OF WITH units and second also has units,
+        // units should come from the second (real) equation since that's what's selected.
+        let mdl = "x = A FUNCTION OF(y)
+~ OtherUnits
+~ AFO with units |
+x = y * 2
+~ Widgets
+~ Real equation with units |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        let project = result.unwrap();
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        if let Some(Variable::Aux(a)) = x {
+            // Units come from the selected equation (the real one, not AFO)
+            assert_eq!(a.units.as_deref(), Some("Widgets"));
+        } else {
+            panic!("Expected Aux");
+        }
+    }
+
+    #[test]
+    fn test_lookup_only_scalar_emits_empty_equation() {
+        // A scalar variable defined only with a lookup table imports as the
+        // canonical lookup-only form: an empty equation + a gf (issue #606).
+        let mdl = "x( (0,0),(1,1) )
+~ ~|
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            match &a.equation {
+                Equation::Scalar(eq) => {
+                    assert_eq!(
+                        eq, "",
+                        "lookup-only variable should have an empty equation (canonical form)"
+                    );
+                }
+                other => panic!("Expected Scalar equation, got {:?}", other),
+            }
+            assert!(a.gf.is_some(), "Should have graphical function");
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_lookup_only_arrayed_emits_empty_equation() {
+        // An arrayed variable with element-specific lookups imports each element
+        // as the canonical lookup-only form: an empty equation + a gf (#606).
+        let mdl = "DimA: a1, a2
+~ ~|
+x[a1]( (0,0),(1,1) )
+~ ~|
+x[a2]( (0,0),(2,2) )
+~ ~|
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            match &a.equation {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
+                    assert_eq!(dims, &["DimA"]);
+                    assert_eq!(elements.len(), 2);
+                    for (_, eq, _, _) in elements {
+                        assert_eq!(
+                            eq, "",
+                            "lookup-only arrayed element should have an empty equation"
+                        );
+                    }
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_element_specific_metadata_from_last_equation() {
+        // In Vensim, only the last element-specific equation carries units and docs.
+        // Earlier equations use ~~| (no units, no docs).
+        let mdl = "DimA: a1, a2, a3
+~ ~|
+x[a1] = 1
+~ ~|
+x[a2] = 2
+~ ~|
+x[a3] = 3
+~ percent/year
+~ Annual reduction rate |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            assert_eq!(
+                a.documentation, "Annual reduction rate",
+                "Documentation should come from the last equation"
+            );
+            assert_eq!(
+                a.units.as_deref(),
+                Some("percent/year"),
+                "Units should come from the last equation"
+            );
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_apply_to_all_preserves_dimension_names() {
+        // A single apply-to-all equation should NOT substitute dimension names.
+        // All elements get the same expression with the dimension name preserved.
+        let mdl = "DimA: a1, a2
+~ ~|
+x[DimA] = y[DimA] * 2
+~ Units
+~ Apply-to-all |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            match &a.equation {
+                Equation::ApplyToAll(dims, eq) => {
+                    assert_eq!(dims, &["DimA"]);
+                    assert_eq!(
+                        eq, "y[DimA] * 2",
+                        "Apply-to-all should preserve dimension names"
+                    );
+                }
+                other => panic!("Expected ApplyToAll equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_per_element_dimension_substitution() {
+        // When there are multiple equations (element-specific + apply-to-all),
+        // per-element substitution kicks in for the apply-to-all equation.
+        let mdl = "DimA: a1, a2, a3
+~ ~|
+x[DimA] = y[DimA] * 2
+~ ~|
+x[a1] = 10
+~ Units
+~ Override for a1 |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            match &a.equation {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
+                    assert_eq!(dims, &["DimA"]);
+                    assert_eq!(elements.len(), 3);
+
+                    let find_eq = |key: &str| -> String {
+                        elements
+                            .iter()
+                            .find(|(k, _, _, _)| k == key)
+                            .map(|(_, eq, _, _)| eq.clone())
+                            .unwrap_or_else(|| panic!("Should have key {}", key))
+                    };
+
+                    // a1 is overridden
+                    assert_eq!(find_eq("a1"), "10");
+                    // a2 and a3 get substituted from the apply-to-all equation
+                    assert_eq!(find_eq("a2"), "y[a2] * 2");
+                    assert_eq!(find_eq("a3"), "y[a3] * 2");
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_per_element_2d_substitution() {
+        // 2D per-element substitution: triggered by having multiple equations.
+        // Both dimension references are substituted when element-specific
+        // overrides are present.
+        let mdl = "DimA: a1, a2
+~ ~|
+DimB: b1, b2
+~ ~|
+x[DimA, DimB] = y[DimA, DimB] + z[DimA]
+~ ~|
+x[a1, b1] = 99
+~ Units
+~ Override |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            match &a.equation {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
+                    assert_eq!(dims, &["DimA", "DimB"]);
+                    assert_eq!(elements.len(), 4);
+
+                    let find_eq = |key: &str| -> String {
+                        elements
+                            .iter()
+                            .find(|(k, _, _, _)| k == key)
+                            .map(|(_, eq, _, _)| eq.clone())
+                            .unwrap_or_else(|| panic!("Should have key {}", key))
+                    };
+
+                    // a1,b1 is overridden
+                    assert_eq!(find_eq("a1,b1"), "99");
+                    // Other elements get substituted
+                    assert_eq!(find_eq("a1,b2"), "y[a1, b2] + z[a1]");
+                    assert_eq!(find_eq("a2,b1"), "y[a2, b1] + z[a2]");
+                    assert_eq!(find_eq("a2,b2"), "y[a2, b2] + z[a2]");
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_subrange_positional_resolution() {
+        // When equations span multiple subranges, per-element substitution is triggered.
+        // The RHS references to sibling subranges are resolved positionally.
+        // upper: layer1, layer2, layer3 (subrange of layers)
+        // lower: layer2, layer3, layer4 (subrange of layers)
+        // bottom: layer4 (subrange of layers)
+        // x[upper] = y[upper] - y[lower]  (3 elements)
+        // x[bottom] = 0                   (1 element, triggers multi-eq substitution)
+        let mdl = "layers: layer1, layer2, layer3, layer4
+~ ~|
+upper: layer1, layer2, layer3
+~ ~|
+lower: layer2, layer3, layer4
+~ ~|
+bottom: layer4
+~ ~|
+x[upper] = y[upper] - y[lower]
+~ ~|
+x[bottom] = 0
+~ Units
+~ Subrange resolution |
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            match &a.equation {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
+                    assert_eq!(dims, &["layers"]);
+                    assert_eq!(elements.len(), 4);
+
+                    let find_eq = |key: &str| -> String {
+                        elements
+                            .iter()
+                            .find(|(k, _, _, _)| k == key)
+                            .map(|(_, eq, _, _)| eq.clone())
+                            .unwrap_or_else(|| panic!("Should have key {}", key))
+                    };
+
+                    // upper[0]=layer1 -> lower[0]=layer2
+                    assert_eq!(find_eq("layer1"), "y[layer1] - y[layer2]");
+                    // upper[1]=layer2 -> lower[1]=layer3
+                    assert_eq!(find_eq("layer2"), "y[layer2] - y[layer3]");
+                    // upper[2]=layer3 -> lower[2]=layer4
+                    assert_eq!(find_eq("layer3"), "y[layer3] - y[layer4]");
+                    // bottom equation
+                    assert_eq!(find_eq("layer4"), "0");
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_subrange_equations_produce_arrayed() {
+        // Variables with equations on different subranges of the same parent dimension
+        // should produce an Arrayed equation with the parent dimension name
+        let mdl = "layers: layer1, layer2, layer3, layer4
+~ ~|
+upper: layer1, layer2, layer3
+~ ~|
+bottom: layer4
+~ ~|
+x[upper] = 1
+~ ~|
+x[bottom] = 2
+~ ~|
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            match &a.equation {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
+                    assert_eq!(
+                        dims,
+                        &["layers"],
+                        "Dimension should be parent 'layers', not subrange names"
+                    );
+                    assert_eq!(elements.len(), 4, "Should have all 4 layer elements");
+                    // layer1, layer2, layer3 from upper (=1), layer4 from bottom (=2)
+                    for (key, eq, _, _) in elements {
+                        if key == "layer4" {
+                            assert_eq!(eq, "2");
+                        } else {
+                            assert_eq!(eq, "1");
+                        }
+                    }
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_graphical_function_y_scale_from_explicit_range() {
+        // When the MDL source specifies an explicit y_range via [(xmin,ymin)-(xmax,ymax)],
+        // preserve those bounds for roundtrip fidelity instead of recomputing from data.
+        let mdl = "lookup_var(\
+            [(0,0)-(2,5)],(0,0.5),(1,1.36),(2,0.8))
+~ ~|
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let var = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "lookup_var");
+        assert!(var.is_some(), "Should have lookup_var");
+
+        if let Some(Variable::Aux(a)) = var {
+            let gf = a.gf.as_ref().expect("Should have graphical function");
+            // x-scale uses file range
+            assert_eq!(gf.x_scale.min, 0.0);
+            assert_eq!(gf.x_scale.max, 2.0);
+            // y-scale uses file-specified range, not computed from data
+            assert_eq!(gf.y_scale.min, 0.0);
+            assert_eq!(gf.y_scale.max, 5.0);
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_graphical_function_y_scale_all_same_with_explicit_range() {
+        // When explicit y_range is present, it takes precedence even if min==max.
+        let mdl = "zero_lookup(\
+            [(0,0)-(2,0)],(0,0),(1,0),(2,0))
+~ ~|
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let var = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "zero_lookup");
+        assert!(var.is_some(), "Should have zero_lookup");
+
+        if let Some(Variable::Aux(a)) = var {
+            let gf = a.gf.as_ref().expect("Should have graphical function");
+            // Explicit y_range [0,0] is preserved as-is
+            assert_eq!(gf.y_scale.min, 0.0);
+            assert_eq!(gf.y_scale.max, 0.0);
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_graphical_function_y_scale_computed_from_data_when_no_explicit_range() {
+        // When no explicit y_range is specified (e.g. WITH LOOKUP without range prefix),
+        // y_scale should be computed from the actual data points.
+        let mdl = "y = WITH LOOKUP(Time, ((0,0.5),(1,1.36),(2,0.8)))
+~ ~|
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let var = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "y");
+        assert!(var.is_some(), "Should have y variable");
+
+        if let Some(Variable::Aux(a)) = var {
+            let gf = a.gf.as_ref().expect("Should have graphical function");
+            // No explicit range, so x-scale and y-scale are computed from data
+            assert_eq!(gf.x_scale.min, 0.0);
+            assert_eq!(gf.x_scale.max, 2.0);
+            assert_eq!(gf.y_scale.min, 0.5);
+            assert_eq!(gf.y_scale.max, 1.36);
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_graphical_function_y_scale_all_same_fallback_no_explicit_range() {
+        // When no explicit y_range and all y-values are identical,
+        // ymax should be ymin+1 to avoid a degenerate range.
+        let mdl = "y = WITH LOOKUP(Time, ((0,0),(1,0),(2,0)))
+~ ~|
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let var = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "y");
+        assert!(var.is_some(), "Should have y variable");
+
+        if let Some(Variable::Aux(a)) = var {
+            let gf = a.gf.as_ref().expect("Should have graphical function");
+            assert_eq!(gf.y_scale.min, 0.0);
+            assert_eq!(gf.y_scale.max, 1.0); // 0 + 1 = 1 (degenerate range fallback)
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_data_equation_subscripted_per_element() {
+        // A Data equation (:=) with per-element subscripts should produce
+        // non-empty equation strings through build_equation_rhs_with_context.
+        let mdl = "DimA: a1, a2
+~ ~|
+x[a1] := y[a1] * 2
+~ ~|
+x[a2] := y[a2] * 3
+~ ~|
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            match &a.equation {
+                Equation::Arrayed(dims, elements, _default_eq, _) => {
+                    assert_eq!(dims, &["DimA"]);
+                    assert_eq!(elements.len(), 2);
+                    let a1_eq = elements.iter().find(|(k, _, _, _)| k == "a1");
+                    let a2_eq = elements.iter().find(|(k, _, _, _)| k == "a2");
+                    assert!(a1_eq.is_some(), "Should have a1 element");
+                    assert!(a2_eq.is_some(), "Should have a2 element");
+                    assert!(
+                        !a1_eq.unwrap().1.is_empty(),
+                        "a1 equation should not be empty"
+                    );
+                    assert!(
+                        !a2_eq.unwrap().1.is_empty(),
+                        "a2 equation should not be empty"
+                    );
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_except_basic_single_element() {
+        // g[DimA] :EXCEPT: [A1] = 7 means A2 and A3 get "7", A1 gets its own equation.
+        // g[A1] = 10 is the override.
+        let mdl = "DimA: A1, A2, A3
+~ ~|
+g[DimA] :EXCEPT: [A1] = 7 ~~|
+g[A1] = 10
+~ ~|
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let g = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "g");
+        assert!(g.is_some(), "Should have g variable");
+
+        if let Some(Variable::Aux(a)) = g {
+            match &a.equation {
+                Equation::Arrayed(dims, elements, default_eq, _) => {
+                    assert_eq!(dims, &["DimA"]);
+                    assert!(
+                        default_eq.is_some(),
+                        "Should have default_equation from EXCEPT"
+                    );
+                    assert_eq!(default_eq.as_deref(), Some("7"));
+
+                    let find_eq = |key: &str| -> String {
+                        elements
+                            .iter()
+                            .find(|(k, _, _, _)| k == key)
+                            .map(|(_, eq, _, _)| eq.clone())
+                            .unwrap_or_else(|| panic!("Should have key {}", key))
+                    };
+
+                    // A2 and A3 follow the default, as the file writes them.
+                    assert_eq!(elements.len(), 1);
+                    assert_eq!(find_eq("a1"), "10");
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_except_with_subrange() {
+        // h[DimA] :EXCEPT: [SubA] = 8 means A1 gets "8", SubA (A2, A3) are excepted.
+        // No explicit overrides for SubA elements.
+        let mdl = "DimA: A1, A2, A3
+~ ~|
+SubA: A2, A3
+~ ~|
+h[DimA] :EXCEPT: [SubA] = 8 ~~|
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let h = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "h");
+        assert!(h.is_some(), "Should have h variable");
+
+        if let Some(Variable::Aux(a)) = h {
+            match &a.equation {
+                Equation::Arrayed(dims, elements, default_eq, _) => {
+                    assert_eq!(dims, &["DimA"]);
+                    assert_eq!(default_eq.as_deref(), Some("8"));
+                    // Only A1 should have the default equation.
+                    // A2 and A3 are excepted and have no overrides, so only A1 is present.
+                    assert_eq!(elements.len(), 1);
+                    assert_eq!(elements[0].0, "a1");
+                    assert_eq!(elements[0].1, "8");
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_except_with_dimension_reference_substitution() {
+        // k[DimA] :EXCEPT: [A1] = a[DimA] + 1
+        // k[A1] = 10
+        // Non-excepted elements (A2, A3) should get per-element substituted equations.
+        let mdl = "DimA: A1, A2, A3
+~ ~|
+k[DimA] :EXCEPT: [A1] = a[DimA] + 1 ~~|
+k[A1] = 10
+~ ~|
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let k = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "k");
+        assert!(k.is_some(), "Should have k variable");
+
+        if let Some(Variable::Aux(a)) = k {
+            match &a.equation {
+                Equation::Arrayed(dims, elements, default_eq, _) => {
+                    assert_eq!(dims, &["DimA"]);
+                    // default_equation captures the unsubstituted form
+                    assert!(default_eq.is_some());
+
+                    let find_eq = |key: &str| -> String {
+                        elements
+                            .iter()
+                            .find(|(k, _, _, _)| k == key)
+                            .map(|(_, eq, _, _)| eq.clone())
+                            .unwrap_or_else(|| panic!("Should have key {}", key))
+                    };
+
+                    assert_eq!(elements.len(), 3);
+                    assert_eq!(find_eq("a1"), "10");
+                    assert_eq!(find_eq("a2"), "a[A2] + 1");
+                    assert_eq!(find_eq("a3"), "a[A3] + 1");
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_except_2d() {
+        // p[DimA, DimC] :EXCEPT: [A1, C1] = 10
+        // Except (A1,C1), all other 2D combinations get "10".
+        let mdl = "DimA: A1, A2, A3
+~ ~|
+DimC: C1, C2, C3
+~ ~|
+p[DimA, DimC] :EXCEPT: [A1, C1] = 10 ~~|
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let p = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "p");
+        assert!(p.is_some(), "Should have p variable");
+
+        if let Some(Variable::Aux(a)) = p {
+            match &a.equation {
+                Equation::Arrayed(dims, elements, default_eq, _) => {
+                    assert_eq!(dims, &["DimA", "DimC"]);
+                    assert_eq!(default_eq.as_deref(), Some("10"));
+                    // 3x3=9 combinations, minus 1 excepted = 8 elements
+                    assert_eq!(elements.len(), 8);
+                    // A1,C1 should NOT be in the element list
+                    assert!(
+                        !elements.iter().any(|(k, _, _, _)| k == "A1,C1"),
+                        "A1,C1 should be excluded by EXCEPT"
+                    );
+                    // All present elements should have equation "10"
+                    for (_, eq, _, _) in elements {
+                        assert_eq!(eq, "10");
+                    }
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_except_subrange_with_override() {
+        // s[A3] = 13; s[SubA] :EXCEPT: [A3] = 14
+        // SubA = {A2, A3}. EXCEPT [A3] means s[A2] = 14. s[A3] = 13 from the
+        // override. The equations define SubA's elements and no others, so s
+        // is over SubA: over DimA its default would define A1 too, which no
+        // equation of the file does.
+        let mdl = "DimA: A1, A2, A3
+~ ~|
+SubA: A2, A3
+~ ~|
+s[A3] = 13 ~~|
+s[SubA] :EXCEPT: [A3] = 14
+~ ~|
+\\\\\\---///
+";
+        let result = convert_mdl(mdl);
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let s = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "s");
+        assert!(s.is_some(), "Should have s variable");
+
+        if let Some(Variable::Aux(a)) = s {
+            match &a.equation {
+                Equation::Arrayed(dims, elements, default_eq, _) => {
+                    assert_eq!(dims, &["SubA"]);
+                    assert_eq!(default_eq.as_deref(), Some("14"));
+
+                    let find_eq = |key: &str| -> String {
+                        elements
+                            .iter()
+                            .find(|(k, _, _, _)| k == key)
+                            .map(|(_, eq, _, _)| eq.clone())
+                            .unwrap_or_else(|| panic!("Should have key {}", key))
+                    };
+
+                    // s[A3] = 13 (explicit override); s[A2] follows the
+                    // EXCEPT default, 14.
+                    assert_eq!(find_eq("a3"), "13");
+                    assert_eq!(elements.len(), 1);
+                }
+                other => panic!("Expected Arrayed equation, got {:?}", other),
+            }
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+
+    #[test]
+    fn test_arrayed_get_direct_constants_preserves_data_source() {
+        let mdl = "DimA: a1, a2, a3\n\
+                    ~ ~|\n\
+                    x[DimA] = GET DIRECT CONSTANTS('data/a.csv', ',', 'B2')\n\
+                    ~ ~|\n\
+                    \\\\\\---///\n";
+        let provider = ConstantProvider;
+        let result = convert_mdl_with_data(mdl, Some(&provider));
+        assert!(result.is_ok(), "Conversion should succeed: {:?}", result);
+        let project = result.unwrap();
+
+        let x = project.models[0]
+            .variables
+            .iter()
+            .find(|v| v.get_ident() == "x");
+        assert!(x.is_some(), "Should have x variable");
+
+        if let Some(Variable::Aux(a)) = x {
+            assert!(
+                matches!(&a.equation, Equation::Arrayed(..)),
+                "Expected Arrayed equation"
+            );
+            let data_source = a
+                .compat
+                .data_source
+                .as_ref()
+                .expect("Arrayed GET DIRECT should preserve data_source in compat");
+            assert_eq!(data_source.kind, DataSourceKind::Constants);
+            assert_eq!(data_source.file, "data/a.csv");
+            assert_eq!(data_source.tab_or_delimiter, ",");
+        } else {
+            panic!("Expected Aux variable");
+        }
+    }
+}

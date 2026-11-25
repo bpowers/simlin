@@ -10,8 +10,8 @@
 
 use std::io;
 
-use simlin_engine::datamodel;
-use simlin_engine::json as ejson;
+use simlin_base::datamodel;
+use simlin_formats::json as ejson;
 use simlin_mcp::access::FileSystemAccess;
 use simlin_mcp_core::access::ProjectAccess;
 use simlin_mcp_core::errors::AccessError;

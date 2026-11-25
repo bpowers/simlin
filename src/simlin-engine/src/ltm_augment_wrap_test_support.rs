@@ -17,8 +17,8 @@
 //! resolves the parent's private items.
 
 use super::*;
-use crate::common::IdentSet;
 use crate::db::ltm_ir::OccurrenceRef;
+use simlin_base::common::IdentSet;
 
 /// Reconstruct the occurrence-IR stream ([`OccurrenceSite`]s) for one target
 /// equation's parsed `Expr0`, for the `#[cfg(test)]` wrap unit tests
@@ -40,7 +40,7 @@ pub(crate) fn build_wrap_test_occurrences(
     deps: &IdentSet<Ident<Canonical>>,
     source_dim_elements: &[Vec<String>],
     iter_ctx: Option<&IteratedDimCtx<'_>>,
-    dim_ctx: Option<&crate::dimensions::DimensionsContext>,
+    dim_ctx: Option<&simlin_base::dimensions::DimensionsContext>,
 ) -> Vec<OccurrenceSite> {
     let mut recorded = deps.clone();
     recorded.insert(live_source.clone());
@@ -74,14 +74,14 @@ pub(crate) fn test_occurrences_for_var(
     from: &Ident<Canonical>,
     source_dim_elements: &[Vec<String>],
 ) -> Vec<OccurrenceSite> {
-    use crate::ast::Ast;
+    use simlin_base::ast::Ast;
     let recorded: IdentSet<Ident<Canonical>> = std::iter::once(from.clone()).collect();
     let mut out = Vec::new();
     let Some(ast) = to_var.ast() else {
         return out;
     };
-    let walk_slot = |expr: &crate::ast::Expr2, slot: u16, out: &mut Vec<OccurrenceSite>| {
-        let e0 = crate::patch::expr2_to_expr0(expr);
+    let walk_slot = |expr: &simlin_base::ast::Expr2, slot: u16, out: &mut Vec<OccurrenceSite>| {
+        let e0 = simlin_base::ast::expr2_to_expr0(expr);
         let mut path = vec![slot];
         walk_wrap_test_occurrences(
             &e0,
@@ -130,10 +130,10 @@ pub(crate) fn live_source_occurrence_axis(
     i: usize,
     source_dim_elements: &[Vec<String>],
     iter_ctx: Option<&IteratedDimCtx<'_>>,
-    dim_ctx: Option<&crate::dimensions::DimensionsContext>,
+    dim_ctx: Option<&simlin_base::dimensions::DimensionsContext>,
 ) -> OccurrenceAxis {
     if let (Some(ic), IndexExpr0::Expr(Expr0::Var(name, _))) = (iter_ctx, idx) {
-        let d = crate::canonicalize(name.as_str()).into_owned();
+        let d = simlin_base::canonicalize(name.as_str()).into_owned();
         if ic.target_iterated_dims.iter().any(|t| t == &d) {
             // A target-iterated dimension NAME. It is `Iterated` when it lines up
             // with the source's axis at this position, and `MismatchedIterated`
@@ -162,9 +162,10 @@ pub(crate) fn live_source_occurrence_axis(
             && resolve_literal_element_index(idx, i, source_dim_elements).is_none()
             && i < ic.source_dim_names.len()
         {
-            let index_dim = crate::common::CanonicalDimensionName::from_raw(&d);
-            let source_dim =
-                crate::common::CanonicalDimensionName::from_raw(ic.source_dim_names[i].as_str());
+            let index_dim = simlin_base::common::CanonicalDimensionName::from_raw(&d);
+            let source_dim = simlin_base::common::CanonicalDimensionName::from_raw(
+                ic.source_dim_names[i].as_str(),
+            );
             if let Some(partner) =
                 dim_ctx.mapped_read_partner(&index_dim, ic.target_iterated_dims, &source_dim)
             {
@@ -215,7 +216,7 @@ fn walk_wrap_test_occurrences(
     recorded: &IdentSet<Ident<Canonical>>,
     source_dim_elements: &[Vec<String>],
     iter_ctx: Option<&IteratedDimCtx<'_>>,
-    dim_ctx: Option<&crate::dimensions::DimensionsContext>,
+    dim_ctx: Option<&simlin_base::dimensions::DimensionsContext>,
     index_nested: bool,
     path: &mut Vec<u16>,
     out: &mut Vec<OccurrenceSite>,
@@ -303,7 +304,7 @@ fn walk_wrap_test_occurrences(
         Expr0::App(UntypedBuiltinFn(fname, args), _) => {
             let lname = fname.to_ascii_lowercase();
             let skip_first =
-                crate::builtins::BuiltinSig::name_reads_a_table(&lname) && !args.is_empty();
+                simlin_base::builtins::BuiltinSig::name_reads_a_table(&lname) && !args.is_empty();
             for (i, a) in args.iter().enumerate() {
                 if skip_first && i == 0 {
                     continue;
@@ -386,7 +387,7 @@ pub(crate) fn is_live_source_iterated_dim_subscript(
     indices: &[IndexExpr0],
     source_dim_elements: &[Vec<String>],
     ctx: Option<&IteratedDimCtx<'_>>,
-    dim_ctx: Option<&crate::dimensions::DimensionsContext>,
+    dim_ctx: Option<&simlin_base::dimensions::DimensionsContext>,
 ) -> bool {
     let Some(ctx) = ctx else { return false };
     if indices.is_empty() || indices.len() != ctx.source_dim_names.len() {
@@ -423,7 +424,7 @@ pub(crate) fn expr0_iterated_axis_lines_up(
     i: usize,
     source_dim_elements: &[Vec<String>],
     ctx: &IteratedDimCtx<'_>,
-    dim_ctx: Option<&crate::dimensions::DimensionsContext>,
+    dim_ctx: Option<&simlin_base::dimensions::DimensionsContext>,
 ) -> bool {
     let src_name = &ctx.source_dim_names[i];
     if d == src_name.as_str() {
@@ -465,7 +466,7 @@ pub(crate) fn classify_expr0_per_element_axes(
     indices: &[IndexExpr0],
     source_dim_elements: &[Vec<String>],
     ctx: &IteratedDimCtx<'_>,
-    dim_ctx: Option<&crate::dimensions::DimensionsContext>,
+    dim_ctx: Option<&simlin_base::dimensions::DimensionsContext>,
 ) -> Option<Vec<crate::ltm_agg::AxisRead>> {
     use crate::ltm_agg::AxisRead;
     if indices.is_empty()
@@ -496,8 +497,8 @@ pub(crate) fn classify_expr0_per_element_axes(
             if let Some(dim_ctx) = dim_ctx
                 && !source_dim_elements[i].iter().any(|e| e == &d)
             {
-                let index_dim = crate::common::CanonicalDimensionName::from_raw(&d);
-                let source_dim = crate::common::CanonicalDimensionName::from_raw(
+                let index_dim = simlin_base::common::CanonicalDimensionName::from_raw(&d);
+                let source_dim = simlin_base::common::CanonicalDimensionName::from_raw(
                     ctx.source_dim_names[i].as_str(),
                 );
                 if let Some(partner) =
@@ -555,7 +556,7 @@ pub(crate) fn other_dep_occurrence_axes(
     dep: &Ident<Canonical>,
     indices: &[IndexExpr0],
     ctx: Option<&IteratedDimCtx<'_>>,
-    dim_ctx: Option<&crate::dimensions::DimensionsContext>,
+    dim_ctx: Option<&simlin_base::dimensions::DimensionsContext>,
 ) -> Vec<OccurrenceAxis> {
     let Some(ctx) = ctx else {
         return Vec::new();
@@ -576,7 +577,7 @@ pub(crate) fn other_dep_occurrence_axes(
                 // it declines stays `Dynamic`.
                 return match (dep_dims.and_then(|dd| dd.get(i)), dim_ctx) {
                     (Some(dep_dim), Some(dim_ctx)) if dep_dim.canonical_element(&d).is_none() => {
-                        let index_dim = crate::common::CanonicalDimensionName::from_raw(&d);
+                        let index_dim = simlin_base::common::CanonicalDimensionName::from_raw(&d);
                         match dim_ctx.mapped_read_partner(
                             &index_dim,
                             ctx.target_iterated_dims,
@@ -621,8 +622,8 @@ pub(crate) fn other_dep_occurrence_axes(
 #[cfg(test)]
 pub(crate) fn other_dep_axis_lines_up(
     d: &str,
-    dep_dim: &crate::dimensions::Dimension,
-    dim_ctx: Option<&crate::dimensions::DimensionsContext>,
+    dep_dim: &simlin_base::dimensions::Dimension,
+    dim_ctx: Option<&simlin_base::dimensions::DimensionsContext>,
 ) -> bool {
     let dep_dim_name = canonicalize(dep_dim.name());
     if d == dep_dim_name.as_ref() {
@@ -748,7 +749,7 @@ pub(crate) fn classify_expr0_subscript_shape(
     indices: &[IndexExpr0],
     source_dim_elements: &[Vec<String>],
     iter_ctx: Option<&IteratedDimCtx<'_>>,
-    dim_ctx: Option<&crate::dimensions::DimensionsContext>,
+    dim_ctx: Option<&simlin_base::dimensions::DimensionsContext>,
 ) -> RefShape {
     if indices
         .iter()

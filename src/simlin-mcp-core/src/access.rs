@@ -7,10 +7,9 @@
 //! Abstraction for opening and persisting Simlin projects.
 //!
 //! Tools in this crate operate against the [`ProjectAccess`] trait so the
-//! same async tool functions can run unchanged against either a stateless
-//! filesystem-backed implementation (the `simlin-mcp` stdio binary) or a
-//! `ProjectRegistry`-backed implementation (the `simlin-serve` HTTP host
-//! introduced in Phase 6).
+//! same async tool functions run unchanged against the stateless
+//! filesystem-backed implementation the `simlin-mcp` stdio binary mounts and
+//! against the in-process stand-ins the tests use.
 //!
 //! The trait deliberately uses native async-fn-in-trait (AFIT) rather than
 //! the `async-trait` crate.  rmcp's macro-generated dispatch wants concrete
@@ -26,12 +25,12 @@ use crate::types::{ErrorOutput, SourceFormat};
 /// A snapshot of a project loaded from some backing store, together with
 /// the metadata needed to write it back consistently.
 ///
-/// `version` is an optional concurrency token: stateless implementations
-/// always return `0`; registry-backed implementations return the
-/// `ProjectRegistry`'s monotonically increasing version so callers can
-/// pass it back to `save` for optimistic-locking.
+/// `version` is an optional concurrency token: a stateless implementation
+/// always returns `0`; an implementation that holds shared state returns a
+/// monotonically increasing version, which callers pass back to `save` for
+/// optimistic locking.
 pub struct OpenedProject {
-    pub project: simlin_engine::datamodel::Project,
+    pub project: simlin_base::datamodel::Project,
     pub source_format: SourceFormat,
     pub version: u64,
 }
@@ -55,14 +54,14 @@ pub struct SaveOutcome {
 /// Loads, persists, and creates Simlin projects from some backing store.
 ///
 /// All methods take `abs_path` as the canonical identifier of the
-/// project; backends are free to interpret this either as a filesystem
-/// path (stateless impl) or as a registry key (server impl) provided
-/// they accept the absolute paths produced by callers.
+/// project; a backend is free to interpret it as something other than a
+/// filesystem path provided it accepts the absolute paths callers produce.
 ///
 /// `expected_version` on [`save`] is the optimistic-locking token: pass
-/// `None` to skip the check (stateless impl), or pass the value returned
-/// by a previous [`open`]/[`save`] to detect concurrent writers.  Both
-/// impls return the new post-write version inside a [`SaveOutcome`].
+/// `None` to skip the check, or pass the value returned by a previous
+/// [`open`]/[`save`] to detect concurrent writers.  A stateless
+/// implementation has nothing to lock against and ignores it.  The new
+/// post-write version comes back inside a [`SaveOutcome`].
 pub trait ProjectAccess: Send + Sync + 'static {
     fn open(
         &self,
@@ -72,7 +71,7 @@ pub trait ProjectAccess: Send + Sync + 'static {
     fn save(
         &self,
         abs_path: &Path,
-        project: &simlin_engine::datamodel::Project,
+        project: &simlin_base::datamodel::Project,
         format: SourceFormat,
         expected_version: Option<u64>,
     ) -> impl Future<Output = Result<SaveOutcome, AccessError>> + Send;
@@ -80,7 +79,7 @@ pub trait ProjectAccess: Send + Sync + 'static {
     fn create(
         &self,
         abs_path: &Path,
-        project: &simlin_engine::datamodel::Project,
+        project: &simlin_base::datamodel::Project,
         format: SourceFormat,
     ) -> impl Future<Output = Result<(), AccessError>> + Send;
 }

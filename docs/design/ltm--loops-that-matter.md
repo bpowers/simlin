@@ -403,7 +403,7 @@ Both deltas are read over
 `[t - dt, t]`, the window of every other link score, so a loop's link scores
 all describe one interval, the score is the same whether a stock's flows are
 written separately or as one net flow, and no `dt` appears (an isolated loop
-scores exactly `+/-1` at every `dt`, `tests/integration/ltm_dt_invariance.rs`).
+scores exactly `+/-1` at every `dt`, `src/simlin-tests/tests/integration/ltm_dt_invariance.rs`).
 Like every other score it is 0 at `TIME <= INITIAL_TIME` and defined from the
 first step after the start.
 The net aux is LTM machinery, not a causal node:
@@ -745,7 +745,7 @@ port's sign -- empirically inverting the loop's polarity (+1.0 in exhaustive vs
 The
 cross-mode regression guard is
 `discovery_multi_output_loop_polarity_matches_exhaustive` in
-`tests/integration/simulate_ltm.rs`.
+`src/simlin-tests/tests/integration/simulate_ltm.rs`.
 
 **Deterministic output-port ordering (GH #680)**: `find_model_output_ports`
 sorts its result.
@@ -1301,7 +1301,7 @@ Both searches order routes on `(weight, hops)`.
 
 The strategy is a `FallbackConfig` on four axes.
 Each default was settled by
-`examples/ltm_fallback_eval` measuring recall against the exact enumeration on
+`src/simlin-tests/examples/ltm_fallback_eval` measuring recall against the exact enumeration on
 World3 and C-LEARN, not by argument; the sweep tables are in the design plan's
 "Measured" section.
 
@@ -1503,13 +1503,13 @@ pysimlin, and the MCP read/edit outputs (`enumerationComplete` is always on the
 MCP wire, since its interesting value is `false` and an elided field would leave
 a client unable to tell an exact analysis from a sampled one).
 `fallback_candidates` stays engine-internal: it exists so the two generators'
-candidate VOLUMES are directly comparable in `examples/ltm_discovery_bench` and
-`examples/ltm_fallback_eval`, which is a measurement question rather than a
+candidate VOLUMES are directly comparable in `src/simlin-tests/examples/ltm_discovery_bench` and
+`src/simlin-tests/examples/ltm_fallback_eval`, which is a measurement question rather than a
 caller's.
 
 ### Measured shape
 
-Both figures below are release builds of `examples/ltm_discovery_bench` on the
+Both figures below are release builds of `src/simlin-tests/examples/ltm_discovery_bench` on the
 two models that drive this design; the design plan's "Measured" section is the
 ledger with the per-phase breakdowns and the fallback sweep tables.
 
@@ -1576,7 +1576,7 @@ and three things sit outside it:
   Neither
   model in the corpus currently produces one (0 of C-LEARN's 153 and 0 of
   World3's 200 reported loops have an empty stock list, under either generator,
-  as `examples/ltm_discovery_bench` prints), so the rule costs those two models
+  as `src/simlin-tests/examples/ltm_discovery_bench` prints), so the rule costs those two models
   nothing and exists for the models that do; the fallback's default seed policy
   (`StocksAndStocklessSccs`) is what keeps such a cycle reachable when the
   enumeration cannot run, since no stock-seeded search can reach it.
@@ -2313,7 +2313,7 @@ recorded.
 With `save_step > dt` a recorded score is therefore the ratio over
 the last dt step ending at that time -- the same number a `save_step = dt` run
 records there -- and not a re-differencing of the flows over the saved
-interval (`tests/integration/ltm_integration_method.rs` pins the two apart on
+interval (`src/simlin-tests/tests/integration/ltm_integration_method.rs` pins the two apart on
 a nonlinear flow, where they differ by more than a unit of score).
 This is the
 2020 paper's form (Schoenberg, Davidsen and Eberlein, section 6.1: the scores
@@ -2498,7 +2498,7 @@ cases remain deliberate carve-outs:
      over `[t - dt, t]` (its reading of `PREVIOUS`) with `t`; the
      Stella-derived golden data in `test/logistic_growth_ltm` labels the score
      computed over `[t, t + dt]` with `t`. The integration test
-     (`tests/integration/simulate_ltm.rs`) therefore shifts the reference
+     (`src/simlin-tests/tests/integration/simulate_ltm.rs`) therefore shifts the reference
      timestamps forward by one DT when loading. That fixture has one flow per
      stock, so its flow-to-stock scores are identically 1 in either convention
      and the whole shift sits in the instantaneous links: with the relabel the
@@ -2516,8 +2516,8 @@ cases remain deliberate carve-outs:
      under Euler; expressing `Δnet` as a flow difference removes the factor
      rather than compensating for it. At dt=1 the paper's table values
      (1.25 / -0.25) reproduce at the step of the change
-     (`tests/integration/ltm_flow_to_stock.rs`), and an isolated loop scores
-     `+/-1` at every dt (`tests/integration/ltm_dt_invariance.rs`).
+     (`src/simlin-tests/tests/integration/ltm_flow_to_stock.rs`), and an isolated loop scores
+     `+/-1` at every dt (`src/simlin-tests/tests/integration/ltm_dt_invariance.rs`).
 
 8. **Ceteris-paribus via AST transformation**: The papers describe re-evaluating
    equations with current values of one input and previous values of all others.
@@ -2540,7 +2540,7 @@ cases remain deliberate carve-outs:
    A source with no
    influence on its target therefore scores 0 under an exogenous forcing, and
    a forcing on a loop takes its own share of the target's change rather than
-   the loop's (`tests/integration/ltm_frozen_clock.rs`).
+   the loop's (`src/simlin-tests/tests/integration/ltm_frozen_clock.rs`).
 
 ## Test Coverage
 
@@ -2625,7 +2625,7 @@ cases remain deliberate carve-outs:
 - **`db/tests.rs`** (LTM subset): Salsa LTM caching, discovery vs exhaustive
   variable counts, incremental invalidation, layout slot allocation with LTM
 
-### Integration Tests (`tests/integration/simulate_ltm.rs`)
+### Integration Tests (`src/simlin-tests/tests/integration/simulate_ltm.rs`)
 
 All integration tests use `compile_project_incremental` + VM:
 

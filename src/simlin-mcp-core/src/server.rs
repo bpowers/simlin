@@ -7,9 +7,9 @@
 //! rmcp `ServerHandler` implementation shared by every transport.
 //!
 //! The struct is deliberately generic over `A: ProjectAccess` so the
-//! stdio binary, the Phase 6 HTTP host, and any in-process test harness
-//! can mount the same tool surface against their own backing store
-//! without re-implementing dispatch.  rmcp's `tool_router` macro emits
+//! stdio binary and any in-process test harness can mount the same tool
+//! surface against their own backing store without re-implementing
+//! dispatch.  rmcp's `tool_router` macro emits
 //! a static dispatch table tied to `Self`, so each `A` concrete-type
 //! instantiation gets its own router and we never need
 //! `Arc<dyn ProjectAccess>`.
@@ -37,9 +37,8 @@ use crate::tools::read_model::{ReadModelInput, read_model};
 ///
 /// The library holds the content as `String` so the binary can pass
 /// either `include_str!`-loaded `&'static str` (cloned once at
-/// startup) or runtime-loaded data without changing the type.  Both
-/// `simlin-mcp` (stdio) and `simlin-serve` (HTTP) construct this list
-/// themselves; the library is content-agnostic.
+/// startup) or runtime-loaded data without changing the type.  The
+/// mounting binary constructs the list; the library is content-agnostic.
 #[derive(Debug, Clone)]
 pub struct ResourceContent {
     pub uri: String,
@@ -52,15 +51,12 @@ pub struct ResourceContent {
 /// rmcp `ServerHandler` implementation for the Simlin MCP tool surface.
 ///
 /// Holds an `Arc<A>` rather than `A` directly so the handler can be
-/// freely cloned by rmcp's session machinery (the streamable-HTTP
-/// service factory in Phase 6 expects `Self: Clone`).  The instructions
-/// string and resource list are likewise behind `Arc` so cloning is
-/// cheap.
+/// freely cloned by rmcp's session machinery.  The instructions string
+/// and resource list are likewise behind `Arc` so cloning is cheap.
 ///
-/// `version` is the binary's own version string, passed by the entry
-/// point (main.rs or simlin-serve's main) using `env!("CARGO_PKG_VERSION")`
-/// so `serverInfo.version` reflects the binary version rather than this
-/// library's.
+/// `version` is the binary's own version string, passed by its entry
+/// point using `env!("CARGO_PKG_VERSION")` so `serverInfo.version`
+/// reflects the binary version rather than this library's.
 #[derive(Clone)]
 pub struct SimlinMcpServer<A: ProjectAccess> {
     access: Arc<A>,

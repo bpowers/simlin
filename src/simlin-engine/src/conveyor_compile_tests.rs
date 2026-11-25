@@ -8,14 +8,14 @@
 //! so `use super::*` still resolves the module's private items.
 
 use super::*;
-use crate::common::Ident;
+use simlin_base::common::Ident;
 // The build entry points live in queue_compile (the unified conveyor+queue
 // build path); these tests pin the conveyor half of its behavior.
 use crate::queue_compile::{build_compiled_fresh, build_vm};
 use std::io::BufReader;
 
 fn parse(xml: &str) -> datamodel::Project {
-    crate::xmile::project_from_reader(&mut BufReader::new(xml.as_bytes())).unwrap()
+    simlin_formats::xmile::project_from_reader(&mut BufReader::new(xml.as_bytes())).unwrap()
 }
 
 #[test]
@@ -418,7 +418,7 @@ fn directly_assembled_vm_rejects_pass_driven_overrides() {
     // arm alone. The no-Vm twin (libsimlin validating after `run_to_end`
     // consumed its Vm) is pinned by
     // `test_set_value_on_conveyor_driven_flow_rejected`, the wasm twin by
-    // `wasmgen::belt_tests::set_value_rejects_the_driven_outflow`, and
+    // `simlin_wasmgen::belt_tests::set_value_rejects_the_driven_outflow`, and
     // re-attachment with a different plan set by
     // `reattached_conveyor_plans_redefine_the_overridable_set` below.
     let project = parse(&override_leak_model());
@@ -954,7 +954,7 @@ fn the_driven_flow_scan_reads_an_equations_own_texts() {
     for role in [
         ExpressionRole::Equation,
         ExpressionRole::Initial,
-        ExpressionRole::Option(crate::datamodel::StockOption::TransitTime),
+        ExpressionRole::Option(simlin_base::datamodel::StockOption::TransitTime),
     ] {
         match role {
             ExpressionRole::Equation => {
@@ -1530,7 +1530,7 @@ fn arrayed_leak_into_arrested_conveyor_skips_per_element() {
 /// Build the standard scalar-conveyor model plus a `reader` aux with the
 /// given equation, and return the `build_vm` result. The belt fills from
 /// empty (init 0).
-fn build_with_reader(reader_eqn: &str) -> crate::common::Result<crate::vm::Vm> {
+fn build_with_reader(reader_eqn: &str) -> simlin_base::common::Result<crate::vm::Vm> {
     let xml = wrap_model(&format!(
         r#"
     <stock name="belt"><eqn>0</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
@@ -2045,7 +2045,7 @@ fn non_container_conveyor_reads_are_unaffected() {
 /// Build the standard arrayed-conveyor model (board {a,b}; inflow a=100,
 /// b=250; transit 4; belt filling from empty) plus a `reader` aux, returning
 /// the `build_vm` result.
-fn build_arrayed_reader(reader: &str) -> crate::common::Result<crate::vm::Vm> {
+fn build_arrayed_reader(reader: &str) -> simlin_base::common::Result<crate::vm::Vm> {
     let xml = wrap_model(&format!(
         r#"
     <stock name="belt"><eqn>0</eqn><inflow>in_f</inflow><outflow>out_f</outflow>
@@ -3415,7 +3415,7 @@ fn explicit_list_survives_xmile_roundtrip() {
         .expect("belt stock");
     assert_eq!(after, Equation::Scalar("10, 20, 30".to_string()));
 
-    let out = crate::compat::to_xmile(&project).expect("to_xmile");
+    let out = simlin_formats::compat::to_xmile(&project).expect("to_xmile");
     assert!(
         out.contains("10, 20, 30"),
         "writer must re-emit the list eqn: {out}"
@@ -3679,9 +3679,8 @@ fn explicit_list_single_entry_with_trailing_comma() {
 /// `StockOption::ALL`, and a leak's fraction and a container access are
 /// described too. A name the build gives no helper is not.
 #[test]
-#[cfg(feature = "agent_tools")]
 fn a_helpers_name_is_described_as_what_it_stands_for() {
-    use crate::datamodel::StockOption;
+    use simlin_base::datamodel::StockOption;
     for option in StockOption::ALL {
         match param_segment(option) {
             Some(_) => {

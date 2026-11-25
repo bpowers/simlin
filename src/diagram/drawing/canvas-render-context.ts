@@ -11,7 +11,7 @@ import * as React from 'react';
  * `embedded` is the export/static arm -- the Canvas mounted with
  * `embedded: true`: `renderSvgToString` and `StaticDiagram`, where the markup
  * is emitted as a standalone SVG string that must stay byte-identical to the
- * Rust renderer (`src/simlin-engine/src/diagram`, pinned by
+ * Rust renderer (`src/simlin-diagram/src`, pinned by
  * `tests/svg-rendering.test.ts`) and be rasterizable by resvg, which resolves
  * no CSS custom properties -- so colours are literal there -- and also the
  * live, viewport-inert embed the app serves in an iframe (`HostedWebEditor`

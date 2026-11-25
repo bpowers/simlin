@@ -6,8 +6,8 @@
 # `src/engine/build.sh` runs `wasm-opt -O3` IN PLACE over `core/*.wasm`, which
 # is the file the TypeScript tests load -- so "did wasm-opt run" and "was the
 # optimized bundle executed under test" are the same question. Everywhere else
-# deliberately answers no: `ci.yaml`'s build steps (the deploy assembly, the
-# notebook-widget assets for pysimlin-e2e, the serve SPA) and
+# deliberately answers no: `ci.yaml`'s build steps (the deploy assembly and the
+# notebook-widget assets for pysimlin-e2e) and
 # `scripts/pre-commit` set DISABLE_WASM_OPT=1, which makes build.sh skip the
 # pass AND compile with the `wasm-gate` profile (no LTO, parallel codegen):
 # a PR gate does not need release-quality WASM, and both are multi-minute on
@@ -44,7 +44,15 @@ name: WASM optimized-bundle check
     branches:
       - main
     paths:
+      - 'src/simlin-base/**'
+      - 'src/simlin-diagram/**'
+      - 'src/simlin-edit/**'
       - 'src/simlin-engine/**'
+      - 'src/simlin-formats/**'
+      - 'src/simlin-layout/**'
+      - 'src/simlin-save-check/**'
+      - 'src/simlin-tools/**'
+      - 'src/simlin-wasmgen/**'
       - 'src/libsimlin/**'
       - 'src/engine/**'
       - 'Cargo.lock'
@@ -64,7 +72,15 @@ name: WASM optimized-bundle check
     branches:
       - main
     paths:
+      - 'src/simlin-base/**'
+      - 'src/simlin-diagram/**'
+      - 'src/simlin-edit/**'
       - 'src/simlin-engine/**'
+      - 'src/simlin-formats/**'
+      - 'src/simlin-layout/**'
+      - 'src/simlin-save-check/**'
+      - 'src/simlin-tools/**'
+      - 'src/simlin-wasmgen/**'
       - 'src/libsimlin/**'
       - 'src/engine/**'
       - 'Cargo.lock'

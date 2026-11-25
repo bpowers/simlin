@@ -37,8 +37,8 @@ pub struct ImplicitVarDeps {
 pub(super) fn extract_implicit_var_deps(
     scope: &DepScope<'_>,
     parsed: &ParsedVariableResult,
-    dim_context: &crate::dimensions::DimensionsContext,
-    converted_dims: &[crate::dimensions::Dimension],
+    dim_context: &simlin_base::dimensions::DimensionsContext,
+    converted_dims: &[simlin_base::dimensions::Dimension],
     module_inputs: Option<&BTreeSet<Ident<Canonical>>>,
 ) -> Vec<ImplicitVarDeps> {
     parsed

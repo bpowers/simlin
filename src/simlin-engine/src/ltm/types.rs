@@ -6,7 +6,7 @@
 //! truncation marker. These are the user-visible vocabulary the rest of the
 //! LTM submodules build on.
 
-use crate::common::{Canonical, Ident};
+use simlin_base::common::{Canonical, Ident};
 
 /// Marker returned by circuit-enumeration helpers when the DFS bailed
 /// out because it would have exceeded the caller-supplied `max_circuits`
@@ -17,8 +17,7 @@ use crate::common::{Canonical, Ident};
 pub struct TruncatedByBudget;
 
 /// Polarity of a causal link
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LinkPolarity {
     Positive, // Increase in 'from' causes increase in 'to'
     Negative, // Increase in 'from' causes decrease in 'to'
@@ -82,8 +81,7 @@ impl LinkPolarity {
 /// traverses `from[d] → $⁚ltm⁚agg⁚{n} → to[e]` (the agg name has no
 /// subscript). All other edges use variable-level names. See
 /// `db::ltm::build_element_level_loops` for the normalization rule.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Link {
     pub from: Ident<Canonical>,
     pub to: Ident<Canonical>,
@@ -135,8 +133,7 @@ pub struct Link {
 /// `assign_loop_ids` derives loop IDs from `links` (sorted distinct
 /// variable names), not `stocks`, so the element-level `stocks` granularity
 /// does not perturb `r{n}`/`b{n}`/`u{n}` numbering.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Loop {
     pub id: String,
     pub links: Vec<Link>,
@@ -421,7 +418,7 @@ pub(crate) const SYNTHETIC_NODE_PREFIX: &str = "$\u{205A}";
 /// user-facing causal view -- not just LTM aggregate nodes -- carries the `$⁚`
 /// prefix. A node name may be a module-output path (`$⁚var⁚0⁚func·output`);
 /// the leading-prefix test still classifies it as synthetic.
-pub(crate) fn is_synthetic_node_name(name: &str) -> bool {
+pub fn is_synthetic_node_name(name: &str) -> bool {
     name.starts_with(SYNTHETIC_NODE_PREFIX)
 }
 

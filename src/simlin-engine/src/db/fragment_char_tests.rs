@@ -13,7 +13,7 @@
 //! against. **All 12 goldens came through it byte-identical, with no
 //! regeneration**, which is the strongest available evidence that the shorter
 //! route produces the same value rather than a plausible one. The
-//! integration corpus (`tests/integration/simulate.rs`) pins *numeric* results
+//! integration corpus (`simlin-tests/tests/integration/simulate.rs`) pins *numeric* results
 //! of whole models, which is necessary but far too coarse here: it cannot see a
 //! fragment change shape, a fragment stop being emitted (an `Option::None`
 //! arm), a resource id get renumbered, or a fragment stop being deterministic.
@@ -69,7 +69,7 @@
 //! which was direct evidence that a fragment really was independent of the
 //! offsets it was being handed.
 
-use crate::common::IdentMap;
+use simlin_base::common::IdentMap;
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
@@ -77,8 +77,8 @@ use crate::compiler::symbolic::{
     PerVarBytecodes, SymStaticViewBase, SymVarRef, SymbolicModuleDecl, SymbolicOpcode,
     SymbolicStaticView,
 };
-use crate::datamodel;
 use crate::test_common::TestProject;
+use simlin_base::datamodel;
 
 // ---------------------------------------------------------------------------
 // Fixture declaration
@@ -248,10 +248,10 @@ fn render_var_ref(v: &SymVarRef) -> String {
 /// golden reads as a program.
 fn global_var_name(off: u16) -> &'static str {
     match off as usize {
-        crate::vm::TIME_OFF => "time",
-        crate::vm::DT_OFF => "dt",
-        crate::vm::INITIAL_TIME_OFF => "initial_time",
-        crate::vm::FINAL_TIME_OFF => "final_time",
+        simlin_base::results::TIME_OFF => "time",
+        simlin_base::results::DT_OFF => "dt",
+        simlin_base::results::INITIAL_TIME_OFF => "initial_time",
+        simlin_base::results::FINAL_TIME_OFF => "final_time",
         _ => "<not-an-implicit-global>",
     }
 }

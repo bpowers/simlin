@@ -50,12 +50,12 @@
 
 use indexmap::IndexMap;
 
-use crate::ast::{Ast, Expr0, Loc};
-use crate::common::{Canonical, EquationError, ErrorCode, Ident};
-use crate::datamodel;
-use crate::dimensions::DimensionsContext;
 use crate::model::ParsedVariable;
 use crate::variable::{ElementScope, VarKind, Variable, get_dimensions};
+use simlin_base::ast::{Ast, Expr0, Loc};
+use simlin_base::common::{Canonical, EquationError, ErrorCode, Ident};
+use simlin_base::datamodel;
+use simlin_base::dimensions::DimensionsContext;
 
 /// The name a synthesized helper of `parent` is filed under.
 ///
@@ -93,8 +93,7 @@ pub(crate) fn synthetic_ident(parent: &str, n: usize, part: &str, suffix: Option
 /// part of its equation the helper is (a call's name, `smth1`, or a hoisted
 /// argument, `arg0`); `None` for any other name. What the agent tools say
 /// in place of a helper's name.
-#[cfg(feature = "agent_tools")]
-pub(crate) fn synthetic_parent(name: &str) -> Option<(&str, &str)> {
+pub fn synthetic_parent(name: &str) -> Option<(&str, &str)> {
     let rest = name.strip_prefix(crate::ltm::SYNTHETIC_NODE_PREFIX)?;
     let mut parts = rest.split('⁚');
     let (parent, n, part) = (parts.next()?, parts.next()?, parts.next()?);
@@ -127,8 +126,6 @@ pub(crate) fn element_suffix(scope: &ElementScope) -> String {
 /// they can mint the same positional storage for different consumers; one
 /// capture then serves both and its demand is the union
 /// ([`Capture::merge_same_definition`]).
-// `Debug` is unconditional: `db::ImplicitVarDeps` derives it in every build
-// and carries a `CaptureKind`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CaptureKind {
     Previous,
@@ -138,8 +135,8 @@ pub enum CaptureKind {
 
 impl CaptureKind {
     /// The consumer, spelled as a model writes it; a shared capture names
-    /// both. No production caller: `Debug` is feature-gated crate-wide, so
-    /// the tests that pin each capture shape's kind need a printable spelling.
+    /// both. For the tests that pin each capture shape's kind; production code
+    /// has no caller.
     pub fn as_str(self) -> &'static str {
         match self {
             CaptureKind::Previous => "PREVIOUS",
@@ -171,8 +168,7 @@ impl CaptureKind {
 
 /// The storage a capture occupies and the context its body is resolved in --
 /// decided by where the `PREVIOUS`/`INIT` call was written.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum CaptureShape {
     /// A scalar equation's argument: one slot, a scalar body.
     Scalar,
@@ -191,8 +187,7 @@ pub enum CaptureShape {
 }
 
 /// One `PREVIOUS`/`INIT` argument, hoisted into its own unit of evaluation.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Capture {
     /// The name every name-keyed stage files this capture under, derived by
     /// [`synthetic_ident`] from the positional identity. Stored rather than
@@ -387,8 +382,7 @@ fn subtree_parsed_variable(
 /// scalar port cannot read directly: an arrayed variable and a dimension name,
 /// which under a per-element expansion mean one element's value, and are
 /// hoisted into a helper scoped to that element so lowering reads it.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct HoistedArg {
     /// The name every name-keyed stage files this argument under, derived by
     /// [`synthetic_ident`] from the call's `(parent, id)`, the argument's
@@ -461,8 +455,7 @@ impl HoistedArg {
 /// keep the names of `datamodel::Module`'s, which is what those readers were
 /// written against, so one reader serves an explicit instance and an implicit
 /// one alike.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ImplicitModule {
     /// The name every name-keyed stage files this instance under, derived by
     /// [`synthetic_ident`] from `(parent, id)`, the call name and the active
@@ -552,8 +545,7 @@ impl ImplicitModule {
 /// (`ParsedVariableResult::implicit_vars` and `VariableDeps::implicit_vars`),
 /// so an unstable order defeats backdating and makes the compiled artifact
 /// irreproducible (GH #1002).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ImplicitVar {
     /// A `PREVIOUS`/`INIT` argument hoisted out of its call.
     Capture(Capture),
@@ -611,12 +603,12 @@ impl ImplicitVar {
         let ImplicitVar::Module(module) = self else {
             return None;
         };
-        let source = crate::common::canonicalize(source);
+        let source = simlin_base::common::canonicalize(source);
         module
             .references
             .iter()
             .zip(&module.argument_locs)
-            .find(|(reference, _)| crate::common::canonicalize(&reference.src) == source)
+            .find(|(reference, _)| simlin_base::common::canonicalize(&reference.src) == source)
             .map(|(_, loc)| *loc)
     }
 

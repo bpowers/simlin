@@ -1,0 +1,40 @@
+[package]
+name = "simlin-tools"
+version = "0.1.0"
+authors = ["Bobby Powers <bobbypowers@gmail.com>"]
+license = "Apache-2.0"
+edition = "2024"
+description = "The agent tool surface: a session per model that answers an agent's tool calls with JSON"
+
+[lib]
+crate-type = ["rlib"]
+
+[features]
+default = ["schema"]
+schema = ["dep:schemars", "simlin-edit/schema", "simlin-formats/schema"]
+
+[dependencies]
+simlin-base = { version = "0.1", path = "../simlin-base" }
+simlin-edit = { version = "0.1", path = "../simlin-edit" }
+simlin-engine = { version = "0.1", path = "../simlin-engine", default-features = false }
+simlin-formats = { version = "0.1", path = "../simlin-formats", default-features = false }
+simlin-layout = { version = "0.1", path = "../simlin-layout" }
+simlin-save-check = { version = "0.1", path = "../simlin-save-check" }
+indexmap = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# 1.2.3 is the floor: earlier releases list an internally tagged variant's tag
+# last, and the tool catalog's property order lists it first.
+schemars = { version = "1.2.3", features = ["preserve_order"], optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rayon = "1"
+
+[dev-dependencies]
+simlin-base = { path = "../simlin-base", features = ["test-support"] }
+simlin-edit = { path = "../simlin-edit", features = ["test-support"] }
+simlin-engine = { path = "../simlin-engine", features = ["test-support"] }
+simlin-formats = { path = "../simlin-formats", features = ["test-support"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+proptest = "1.5"
+jsonschema = { version = "0.26", default-features = false }

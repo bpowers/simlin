@@ -2,7 +2,7 @@
 
 Status: reference document for designing and implementing Vensim macro support in
 `simlin-engine`. The engine currently *parses* `:MACRO:` blocks but discards them
-(`src/simlin-engine/src/mdl/convert/mod.rs:248`). This document collects what a
+(`src/simlin-formats/src/mdl/convert/mod.rs:248`). This document collects what a
 Vensim macro is, how it is written, and -- most importantly -- its precise
 runtime semantics, so an implementation design can be grounded in fact rather
 than guesswork.
@@ -18,8 +18,8 @@ Authoritative sources used (cited inline throughout):
   saved from https://docs.oasis-open.org/xmile/xmile/v1.0/xmile-v1.0.html) --
   sections 2.2.1, 2.10, 3.6/3.6.1/3.6.2, and 4.8/4.8.1/4.8.2/4.8.3.
 - Local repository: the six `test/test-models/tests/macro_*` fixtures, the
-  C-LEARN hero model, the engine MDL parser (`src/simlin-engine/src/mdl/`), the
-  XMILE serde layer (`src/simlin-engine/src/xmile/mod.rs`).
+  C-LEARN hero model, the engine MDL parser (`src/simlin-formats/src/mdl/`), the
+  XMILE serde layer (`src/simlin-formats/src/xmile/mod.rs`).
 - `xmutil`, Bob Eberlein's C++ Vensim-to-XMILE converter
   (https://github.com/bobeberlein/xmutil). File references of the form
   `xmutil:Vensim/VYacc.y:99` are paths under its `src/` directory; the line
@@ -108,7 +108,7 @@ A macro definition is introduced by a `:MACRO:` line and closed by a
   C-LEARN model defines a macro literally named `SSHAPE`, which is also a Vensim
   built-in; the engine's parser already accommodates this by accepting either a
   `Symbol` or a `Function` token for the macro name
-  (`src/simlin-engine/src/mdl/parser.rs:521-523`).
+  (`src/simlin-formats/src/mdl/parser.rs:521-523`).
 
 - **Input argument list** -- "any number" of arguments, each "any valid
   unquoted name." Arguments are positional. "The arguments cannot be
@@ -190,7 +190,7 @@ also retrieve (see section 4.5).
   section, peer to ordinary variable equations and group (`****`) markers. The
   engine models this directly: the MDL reader produces `MdlItem::Macro` as a
   sibling of `MdlItem::Equation` and `MdlItem::Group`
-  (`src/simlin-engine/src/mdl/ast.rs:498-506`).
+  (`src/simlin-formats/src/mdl/ast.rs:498-506`).
 
 - **Ordering rule.** "The macro definition must occur before the macro is
   referenced. This is the only equation ordering rule in the Vensim modeling
@@ -228,7 +228,7 @@ is achieved by *calling* one macro from inside another (section 5.5), not by
 lexically embedding one definition inside another. The engine treats an
 unmatched `:END OF MACRO:` and an end-of-file inside an open macro as errors
 (`ReaderError::UnmatchedMacroEnd`, `ReaderError::EofInsideMacro` in
-`src/simlin-engine/src/mdl/reader.rs:27-30`).
+`src/simlin-formats/src/mdl/reader.rs:27-30`).
 
 ---
 
@@ -341,7 +341,7 @@ function call or a lookup invocation. The engine's MDL parser does not even
 recognize it as a macro call at parse time: a multi-argument call on a `Symbol`
 token is parsed as `Expr::App` with `CallKind::Symbol` and described in the AST
 as "unknown function (could be macro or error)"
-(`src/simlin-engine/src/mdl/ast.rs:97,106,127`). Resolution of "is this name a
+(`src/simlin-formats/src/mdl/ast.rs:97,106,127`). Resolution of "is this name a
 macro?" therefore has to happen *after* parsing, against the table of collected
 macro definitions.
 
@@ -364,13 +364,13 @@ fixtures show:
   `SMOOTH`/`DELAY3` routinely receive full expressions as arguments). The MDL
   grammar both in `xmutil` and in the engine parses macro-call arguments as a
   general `exprlist` (`xmutil:Vensim/VYacc.y:99`,
-  `src/simlin-engine/src/mdl/parser.rs:528`), so *syntactically* any expression
+  `src/simlin-formats/src/mdl/parser.rs:528`), so *syntactically* any expression
   is accepted.
 
 The engine's AST documentation flags the tension: the grammar "parses macro
 arguments as `exprlist`, which allows arbitrary expressions. In valid macros,
 these should be simple variable references"
-(`src/simlin-engine/src/mdl/ast.rs:478-482`). That comment is about the
+(`src/simlin-formats/src/mdl/ast.rs:478-482`). That comment is about the
 *definition header* (where args must be plain names); at the *call site*,
 expression-valued arguments are normal and expected (think `SMOOTH(a + b, t)`).
 This is an important asymmetry: header argument list = plain names only;
@@ -438,17 +438,17 @@ form of the macro header and call. Specifically:
   therefore supports only macros whose sole output is the macro-named variable.
 
 - The engine's MDL parser does the same: `parse_expr_list`
-  (`src/simlin-engine/src/mdl/parser.rs:1361-1399`) continues only on `Comma`
+  (`src/simlin-formats/src/mdl/parser.rs:1361-1399`) continues only on `Comma`
   or `Semicolon` and stops at a `Colon`. The macro-header parse then calls
   `expect(TokenKind::RParen, "')'")`
-  (`src/simlin-engine/src/mdl/parser.rs:530`), so a header like
+  (`src/simlin-formats/src/mdl/parser.rs:530`), so a header like
   `:MACRO: add3(a, b : c)` would fail with an "expected ')'" error at the `:`.
   (The reader's raw-token scan tracks parentheses and *would* read through a
-  `:` -- `src/simlin-engine/src/mdl/reader.rs:211-227` -- but the structured
+  `:` -- `src/simlin-formats/src/mdl/reader.rs:211-227` -- but the structured
   parser sub-step rejects it.)
 
   The engine's lexer *does* have a `Colon` token
-  (`src/simlin-engine/src/mdl/lexer.rs:44`), so adding output-list support is a
+  (`src/simlin-formats/src/mdl/lexer.rs:44`), so adding output-list support is a
   parser change, not a lexer change.
 
 Implication: macros with explicit output lists are (a) discouraged by Vensim,
@@ -665,7 +665,7 @@ macro expansion; this case must be validated against Vensim itself if needed.
   true in the `<uses_macros>` tag"). This is the `recursive_macros` field that
   the engine's XMILE serde already models: `Feature::UsesMacros {
   recursive_macros: Option<bool>, option_filters: Option<bool> }`
-  (`src/simlin-engine/src/xmile/mod.rs:510-513`). It is purely a declaration /
+  (`src/simlin-formats/src/xmile/mod.rs:510-513`). It is purely a declaration /
   capability flag in the file header -- it tells a reader "this file contains
   macros that recurse, so don't assume macro expansion terminates by simple
   inlining." It does not itself change macro semantics; it is a hint that naive
@@ -821,15 +821,15 @@ vendor's software" (XMILE 1.0 section 2.10).
 ### 6.5 What the engine's XMILE serde currently models
 
 - `xmile::Project` has `#[serde(rename = "macro")] pub macros: Vec<Macro>`
-  (`src/simlin-engine/src/xmile/mod.rs:75-76,244`) -- so the `<macro>` elements
+  (`src/simlin-formats/src/xmile/mod.rs:75-76,244`) -- so the `<macro>` elements
   are collected at the project level, as the spec requires.
 - `xmile::Macro` is a **stub**: the struct body is literally `// TODO`
-  (`src/simlin-engine/src/xmile/mod.rs:334-338`). No `name`, no `<parm>`, no
+  (`src/simlin-formats/src/xmile/mod.rs:334-338`). No `name`, no `<parm>`, no
   `<eqn>`, no `<variables>`. So XMILE macro contents are currently *parsed into
   an empty struct and effectively dropped*, even though the count of macros is
   preserved.
 - `Feature::UsesMacros { recursive_macros: Option<bool>, option_filters:
-  Option<bool> }` (`src/simlin-engine/src/xmile/mod.rs:510-513`) models the
+  Option<bool> }` (`src/simlin-formats/src/xmile/mod.rs:510-513`) models the
   header `<uses_macros>` declaration faithfully.
 
 So on the XMILE side, implementing macros means (at minimum) fleshing out
@@ -995,18 +995,18 @@ by its underscored name.
 
 ### 7.5 What the engine's *native* MDL parser does today
 
-The engine's pure-Rust MDL parser (`src/simlin-engine/src/mdl/`) *parses*
+The engine's pure-Rust MDL parser (`src/simlin-formats/src/mdl/`) *parses*
 macros into a `MacroDef { name, args: Vec<Expr>, equations: Vec<FullEquation>,
 loc }`
-(`src/simlin-engine/src/mdl/ast.rs:483-493`), assembled by the reader's
-`MacroState` machine (`src/simlin-engine/src/mdl/reader.rs:59-70,300-330`). But
+(`src/simlin-formats/src/mdl/ast.rs:483-493`), assembled by the reader's
+`MacroState` machine (`src/simlin-formats/src/mdl/reader.rs:59-70,300-330`). But
 the AST-to-datamodel conversion **discards** it: `MdlItem::Macro(_)` is matched
-and ignored (`src/simlin-engine/src/mdl/convert/mod.rs:248`, with a test
+and ignored (`src/simlin-formats/src/mdl/convert/mod.rs:248`, with a test
 `test_mdl_group_variables_after_macro` at `convert/mod.rs:616` that only checks
 the macro doesn't corrupt *group* membership). The engine's own MDL parser
 CLAUDE.md lists this as a known gap: "Macro expansion/inlining (parsing
 complete, conversion not implemented). C-LEARN model requires this to
-simulate" (`src/simlin-engine/src/mdl/CLAUDE.md`). So the implementation task,
+simulate" (`src/simlin-formats/src/mdl/CLAUDE.md`). So the implementation task,
 on the Vensim-import side, is *conversion*, not parsing.
 
 ---

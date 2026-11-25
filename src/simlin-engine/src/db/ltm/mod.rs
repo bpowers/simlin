@@ -19,18 +19,19 @@
 //! * `link_scores` -- the per-edge / per-shape / through-aggregate link-score
 //!   emitters (lifted verbatim out of `model_ltm_variables`).
 
-use crate::common::{IdentMap, IdentSet};
+use simlin_base::common::{IdentMap, IdentSet};
 use std::collections::{HashMap, HashSet};
 
-use crate::canonicalize;
-use crate::common::{Canonical, Ident};
 use crate::ltm::strip_subscript;
+use simlin_base::canonicalize;
+use simlin_base::common::{Canonical, Ident};
 
 use super::{
     Db, Diagnostic, DiagnosticError, DiagnosticSeverity, SourceModel, SourceProject,
-    SourceVariable, SourceVariableKind, lowered_variable_by_name, model_causal_edges,
-    project_datamodel_dims, project_dimensions_context,
+    SourceVariable, lowered_variable_by_name, model_causal_edges, project_datamodel_dims,
+    project_dimensions_context,
 };
+use crate::variable::SourceVariableKind;
 
 mod compile;
 mod equation;
@@ -84,7 +85,7 @@ pub(crate) use loops::{
     stitch_cross_agg_petals, stitched_output_bound,
 };
 pub(crate) use parse::scalarize_ltm_equation;
-pub(crate) use pinned::model_pinned_loops;
+pub use pinned::model_pinned_loops;
 
 // Test-only re-exports. These names are consumed solely by the LTM test
 // modules -- `ltm_tests` (mounted here, reached via `super::`) and the
@@ -205,7 +206,7 @@ pub(crate) fn endpoint_dimensions(
     model: SourceModel,
     project: SourceProject,
     name: &str,
-) -> Option<Vec<crate::dimensions::Dimension>> {
+) -> Option<Vec<simlin_base::dimensions::Dimension>> {
     // The dimensions alone, never a module's layout: `dimensions_shape` is
     // `None` for a module instance and overlay-independent otherwise.
     crate::db::var_fragment::DeclaredName::resolve(db, model, project, name)?
@@ -522,8 +523,8 @@ fn compute_module_link_overrides(
     edges_result: &super::CausalEdgesResult,
     source_vars: &HashMap<String, SourceVariable>,
 ) -> ModuleLinkOverrides {
-    use crate::common::{Canonical, Ident};
     use crate::ltm::normalize_module_ref;
+    use simlin_base::common::{Canonical, Ident};
 
     let mut overrides: LoopLinkOverrides = HashMap::new();
     let mut alias_by_name: std::collections::BTreeMap<String, super::LtmSyntheticVar> =
@@ -722,8 +723,7 @@ fn compute_module_link_overrides(
 /// that `compute_layout` can allocate slots and `assemble_module` can compile
 /// them; the module-instance universe is the source models' alone
 /// (`db::assemble::enumerate_module_instances`).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LtmImplicitVarMeta {
     /// Canonical name of the LTM variable that created this implicit var
     pub ltm_parent_name: String,
@@ -814,13 +814,13 @@ pub fn model_ltm_implicit_var_info(
 /// per axis (defensive -- the helper's own fragment compile rejects it
 /// loudly).
 fn ltm_implicit_helper_size(
-    dim_ctx: &crate::dimensions::DimensionsContext,
+    dim_ctx: &simlin_base::dimensions::DimensionsContext,
     var: &crate::capture::ImplicitVar,
 ) -> usize {
     var.equation_dims()
         .iter()
         .map(|n| {
-            let canonical = crate::common::CanonicalDimensionName::from_raw(n);
+            let canonical = simlin_base::common::CanonicalDimensionName::from_raw(n);
             dim_ctx.get(&canonical).map(|d| d.len()).unwrap_or(1)
         })
         .product::<usize>()
@@ -947,8 +947,8 @@ pub fn model_ltm_variables(
     model: SourceModel,
     project: SourceProject,
 ) -> super::LtmVariablesResult {
-    use crate::common::Ident;
     use crate::ltm::{CyclePartitions, Loop};
+    use simlin_base::common::Ident;
     use std::collections::HashSet;
 
     use super::{

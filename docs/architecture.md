@@ -10,18 +10,42 @@ The one exception: changes to protobuf files must follow standard best practices
 
 ## Component Descriptions
 
+### `src/simlin-base` (Rust)
+What every simlin crate is built on: the data model and the patches to it, identifiers, errors, dimensions, the equation lexer, parser and AST, the builtin functions, the standard library of module functions, and the results of a run.
+- `builtins.rs` defines builtin functions (including `PREVIOUS`, `INIT`); stateful module functions (TREND, SMOOTH3) are model definitions in `stdlib/*.stmx`, generated into `stdlib.gen.rs`
+
+### `src/simlin-diagram` (Rust)
+A model's stock-and-flow diagram drawn: as SVG, as PNG and as the scene display list a host draws, with the exact geometry of each element.
+
+### `src/simlin-formats` (Rust)
+The files a model is kept in, read and written: Vensim MDL and VDF, XMILE, the systems format, JSON (native and SD-AI), and the protobuf a stored project is.
+- Native Vensim MDL parser in `mdl/`; see [docs/design/mdl-parser.md](/docs/design/mdl-parser.md)
+
+### `src/simlin-edit` (Rust)
+Edits to a project: the patches a host or an agent lands, the plans of a person's gestures on a diagram, and a variable's equations as a host draws them.
+
 ### `src/simlin-engine` (Rust)
 Core simulation engine.
 Compiles, type-checks, unit-checks, and simulates SD models; [src/simlin-engine/CLAUDE.md](/src/simlin-engine/CLAUDE.md) is the map of the crate and its standing invariants.
-- Equation text becomes a simulation in six stages: parse (`parser/`, `variable.rs`), module-function expansion (`builtins_visitor.rs`, `capture.rs`), AST lowering (`ast/`, `model.rs`), per-variable fragment compilation (`compiler/fragment.rs`, `compiler/`), assembly (`db/layout.rs`, `db/assemble.rs`, `compiler/symbolic.rs`) and execution (`vm.rs`, `wasmgen/`).
+- Equation text becomes a simulation in six stages: parse (simlin-base's `parser`, `variable.rs`), module-function expansion (`builtins_visitor.rs`, `capture.rs`), AST lowering (`ast/`, `model.rs`), per-variable fragment compilation (`compiler/fragment.rs`, `compiler/`), assembly (`db/layout.rs`, `db/assemble.rs`, `compiler/symbolic.rs`) and execution (`vm.rs`, simlin-wasmgen).
   `db::compile_project_incremental()` is the one production entry, over salsa tracked queries (`db.rs`, `db/`) keyed per variable so an edit recompiles the variables it touches
 - Every compiler decision has one owner, and a second implementation of any of them is a defect: `parse_var` (the parse), `MacroRegistry::resolve_call` (routing a stdlib or macro call), `SnapshotArg::access` (what `PREVIOUS`/`INIT` addresses), `capture::synthetic_ident` (helper names), `classify_dependencies` and `DepRef` (dependencies), `ast::LoweringScope` (what the `Expr2` lowering knows), `BuiltinFn::signature()` (per-builtin facts), `dimensions::match_axes` (axis pairing), `lower_fragment` (per-variable lowering), `compiler/array_operand.rs` with `TempAllocator` (array temps), `FragmentMerger` and `segment_member_by_element` (assembly)
 - Simulations run on a stack-based bytecode VM (`vm.rs`) with `PREVIOUS`/`INIT` intrinsic opcodes; both opcode enums are declared by tables (`symbolic_opcode_table!`, `opcode_table!`) from which the operand accessors derive
-- An alternative WebAssembly code-generation backend (`wasmgen/`) lowers a compiled model to one self-contained wasm module (no host imports) for fast repeated re-simulation; the VM stays the correctness oracle (every emitted module is checked against it).
-  Surfaced through libsimlin `simlin_model_compile_to_wasm`
-- `builtins.rs` defines builtin functions (including `PREVIOUS`, `INIT`); stateful module functions (TREND, SMOOTH3) are model definitions in `stdlib/*.stmx`, generated into `stdlib.gen.rs`
 - Loops That Matter (`db/ltm/`, `db/ltm_ir.rs`, `db/analysis.rs`, `ltm_agg.rs`, `ltm_augment.rs`, `ltm_finding.rs`) compiles its synthetic variables through the same fragment pipeline as user variables; see [docs/design/ltm--loops-that-matter.md](/docs/design/ltm--loops-that-matter.md)
-- Native Vensim MDL parser in `mdl/`; see [docs/design/mdl-parser.md](/docs/design/mdl-parser.md)
+
+### `src/simlin-wasmgen` (Rust)
+An alternative WebAssembly code-generation backend: it lowers a compiled model to one self-contained wasm module (no host imports) for fast repeated re-simulation; the VM stays the correctness oracle (every emitted module is checked against it).
+Surfaced through libsimlin `simlin_model_compile_to_wasm`.
+
+### `src/simlin-layout` (Rust)
+A model's stock-and-flow diagram laid out: whole, or kept in line with the model after an edit without moving what the edit did not touch.
+
+### `src/simlin-save-check` (Rust)
+Whether saving a project in a format keeps what its model means: the project is saved, the save read back, and the two compared, as definitions and as runs.
+
+### `src/simlin-tools` (Rust)
+The agent tool surface: a session per model that answers an agent's tool calls with JSON.
+libsimlin depends on it under its `agent_tools` feature, which the browser bundle leaves out.
 
 ### `src/libsimlin` (Rust)
 Flat "C" FFI wrapper around simlin-engine.
@@ -56,23 +80,19 @@ Express.js backend.
 Firebase Auth (`authn.ts`), Firestore persistence (`models/db-firestore.ts`) in protobuf form.
 
 ### `src/simlin-mcp-core` (Rust)
-Transport-agnostic core library shared by every Simlin MCP server.
-Owns the `ProjectAccess` trait (the storage abstraction), the three reused tools (`read_model`, `edit_model`, `create_model`) as async free functions, the rmcp `ServerHandler` impl as `SimlinMcpServer<A: ProjectAccess>`, and the wire-format types (`ErrorOutput`, `LoopDominanceSummary`, `DominantPeriodOutput`).
+Transport-agnostic core library of the Simlin MCP server.
+Owns the `ProjectAccess` trait (the storage abstraction), the three tools (`read_model`, `edit_model`, `create_model`) as async free functions, the rmcp `ServerHandler` impl as `SimlinMcpServer<A: ProjectAccess>`, and the wire-format types (`ErrorOutput`, `LoopDominanceSummary`, `DominantPeriodOutput`).
 
 ### `src/simlin-mcp` (Rust)
 Stdio MCP server for AI assistants.
 Thin binary built on `simlin-mcp-core` plus a stateless `FileSystemAccess` impl that re-reads/writes the file on every call.
 Distributed as `@simlin/mcp` on npm via per-platform optional dependencies.
 
-### `src/simlin-serve` (Rust + TypeScript SPA)
-Local HTTP viewer/editor and in-process MCP server.
-Binds two `127.0.0.1` ports (UI + MCP) and serves a React SPA from any directory containing SD models.
-Saves merge through a per-project Loro CRDT shared by the HTTP, MCP, and watcher paths so concurrent edits converge.
-Distributed as `@simlin/serve` on npm using the same per-platform pattern as `@simlin/mcp`.
-SPA workspace member is `@simlin/serve-web` (not published).
-
 ### `src/simlin-cli` (Rust)
 CLI for simulating and converting models, mostly for testing/debugging.
+
+### `src/simlin-tests` (Rust)
+The engine's integration tests, benchmarks and instruments, in a package nothing depends on.
 
 ### `src/pysimlin` (Python/Rust)
 Python bindings for the simulation engine via CFFI.
@@ -88,23 +108,20 @@ The allowed dependency graph is enforced by `scripts/check-deps.py` reading from
 
 ### Rust
 
-```
-simlin-engine (leaf)
-  ^       ^             ^
-  |       |             |
-simlin    simlin-mcp-core
-  ^         ^      ^
-  |         |      |
-simlin-cli  simlin-mcp  simlin-serve
-            (also depends on simlin-engine directly)
-```
-
-- `simlin-engine` -> (none)
-- `simlin` (libsimlin) -> `simlin-engine`
-- `simlin-mcp-core` -> `simlin-engine`
-- `simlin-mcp` -> `simlin-mcp-core`, `simlin-engine`
-- `simlin-serve` -> `simlin-mcp-core`, `simlin-engine`
-- `simlin-cli` -> `simlin-engine`, `simlin`
+- `simlin-base` -> (none)
+- `simlin-diagram` -> `simlin-base`
+- `simlin-formats` -> `simlin-base`, `simlin-diagram`
+- `simlin-edit` -> `simlin-base`, `simlin-diagram`, `simlin-formats`
+- `simlin-engine` -> `simlin-base`
+- `simlin-layout` -> `simlin-engine`, `simlin-edit`, `simlin-diagram`, `simlin-base`
+- `simlin-wasmgen` -> `simlin-base`, `simlin-engine`
+- `simlin-save-check` -> `simlin-engine`, `simlin-formats`, `simlin-base`
+- `simlin-tools` -> `simlin-save-check`, `simlin-layout`, `simlin-engine`, `simlin-edit`, `simlin-formats`, `simlin-base`
+- `simlin` (libsimlin) -> `simlin-tools` (optional), `simlin-save-check`, `simlin-layout`, `simlin-wasmgen`, `simlin-engine`, `simlin-edit`, `simlin-formats`, `simlin-diagram`, `simlin-base`
+- `simlin-mcp-core` -> `simlin-layout`, `simlin-engine`, `simlin-edit`, `simlin-formats`, `simlin-base`
+- `simlin-mcp` -> `simlin-mcp-core`
+- `simlin-cli` -> `simlin-engine`, `simlin-formats`, `simlin-diagram`, `simlin-base`
+- `simlin-tests` -> (none; its dependencies are dev-dependencies, which the policy leaves out)
 
 ### TypeScript
 
@@ -118,7 +135,7 @@ simlin-cli  simlin-mcp  simlin-serve
 @simlin/diagram
   ^       ^         ^
   |       |         |
-@simlin/app   @simlin/server   @simlin/serve-web   simlin-site   @simlin/notebook-widget
+@simlin/app   @simlin/server   simlin-site   @simlin/notebook-widget
 ```
 
 - `@simlin/engine` -> (none)
@@ -126,7 +143,6 @@ simlin-cli  simlin-mcp  simlin-serve
 - `@simlin/diagram` -> `@simlin/core`, `@simlin/engine`
 - `@simlin/app` -> `@simlin/core`, `@simlin/diagram`, `@simlin/engine`
 - `@simlin/server` -> `@simlin/core`, `@simlin/diagram`, `@simlin/engine`
-- `@simlin/serve-web` -> `@simlin/core`, `@simlin/diagram`, `@simlin/engine`
 - `@simlin/notebook-widget` -> `@simlin/diagram`, `@simlin/engine`
 - `simlin-site` -> `@simlin/diagram` (embeds live model diagrams on the website)
 

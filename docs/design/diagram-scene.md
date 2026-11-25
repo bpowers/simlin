@@ -2,14 +2,14 @@
 
 The scene is a resolution-independent display list of one model's stock-and-flow view.
 The engine produces it; native renderers draw it.
-It exists so that exactly one implementation decides what a diagram looks like: the geometry behind every number here is computed by the same functions `simlin_engine::diagram::render_svg` uses, and that SVG output is byte-identical to the TypeScript editor's static renderer.
+It exists so that exactly one implementation decides what a diagram looks like: the geometry behind every number here is computed by the same functions `simlin_diagram::render_svg` uses, and that SVG output is byte-identical to the TypeScript editor's static renderer.
 A renderer that draws this scene faithfully therefore matches the web editor without re-deriving any geometry.
 
 This document is normative for both producers and consumers.
 
 ## Producing a scene
 
-- Engine: `simlin_engine::diagram::build_scene(project: &datamodel::Project, model_name: &str) -> Result<Scene, String>`, beside `render_svg`.
+- Engine: `simlin_diagram::build_scene(project: &datamodel::Project, model_name: &str) -> Result<Scene, String>`, beside `render_svg`.
 - libsimlin: `simlin_project_render_scene(project, model_name, out_buffer, out_len, out_error)` returns the scene as UTF-8 JSON in a buffer the caller frees with `simlin_free`.
   Like `simlin_project_render_svg`, a model with no stock-and-flow view is laid out automatically (transiently, never persisted) before the scene is built.
 
@@ -72,7 +72,7 @@ One canvas unit is one point at zoom 1.
 | `aux`    | 5       | canonical name                           | yes              | yes          |
 | `alias`  | 5       | canonical name of the aliased variable, `null` when the target is missing | yes when `ident` is non-null | yes |
 
-- `ident` is the canonical identifier (`simlin_engine::common::canonicalize`) of the variable whose simulation series the element displays.
+- `ident` is the canonical identifier (`simlin_base::common::canonicalize`) of the variable whose simulation series the element displays.
   An alias displays its target's series, exactly as the web canvas does.
 - `isArrayed` is true when the variable has an apply-to-all or arrayed equation; the shapes already include the stacked copies.
   An alias is never arrayed and draws one circle whatever its target's equation, as the web canvas's `Alias.tsx` draws it.

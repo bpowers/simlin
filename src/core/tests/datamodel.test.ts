@@ -2062,7 +2062,7 @@ describe('groupSeriesByIdent', () => {
 // These tests pin the wire fields that an editor upsert (a full variable
 // replace by UID) previously dropped, because datamodel.ts neither read them
 // on the way in nor wrote them on the way out. The JSON key names are the
-// source of truth in the Rust serializer src/simlin-engine/src/json.rs
+// source of truth in the Rust serializer src/simlin-formats/src/json.rs
 // (all #[serde(rename_all = "camelCase")]):
 //   - Compat: activeInitial, nonNegative, canBeModuleInput, isPublic, dataSource
 //   - JsonDataSource: kind ("data"/"constants"/"lookups"/"subscript"), file,

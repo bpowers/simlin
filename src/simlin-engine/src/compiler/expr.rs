@@ -4,9 +4,9 @@
 
 use std::collections::BTreeSet;
 
-use crate::ast::{ArrayView, BinaryOp, Loc};
-use crate::common::{Canonical, Ident, Result};
-use crate::sim_err;
+use simlin_base::ast::{ArrayView, BinaryOp, Loc};
+use simlin_base::common::{Canonical, Ident, Result};
+use simlin_base::sim_err;
 
 use super::dimensions::UnaryOp;
 
@@ -29,24 +29,13 @@ use super::dimensions::UnaryOp;
 /// place a sub-model's own (already fixed) layout is consulted during
 /// lowering: the module dependency's `DepKind::Module` carries that layout as
 /// a `ModelShape`, and `Context::resolve` is its one reader.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct VarRef {
     /// Canonical name of the variable that owns the referenced slot.
     pub name: Ident<Canonical>,
     /// Offset of the slot within that variable's storage: 0 for a scalar,
     /// `0..size` for an array element or a slot inside a module instance.
     pub element_offset: usize,
-}
-
-// A `VarRef` rides on `PerVarBytecodes`, whose `Debug` is unconditional (the
-// fragment characterization goldens and the salsa artifacts print it), so this
-// cannot hang off the optional `debug-derive` feature the way `Expr` does.
-#[cfg(not(feature = "debug-derive"))]
-impl std::fmt::Debug for VarRef {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{self}")
-    }
 }
 
 /// `name@element` -- the spelling the fragment characterization goldens and the
@@ -99,13 +88,12 @@ impl VarRef {
     }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Table {
     pub data: Vec<(f64, f64)>,
     /// The graphical function's kind, which a plain application of the table
     /// is read by (`Compiler::lookup_mode`).
-    pub kind: crate::datamodel::GraphicalFunctionKind,
+    pub kind: simlin_base::datamodel::GraphicalFunctionKind,
 }
 
 impl Table {
@@ -114,7 +102,7 @@ impl Table {
     pub(crate) fn empty() -> Self {
         Self {
             data: vec![],
-            kind: crate::datamodel::GraphicalFunctionKind::Continuous,
+            kind: simlin_base::datamodel::GraphicalFunctionKind::Continuous,
         }
     }
 
@@ -136,13 +124,12 @@ impl Table {
     }
 }
 
-pub(crate) type BuiltinFn = crate::builtins::BuiltinFn<Expr>;
+pub(crate) type BuiltinFn = simlin_base::builtins::BuiltinFn<Expr>;
 
 /// Represents a single subscript index in a dynamic Subscript expression.
 /// This enum distinguishes between single-element access and range access,
 /// enabling proper bytecode generation for dynamic ranges.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum SubscriptIndex {
     /// Single element access - evaluates to a 1-based index
     Single(Expr),
@@ -151,8 +138,7 @@ pub enum SubscriptIndex {
     Range(Expr, Expr),
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone)]
 #[allow(dead_code)]
 pub enum Expr {
     Const(f64, Loc),

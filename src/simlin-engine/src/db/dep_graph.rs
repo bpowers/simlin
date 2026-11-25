@@ -36,17 +36,18 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use crate::canonicalize;
 use crate::capture::CaptureKind;
+use simlin_base::canonicalize;
 // `Canonical`/`Ident` are used in production by the element-cycle
 // refinement (`resolve_recurrence_sccs` and friends), not only by the
 // `#[cfg(test)]` SCC accessors.
-use crate::common::{Canonical, Ident, IdentMap, IdentSet};
 use crate::db::{
     Db, DepPhase, DepRefs, ModuleInputSet, SourceModel, SourceProject, SourceVariable,
-    SourceVariableKind, project_module_graph, variable_direct_dependencies,
+    project_module_graph, variable_direct_dependencies,
 };
 use crate::variable::DepLag;
+use crate::variable::SourceVariableKind;
+use simlin_base::common::{Canonical, Ident, IdentMap, IdentSet};
 
 /// Per-variable dependency facts used to build the model dependency
 /// graph.
@@ -790,8 +791,8 @@ fn static_view_element_offsets(view: &crate::compiler::symbolic::SymbolicStaticV
 fn element_node_key(
     member: &str,
     element: usize,
-) -> crate::common::Ident<crate::common::Canonical> {
-    crate::common::Ident::from_str_unchecked(&format!("{member}\u{241F}{element:010}"))
+) -> simlin_base::common::Ident<simlin_base::common::Canonical> {
+    simlin_base::common::Ident::from_str_unchecked(&format!("{member}\u{241F}{element:010}"))
 }
 
 /// The verdict of refining one SCC into its induced element graph.
@@ -815,7 +816,7 @@ enum SccVerdict {
 /// **Why symbolic (GH #575).** The prior builder keyed the element graph
 /// on raw `Expr::AssignCurr` operands, which are *per-variable mini-slots*
 /// (a private per-variable layout in which every member's own variable sat
-/// at `crate::vm::IMPLICIT_VAR_COUNT`, its own deps after it). Those slots are
+/// at `simlin_base::results::IMPLICIT_VAR_COUNT`, its own deps after it). Those slots are
 /// NOT model-global, so for a multi-member
 /// SCC every member's write-slots collided and every cross-member read
 /// landed on the *reading* member's private dep mini-slots -- ZERO

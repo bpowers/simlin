@@ -9,64 +9,28 @@ edition = "2024"
 crate-type = ["rlib"]
 
 [features]
-default = ["schema", "ai_info", "debug-derive", "agent_tools"]
-# Gates derive(Debug) on most types. Types that implement std::error::Error,
-# are used with .unwrap(), or appear in assert_eq!() keep unconditional Debug.
-# New types should use: #[cfg_attr(feature = "debug-derive", derive(Debug))]
-debug-derive = []
-schema = ["dep:schemars"]
+default = ["ai_info"]
 ai_info = ["dep:ed25519", "dep:base64"]
-file_io = ["dep:csv"]
-ext_data = ["dep:calamine"]
-png_render = ["dep:resvg"]
-# The agent tool surface (`tools`): a session per model that answers an
-# agent's tool calls with JSON. On by default; libsimlin's browser wasm bundle
-# leaves it out, since no browser code calls it (it is about 5% of that
-# bundle).
-agent_tools = []
 # Compiles in the `generate_loop_score_variables` loop-score tracing
 # instrumentation (per-loop cumulative equation bytes + RSS sampling), a
 # benchmarking/diagnostic aid only. Off by default so production builds carry
 # no /proc/self/status read, env lookup, or eprintln! dead code. Enable with
 # `--features ltm_bench` when running the `ltm_full_bench` example.
 ltm_bench = []
-# Compiles in `test_common` (the `TestProject` model builder) for OTHER crates'
-# test targets. Every neighbour module in `src/lib.rs` is `#[cfg(test)]`, but
-# `test_common` cannot be: libsimlin's and simlin-cli's tests build against this
-# crate as an external dependency, where `cfg(test)` items do not exist. Left
-# un-gated it shipped in every release build (GH #925). Consumers add it through
-# a `[dev-dependencies]` edge, so a normal `cargo build` never sees it.
+# Compiles in what OTHER crates' tests use: `test_common` (the `TestProject`
+# model builder), `testutils`, and the builders and limit overrides they drive
+# the compiler with. Those tests build against this crate as an external
+# dependency, where `cfg(test)` items do not exist. Un-gated, they would ship in
+# every release build (GH #925). Consumers add it through a `[dev-dependencies]`
+# edge, so a normal `cargo build` never sees it.
 test-support = []
-# The layout-quality eval statistics (`layout::eval_stats`). Its only consumer
-# is `examples/layout_eval`, which lists this in its required-features, so the
-# 1,300-line module leaves every wasm/native production build. Its own
-# `#[cfg(test)]` tests keep running under `cargo test` via the self
-# dev-dependency below.
-layout_eval = []
 
 [dependencies]
-unicode-xid = "0.2"
-# Protobuf runtime for the checked-in `src/project_io.gen.rs`. The generator in
-# scripts/gen-rust-protobufs.sh pins buffa-build to the version Cargo.lock
-# resolves this to, so bumping it means regenerating.
-buffa = "0.9"
+simlin-base = { version = "0.1", path = "../simlin-base" }
 smallvec = { version = "1", features = [ "union" ] }
-# Fast, deterministic (fixed-seed) hasher for hot internal maps in the
-# dependency-graph cycle gate. Wasm-safe (no getrandom). FxHash's fixed seed
-# keeps map iteration deterministic where it is intentionally not order-leaking.
-rustc-hash = "2"
 ed25519 = { version = "2", optional = true }
 base64 = { version = "0.22", optional = true }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-# 1.2.3 is the floor: earlier releases list an internally tagged variant's tag
-# last, and the tool catalog's property order lists it first.
-schemars = { version = "1.2.3", features = ["preserve_order"], optional = true }
-# compat dependencies
-quick-xml = { version = "0.41", features = [ "serialize", "overlapped-lists" ] }
-csv = { version = "1", optional = true }
-calamine = { version = "0.33", optional = true }
-resvg = { version = "0.47", optional = true, default-features = false, features = ["text"] }
 
 # 0.28.5 is the floor: earlier 0.28 releases can free an interned value's
 # storage while it is in use (RUSTSEC-2026-0308).
@@ -77,125 +41,10 @@ salsa = "0.28.5"
 # in the dependency tree via salsa, which also provides its `salsa::Update` impl.
 indexmap = "2"
 
-# WebAssembly code-generation backend (compiles models to wasm as an
-# alternative to the bytecode VM). no_std + alloc only, single transitive
-# dependency (leb128fmt), and builds cleanly to wasm32-unknown-unknown so it
-# is available inside the libsimlin wasm bundle.
-wasm-encoder = { version = "0.244", default-features = false }
-
-rand = { version = "0.9", default-features = false, features = ["std_rng"] }
-
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-rayon = "1"
-
 [dev-dependencies]
-# Self dev-dependency: turns on `file_io` for this crate's own test, bench, and
-# example targets without turning it on for any production build. `file_io`
-# exists to keep the `csv` dependency (and filesystem access) out of the wasm
-# bundle -- it is a production dependency gate, not a test-coverage gate. The
-# integration corpus loads its expected-results fixtures through `load_dat` /
-# `load_csv` and exercises `FilesystemDataProvider`, so the tests need the
-# feature unconditionally; without this line a bare
-# `cargo test -p simlin-engine` silently compiled away the entire model corpus
-# (GH #925). Cargo permits a dev-dependency cycle back onto the same package.
-#
-# `default-features = false` is load-bearing, not cargo boilerplate: feature
-# selection is a union over every edge, so a default-features edge would silently
-# force `default` (schema, ai_info, debug-derive) back on for every dev target
-# even under an explicit `--no-default-features`, making the flag a no-op there
-# and hiding whatever a minimal-feature build would have caught. This edge must
-# add exactly `file_io` and nothing else. (Separately and pre-existing: the
-# crate's own unit tests do not compile without `debug-derive` -- thousands of
-# assert_eq!/{:?} sites -- so `--no-default-features --tests` fails on its own
-# merits. Feature-gating hygiene must be checked with `--lib`; see tech-debt 60.)
-#
-# Two properties this relies on:
-#   * The added feature is NOT unified into `cargo build`, `cargo check --lib`,
-#     or the wasm32 build -- but only because the workspace sets
-#     `resolver = "2"`. Under resolver v1 dev-dependency features unify into
-#     non-dev builds too, and `csv` would leak into the wasm bundle.
-#   * The edge puts a second, non-`cfg(test)` copy of this crate in the
-#     extern prelude of the unit-test target. Inside `src/`, always refer to
-#     this crate as `crate::`, never `simlin_engine::` -- the latter resolves
-#     to that second copy, whose `#[cfg(test)]` items do not exist and whose
-#     types are distinct from `crate::`'s.
-simlin-engine = { path = ".", default-features = false, features = ["file_io", "test-support", "layout_eval"] }
-csv = "1"
-rand = "0.9"
-# The VDF parity harness (tests/integration/vdf_parity.rs) requires
-# bitwise-exact f64 decoding of tools/vdf_xray.py's JSON output. Without
-# float_roundtrip, serde_json's fast float parser can be off by one ULP,
-# which reads as a phantom Rust-vs-Python divergence. Dev-only: production
-# builds of the crate keep the default fast parser.
-serde_json = { version = "1", features = ["float_roundtrip"] }
+simlin-base = { path = "../simlin-base", features = ["test-support"] }
+simlin-edit = { path = "../simlin-edit", features = ["test-support"] }
+simlin-formats = { path = "../simlin-formats", features = ["test-support", "file_io"] }
 proptest = "1.5"
-jsonschema = { version = "0.26", default-features = false }
-# default features pull in the plotters HTML-report stack (plotters,
-# criterion-plot, tinytemplate, cast, oorandom, ...); we only ever read the
-# terminal summary, so trim to the bench-runner harness alone.
-criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
-sha2 = "0.10"
-ed25519-dalek = "2"
-tempfile = "3"
 
-# Pure-Rust no_std wasm interpreter used as a correctness oracle: every wasm
-# module the wasmgen backend produces is executed here and checked against the
-# bytecode VM. Git-only (not yet published to crates.io); pinned to a commit.
-# The host `Store` API lives in the `checked` workspace member, not the `wasm`
-# lib crate.
-wasm-interpreter = { git = "https://github.com/DLR-FT/wasm-interpreter.git", rev = "64cedbba603edfd64cbb6b5a19f5fa34530bb03a" }
-checked = { git = "https://github.com/DLR-FT/wasm-interpreter.git", rev = "64cedbba603edfd64cbb6b5a19f5fa34530bb03a", features = ["linker", "interop"] }
-
-# Integration tests are consolidated into the single tests/integration
-# harness (see tests/integration/main.rs for why); feature-gated test
-# modules use #[cfg(feature = ...)] there instead of per-target
-# required-features entries. tests/vm_alloc.rs stays a separate
-# auto-discovered target because it installs a counting global allocator.
-
-# The layout_eval example calls the png_render-gated `render_png` and loads
-# Vensim corpus models that reference external data (file_io). Examples are
-# auto-discovered and built by `--all-targets` / clippy / pre-commit under the
-# DEFAULT feature set (which excludes png_render); without this `[[example]]`
-# entry pinning required-features, that build would fail to compile the example.
-[[example]]
-name = "layout_eval"
-required-features = ["png_render", "file_io", "layout_eval"]
-
-[[bench]]
-name = "array_ops"
-harness = false
-
-[[bench]]
-name = "simulation"
-harness = false
-
-[[bench]]
-name = "compiler"
-harness = false
-
-[[bench]]
-name = "rapidhash_bench"
-harness = false
-
-# Every native binary that embeds this engine (simlin-cli, simlin-serve,
-# simlin-mcp, and libsimlin's `mimalloc` feature, which pysimlin's build turns
-# on) installs mimalloc as its global allocator. The compile path is
-# allocation-bound, so a harness on system malloc measures an allocator no
-# shipped native build actually runs, and over-credits any change that only
-# moves malloc traffic.
-#
-# A dev-dependency does NOT select an allocator -- each harness has to install
-# one -- so every harness that reports a timing or a memory figure does:
-# `examples/clearn_profile.rs`, `examples/backend_bench.rs` and
-# `examples/ltm_mem_bench.rs` back their counting allocators with it, and all
-# four benches declare it directly. Adding a harness here means adding the
-# `#[global_allocator]` too, or its numbers describe a different allocator than
-# the rest.
-#
-# Allocation *counts* stay the allocator-independent metric, and the one that
-# carries over to the wasm bundle, which links neither mimalloc nor this
-# dependency.
-[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-mimalloc = "0.1"
-
-[build-dependencies]
+# The integration tests, examples and benches of this crate are in simlin-tests.

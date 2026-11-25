@@ -10,11 +10,6 @@
 // statically validates that compiled bytecode cannot exceed STACK_CAPACITY.
 #![deny(unsafe_code)]
 
-// Re-exported so downstream crates (libsimlin, simlin-cli) encode and decode
-// `project_io` messages through the same runtime the generated code was built
-// against, instead of each declaring a `buffa` version of its own that has to
-// track this crate's.
-pub use buffa;
 // Re-exported so downstream crates (libsimlin, integration tests) can name the
 // `IndexMap` type of `db::LtmVariablesResult.loop_partitions` without taking a
 // direct `indexmap` dependency. The emission-order iteration is load-bearing
@@ -24,49 +19,28 @@ pub use indexmap;
 
 #[cfg(feature = "ai_info")]
 pub mod ai_info;
-mod alloc;
 pub mod analysis;
 #[cfg(test)]
 mod array_operand_materialization_tests;
 #[cfg(test)]
 mod array_tests;
-mod ast;
 #[cfg(test)]
 mod builtin_signature_tests;
-pub mod builtins;
 mod builtins_visitor;
-mod bytecode;
-mod capture;
-pub mod common;
-pub mod compat;
+pub mod bytecode;
+#[cfg(test)]
+mod canonical_value_tests;
+pub mod capture;
 mod compiler;
 pub mod conveyor;
 pub mod conveyor_compile;
 #[cfg(test)]
 mod conveyor_tests;
-pub mod data_provider;
-pub mod datamodel;
 pub mod db;
 mod diagnostic;
-pub mod diagram;
-mod dimensions;
-pub mod editing;
-mod element_equations;
-pub mod equation_view;
 pub mod errors;
-pub mod float;
-mod import_losses;
-pub mod io;
-pub mod json;
-#[cfg(test)]
-mod json_proptest;
-pub mod json_sdai;
-#[cfg(test)]
-mod json_sdai_proptest;
 #[cfg(test)]
 mod keyword_ident_tests;
-pub mod layout;
-mod lexer;
 #[cfg(test)]
 mod lookup_only_tests;
 pub mod ltm;
@@ -76,200 +50,61 @@ pub mod ltm_dominance;
 #[cfg(test)]
 mod ltm_elementwise_tests;
 pub mod ltm_finding;
-#[cfg(test)]
-mod ltm_loop_scores_test_support;
+#[cfg(any(test, feature = "test-support"))]
+pub mod ltm_loop_scores_test_support;
 pub mod ltm_post;
 #[cfg(test)]
 mod macro_expansion_tests;
 #[cfg(test)]
 mod mapped_reference_semantics_tests;
-pub mod mdl;
 #[cfg(test)]
 mod mismatched_read_tests;
 mod model;
-mod module_functions;
-mod parser;
-mod patch;
-mod patch_dimensions;
-mod patch_fields;
-#[cfg(test)]
-mod patch_sharing_tests;
 #[cfg(test)]
 mod per_element_gf_tests;
-// Generated code: silence the lints buffa-codegen's output trips rather than
-// hand-editing a file the freshness test regenerates.
-#[allow(
-    clippy::derive_partial_eq_without_eq,
-    clippy::derivable_impls,
-    clippy::match_single_binding
-)]
-#[path = "project_io.gen.rs"]
-pub mod project_io;
 pub mod queue;
 pub mod queue_compile;
-#[doc(hidden)]
-pub mod rapidhash;
-mod results;
+#[cfg(test)]
+mod results_tsv_tests;
 #[cfg(test)]
 mod rk_integration_tests;
 #[cfg(test)]
 mod round_builtin_tests;
-pub mod save_check;
-pub mod serde;
-#[cfg(test)]
-mod serde_proptest;
-mod shared_vec;
 mod snapshot_arg;
-#[path = "stdlib.gen.rs"]
-mod stdlib;
 #[cfg(test)]
 mod subscript_out_of_range_tests;
-pub mod systems;
-#[cfg(test)]
-#[path = "systems_stdlib_tests.rs"]
-mod systems_stdlib_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_common;
-#[cfg(test)]
-mod test_sir_xmile;
-#[cfg(test)]
-mod testutils;
-#[cfg(feature = "agent_tools")]
-pub mod tools;
+#[cfg(any(test, feature = "test-support"))]
+pub mod testutils;
 #[cfg(test)]
 mod unfilled_equation_tests;
 #[cfg(test)]
 mod unit_checking_test;
-mod units;
-mod units_check;
+pub mod units;
+pub mod units_check;
 mod units_infer;
 mod variable;
-pub mod vdf;
 mod vm;
+// The VM's own arithmetic, which simlin-wasmgen's tests hold the code it emits
+// to. Only tests name it, so a build without `test-support` keeps it inside the
+// crate, where the compiler inlines it into the VM's one call of each.
+#[cfg(feature = "test-support")]
+pub mod vm_oracle {
+    pub use crate::vm::{ChunkRegions, increment_indices, is_truthy, lookup_in_mode, pulse};
+    pub use crate::vm_vector_elm_map::vector_elm_map;
+    pub use crate::vm_vector_sort_order::vector_sort_order;
+}
 // Bytecode-composition profiling for CompiledSimulation; a diagnostics-only
 // sibling of `vm` kept separate purely for the per-file line cap.
 mod vm_profile;
 mod vm_vector_elm_map;
 mod vm_vector_sort_order;
-// WebAssembly code-generation backend: lowers the salsa-compiled
-// `CompiledSimulation` bytecode (the same value `Vm::new` consumes) to a
-// self-contained wasm module, as an alternative execution path to the bytecode
-// VM. Validated in tests by executing the emitted module under a pure-Rust wasm
-// interpreter and comparing against the VM.
-pub mod wasmgen;
-pub mod xmile;
 
-pub use self::common::{Error, ErrorCode, ErrorKind, Result, canonicalize};
-pub use self::import_losses::ImportWarning;
-pub use self::patch::{
-    ModelOperation, ModelPatch, PatchReport, ProjectOperation, ProjectPatch, Renamed, VariableRef,
-    apply_patch, apply_patch_reporting, is_view_only_patch,
-};
 pub use self::queue_compile::build_sim;
-pub use self::results::{Method, Results, Specs as SimSpecs};
-pub use self::variable::{DepClassification, DepLag, DepOccurrence, Variable};
-pub use self::vm::{CompiledSimulation, Vm};
-pub use self::vm_profile::BytecodeProfile;
-
-// Re-export compat functions at the crate root for convenience
-#[cfg(feature = "file_io")]
-pub use self::compat::{load_csv, load_dat};
-pub use self::compat::{
-    open_systems, open_vensim, open_vensim_with_data, open_vensim_with_data_and_warnings,
-    open_vensim_with_warnings, open_xmile, open_xmile_with_warnings, to_mdl, to_mdl_with_warnings,
-    to_systems, to_xmile,
+pub use self::variable::{
+    DepClassification, DepLag, DepOccurrence, SourceVariableKind, Variable, is_lookup_only,
+    parse_table,
 };
-#[cfg(feature = "file_io")]
-pub use self::data_provider::FilesystemDataProvider;
-pub use self::data_provider::{DataProvider, NullDataProvider};
-#[cfg(test)]
-mod protobuf_freshness_tests {
-    use sha2::{Digest, Sha256};
-    use std::fs;
-
-    const GEN_FILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/project_io.gen.rs");
-    const PROTO_FILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/project_io.proto");
-
-    fn extract_hash_from_gen_file(content: &str) -> Option<&str> {
-        for line in content.lines() {
-            if let Some(rest) = line.strip_prefix("// Proto file SHA256: ") {
-                return Some(rest.trim());
-            }
-        }
-        None
-    }
-
-    #[test]
-    fn project_io_gen_is_up_to_date() {
-        let gen_content = fs::read_to_string(GEN_FILE)
-            .expect("failed to read project_io.gen.rs - run `pnpm build:gen-protobufs`");
-
-        let recorded_hash = extract_hash_from_gen_file(&gen_content)
-            .expect("project_io.gen.rs is missing SHA256 hash header");
-
-        let proto_content = fs::read(PROTO_FILE).expect("failed to read project_io.proto");
-        let mut hasher = Sha256::new();
-        hasher.update(&proto_content);
-        let current_hash = format!("{:x}", hasher.finalize());
-
-        assert_eq!(
-            recorded_hash, current_hash,
-            "project_io.proto has changed since project_io.gen.rs was generated.\n\
-             Run `pnpm build:gen-protobufs` to regenerate the Rust protobuf code."
-        );
-    }
-}
-
-#[cfg(test)]
-mod stdlib_freshness_tests {
-    use sha2::{Digest, Sha256};
-    use std::fs;
-
-    const GEN_FILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/stdlib.gen.rs");
-    const STDLIB_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../stdlib");
-
-    fn extract_hash_from_gen_file(content: &str) -> Option<&str> {
-        for line in content.lines() {
-            if let Some(rest) = line.strip_prefix("// Stdlib SHA256: ") {
-                return Some(rest.trim());
-            }
-        }
-        None
-    }
-
-    #[test]
-    fn stdlib_gen_is_up_to_date() {
-        let gen_content = fs::read_to_string(GEN_FILE)
-            .expect("failed to read stdlib.gen.rs - run `pnpm rebuild-stdlib`");
-
-        let recorded_hash = extract_hash_from_gen_file(&gen_content)
-            .expect("stdlib.gen.rs is missing SHA256 hash header");
-
-        let mut hasher = Sha256::new();
-        let mut entries: Vec<_> = fs::read_dir(STDLIB_DIR)
-            .expect("failed to read stdlib directory")
-            .collect::<Result<Vec<_>, _>>()
-            .expect("failed to read directory entry")
-            .into_iter()
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "stmx"))
-            .collect();
-        entries.sort_by_key(|e| e.path());
-
-        for entry in entries {
-            let path = entry.path();
-            let file_stem = path
-                .file_stem()
-                .expect("stmx file should have a file stem")
-                .to_string_lossy();
-            hasher.update(file_stem.as_bytes());
-            hasher.update(fs::read(&path).expect("failed to read stmx file"));
-        }
-        let current_hash = format!("{:x}", hasher.finalize());
-
-        assert_eq!(
-            recorded_hash, current_hash,
-            "stdlib/*.stmx files have changed since stdlib.gen.rs was generated.\n\
-             Run `pnpm rebuild-stdlib` to regenerate."
-        );
-    }
-}
+pub use self::vm::{CompiledSimulation, ModuleKey, StepPart, Vm, make_module_key};
+pub use self::vm_profile::BytecodeProfile;

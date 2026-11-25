@@ -14,15 +14,15 @@ use super::types::{
     Link, LinkPolarity, Loop, LoopPolarity, POLARITY_CONFIDENCE_THRESHOLD, TruncatedByBudget,
     normalize_module_ref,
 };
-use crate::ast::BinaryOp;
-use crate::common::{Canonical, Ident, IdentMap, IdentSet};
-use crate::datamodel::Dimension;
 use crate::db::{
     DetectedLoop, DetectedLoopPolarity, SimlinDb, causal_graph_with_modules,
     compute_link_polarities, model_cycle_partitions, model_detected_loops, sync_from_datamodel,
 };
 use crate::testutils::{sim_specs_with_units, x_aux, x_flow, x_model, x_project, x_stock};
 use crate::variable::{VarKind, Variable};
+use simlin_base::ast::BinaryOp;
+use simlin_base::common::{Canonical, Ident, IdentMap, IdentSet};
+use simlin_base::datamodel::Dimension;
 use std::collections::{HashMap, HashSet};
 
 #[test]
@@ -295,20 +295,24 @@ fn test_multi_module_loops() {
 #[test]
 fn test_link_polarity_detection() {
     // Test polarity detection in simple expressions
-    use crate::ast::{Ast, Expr2};
+    use simlin_base::ast::{Ast, Expr2};
 
     // Test positive link: y = x * 2
     let x_var = Ident::new("x");
     let expr = Expr2::Op2(
         BinaryOp::Mul,
-        Box::new(Expr2::Var(x_var.clone(), None, crate::ast::Loc::default())),
+        Box::new(Expr2::Var(
+            x_var.clone(),
+            None,
+            simlin_base::ast::Loc::default(),
+        )),
         Box::new(Expr2::Const(
             "2".to_string(),
-            crate::ast::Literal::new(2.0),
-            crate::ast::Loc::default(),
+            simlin_base::ast::Literal::new(2.0),
+            simlin_base::ast::Loc::default(),
         )),
         None,
-        crate::ast::Loc::default(),
+        simlin_base::ast::Loc::default(),
     );
     let ast = Ast::Scalar(expr);
     let empty_vars = IdentMap::default();
@@ -320,12 +324,16 @@ fn test_link_polarity_detection() {
         BinaryOp::Sub,
         Box::new(Expr2::Const(
             "0".to_string(),
-            crate::ast::Literal::new(0.0),
-            crate::ast::Loc::default(),
+            simlin_base::ast::Literal::new(0.0),
+            simlin_base::ast::Loc::default(),
         )),
-        Box::new(Expr2::Var(x_var.clone(), None, crate::ast::Loc::default())),
+        Box::new(Expr2::Var(
+            x_var.clone(),
+            None,
+            simlin_base::ast::Loc::default(),
+        )),
         None,
-        crate::ast::Loc::default(),
+        simlin_base::ast::Loc::default(),
     );
     let ast = Ast::Scalar(expr);
     let polarity = analyze_link_polarity(&ast, &x_var, &empty_vars);
@@ -334,14 +342,18 @@ fn test_link_polarity_detection() {
     // Test negative link via multiplication: y = x * -3
     let expr = Expr2::Op2(
         BinaryOp::Mul,
-        Box::new(Expr2::Var(x_var.clone(), None, crate::ast::Loc::default())),
+        Box::new(Expr2::Var(
+            x_var.clone(),
+            None,
+            simlin_base::ast::Loc::default(),
+        )),
         Box::new(Expr2::Const(
             "-3".to_string(),
-            crate::ast::Literal::new(-3.0),
-            crate::ast::Loc::default(),
+            simlin_base::ast::Literal::new(-3.0),
+            simlin_base::ast::Loc::default(),
         )),
         None,
-        crate::ast::Loc::default(),
+        simlin_base::ast::Loc::default(),
     );
     let ast = Ast::Scalar(expr);
     let polarity = analyze_link_polarity(&ast, &x_var, &empty_vars);
@@ -357,11 +369,11 @@ fn test_link_polarity_detection() {
 /// Negative (and the loop Balancing at confidence 1.0).
 #[test]
 fn test_polarity_mul_both_operands_referencing_source_is_unknown() {
-    use crate::ast::{Ast, Expr2};
-    let loc = crate::ast::Loc::default();
+    use simlin_base::ast::{Ast, Expr2};
+    let loc = simlin_base::ast::Loc::default();
     let x_var: Ident<Canonical> = Ident::new("x");
     let var = |n: &str| Expr2::Var(Ident::new(n), None, loc);
-    let cnst = |v: f64| Expr2::Const(format!("{v}"), crate::ast::Literal::new(v), loc);
+    let cnst = |v: f64| Expr2::Const(format!("{v}"), simlin_base::ast::Literal::new(v), loc);
     let op2 =
         |op: BinaryOp, l: Expr2, r: Expr2| Expr2::Op2(op, Box::new(l), Box::new(r), None, loc);
     let empty_vars = IdentMap::default();
@@ -397,11 +409,11 @@ fn test_polarity_mul_both_operands_referencing_source_is_unknown() {
 /// is Positive.
 #[test]
 fn test_polarity_div_numerator_value_sign_guards_denominator_flip() {
-    use crate::ast::{Ast, Expr2};
-    let loc = crate::ast::Loc::default();
+    use simlin_base::ast::{Ast, Expr2};
+    let loc = simlin_base::ast::Loc::default();
     let y_var: Ident<Canonical> = Ident::new("y");
     let var = |n: &str| Expr2::Var(Ident::new(n), None, loc);
-    let cnst = |v: f64| Expr2::Const(format!("{v}"), crate::ast::Literal::new(v), loc);
+    let cnst = |v: f64| Expr2::Const(format!("{v}"), simlin_base::ast::Literal::new(v), loc);
     let op2 =
         |op: BinaryOp, l: Expr2, r: Expr2| Expr2::Op2(op, Box::new(l), Box::new(r), None, loc);
     let empty_vars = IdentMap::default();
@@ -439,11 +451,11 @@ fn test_polarity_div_numerator_value_sign_guards_denominator_flip() {
 /// Negative.
 #[test]
 fn test_polarity_div_denominator_value_sign_guards_numerator_polarity() {
-    use crate::ast::{Ast, Expr2};
-    let loc = crate::ast::Loc::default();
+    use simlin_base::ast::{Ast, Expr2};
+    let loc = simlin_base::ast::Loc::default();
     let x_var: Ident<Canonical> = Ident::new("x");
     let var = |n: &str| Expr2::Var(Ident::new(n), None, loc);
-    let cnst = |v: f64| Expr2::Const(format!("{v}"), crate::ast::Literal::new(v), loc);
+    let cnst = |v: f64| Expr2::Const(format!("{v}"), simlin_base::ast::Literal::new(v), loc);
     let op2 =
         |op: BinaryOp, l: Expr2, r: Expr2| Expr2::Op2(op, Box::new(l), Box::new(r), None, loc);
     let empty_vars = IdentMap::default();
@@ -480,7 +492,7 @@ fn test_polarity_div_denominator_value_sign_guards_numerator_polarity() {
     let ttc_variable = crate::variable::Variable {
         ident: ttc.clone(),
         units: None,
-        eqn: Some(crate::datamodel::Equation::Scalar("5".to_string())),
+        eqn: Some(simlin_base::datamodel::Equation::Scalar("5".to_string())),
         diagnostics: vec![],
         kind: crate::variable::VarKind::Aux {
             ast: Some(Ast::Scalar(cnst(5.0))),
@@ -509,12 +521,12 @@ fn test_polarity_div_denominator_value_sign_guards_numerator_polarity() {
 /// true partial `e^x (2 - x) / (1-x)^2` flips sign at x = 2).
 #[test]
 fn test_polarity_div_both_sides_referencing_source_is_unknown() {
-    use crate::ast::{Ast, Expr2};
-    use crate::builtins::BuiltinFn;
-    let loc = crate::ast::Loc::default();
+    use simlin_base::ast::{Ast, Expr2};
+    use simlin_base::builtins::BuiltinFn;
+    let loc = simlin_base::ast::Loc::default();
     let x_var: Ident<Canonical> = Ident::new("x");
     let var = |n: &str| Expr2::Var(Ident::new(n), None, loc);
-    let cnst = |v: f64| Expr2::Const(format!("{v}"), crate::ast::Literal::new(v), loc);
+    let cnst = |v: f64| Expr2::Const(format!("{v}"), simlin_base::ast::Literal::new(v), loc);
     let op2 =
         |op: BinaryOp, l: Expr2, r: Expr2| Expr2::Op2(op, Box::new(l), Box::new(r), None, loc);
     let empty_vars = IdentMap::default();
@@ -551,19 +563,19 @@ fn test_format_path_empty_loop() {
 /// A continuous graphical function over x = [0, 1, 2, ...] with the given
 /// y-points; used to build per-element GF fixtures for the #502 tests.
 #[cfg(test)]
-fn continuous_gf(y_points: Vec<f64>) -> crate::datamodel::GraphicalFunction {
+fn continuous_gf(y_points: Vec<f64>) -> simlin_base::datamodel::GraphicalFunction {
     let n = y_points.len();
     let y_min = y_points.iter().copied().fold(f64::INFINITY, f64::min);
     let y_max = y_points.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    crate::datamodel::GraphicalFunction {
-        kind: crate::datamodel::GraphicalFunctionKind::Continuous,
+    simlin_base::datamodel::GraphicalFunction {
+        kind: simlin_base::datamodel::GraphicalFunctionKind::Continuous,
         x_points: Some((0..n).map(|i| i as f64).collect()),
         y_points,
-        x_scale: crate::datamodel::GraphicalFunctionScale {
+        x_scale: simlin_base::datamodel::GraphicalFunctionScale {
             min: 0.0,
             max: (n.saturating_sub(1)) as f64,
         },
-        y_scale: crate::datamodel::GraphicalFunctionScale {
+        y_scale: simlin_base::datamodel::GraphicalFunctionScale {
             min: y_min,
             max: y_max,
         },
@@ -579,31 +591,36 @@ fn per_element_gf_aux(
     ident: &str,
     dim: &str,
     elements: &[&str],
-    element_gfs: Vec<crate::datamodel::GraphicalFunction>,
-) -> crate::datamodel::Variable {
+    element_gfs: Vec<simlin_base::datamodel::GraphicalFunction>,
+) -> simlin_base::datamodel::Variable {
     let arrayed = elements
         .iter()
         .zip(element_gfs)
         .map(|(elem, gf)| (elem.to_string(), "0".to_string(), None, Some(gf)))
         .collect();
-    crate::datamodel::Variable::Aux(crate::datamodel::Aux {
+    simlin_base::datamodel::Variable::Aux(simlin_base::datamodel::Aux {
         ident: ident.to_string(),
-        equation: crate::datamodel::Equation::Arrayed(vec![dim.to_string()], arrayed, None, false),
+        equation: simlin_base::datamodel::Equation::Arrayed(
+            vec![dim.to_string()],
+            arrayed,
+            None,
+            false,
+        ),
         documentation: String::new(),
         units: None,
         gf: None,
         ai_state: None,
         uid: None,
-        compat: crate::datamodel::Compat::default(),
+        compat: simlin_base::datamodel::Compat::default(),
     })
 }
 
 /// An apply-to-all aux `ident[dim] = equation`.
 #[cfg(test)]
-fn arrayed_aux(ident: &str, dim: &str, equation: &str) -> crate::datamodel::Variable {
-    crate::datamodel::Variable::Aux(crate::datamodel::Aux {
+fn arrayed_aux(ident: &str, dim: &str, equation: &str) -> simlin_base::datamodel::Variable {
+    simlin_base::datamodel::Variable::Aux(simlin_base::datamodel::Aux {
         ident: ident.to_string(),
-        equation: crate::datamodel::Equation::ApplyToAll(
+        equation: simlin_base::datamodel::Equation::ApplyToAll(
             vec![dim.to_string()],
             equation.to_string(),
         ),
@@ -612,7 +629,7 @@ fn arrayed_aux(ident: &str, dim: &str, equation: &str) -> crate::datamodel::Vari
         gf: None,
         ai_state: None,
         uid: None,
-        compat: crate::datamodel::Compat::default(),
+        compat: simlin_base::datamodel::Compat::default(),
     })
 }
 
@@ -623,12 +640,12 @@ fn arrayed_aux(ident: &str, dim: &str, equation: &str) -> crate::datamodel::Vari
 fn link_polarities_for(
     dim_name: &str,
     elements: &[&str],
-    variables: Vec<crate::datamodel::Variable>,
+    variables: Vec<simlin_base::datamodel::Variable>,
 ) -> HashMap<(String, String), LinkPolarity> {
-    let project = crate::datamodel::Project {
+    let project = simlin_base::datamodel::Project {
         name: "test".to_string(),
         sim_specs: sim_specs_with_units("months"),
-        dimensions: vec![crate::datamodel::Dimension::named(
+        dimensions: vec![simlin_base::datamodel::Dimension::named(
             dim_name.to_string(),
             elements.iter().map(|s| s.to_string()).collect(),
         )],
@@ -872,7 +889,7 @@ fn every_lookup_builtin_composes_the_tables_polarity() {
     // tables monotone increasing, `dose` enters the lookup-index position as
     // Positive and each table is Positive, so the `dose -> effect` link is
     // Positive (not Unknown).
-    for builtin in crate::builtins::BuiltinSig::table_readers() {
+    for builtin in simlin_base::builtins::BuiltinSig::table_readers() {
         let curve = per_element_gf_aux(
             "curve",
             "region",
@@ -911,11 +928,11 @@ fn every_lookup_builtin_composes_the_tables_polarity() {
 #[cfg(test)]
 fn gf_var_for_test(
     ident: &str,
-    dims: Vec<crate::dimensions::Dimension>,
+    dims: Vec<simlin_base::dimensions::Dimension>,
     tables: Vec<crate::variable::Table>,
 ) -> Variable {
-    use crate::ast::{Ast, Expr2, Loc};
     use crate::variable::VarKind;
+    use simlin_base::ast::{Ast, Expr2, Loc};
     Variable {
         ident: Ident::new(ident),
         units: None,
@@ -926,7 +943,7 @@ fn gf_var_for_test(
                 dims,
                 Expr2::Const(
                     "0".to_string(),
-                    crate::ast::Literal::new(0.0),
+                    simlin_base::ast::Literal::new(0.0),
                     Loc::default(),
                 ),
             )),
@@ -951,18 +968,18 @@ fn test_lookup_table_polarity_defensive_subscript_branches() {
     // shapes for a well-formed model, but the arm must stay total and
     // classify them correctly (resolvable -> the element's polarity;
     // otherwise -> Unknown).
-    use crate::ast::{Ast, Expr2, IndexExpr2, Loc};
-    use crate::builtins::BuiltinFn;
-    use crate::dimensions::Dimension;
     use crate::variable::Table;
     use LinkPolarity::{Negative, Positive, Unknown};
+    use simlin_base::ast::{Ast, Expr2, IndexExpr2, Loc};
+    use simlin_base::builtins::BuiltinFn;
+    use simlin_base::dimensions::Dimension;
 
     let dose = Ident::new("dose");
-    let region = Dimension::from(&crate::datamodel::Dimension::named(
+    let region = Dimension::from(&simlin_base::datamodel::Dimension::named(
         "region".to_string(),
         vec!["nyc".to_string(), "boston".to_string()],
     ));
-    let other = Dimension::from(&crate::datamodel::Dimension::named(
+    let other = Dimension::from(&simlin_base::datamodel::Dimension::named(
         "other".to_string(),
         vec!["a".to_string(), "b".to_string()],
     ));
@@ -994,7 +1011,7 @@ fn test_lookup_table_polarity_defensive_subscript_branches() {
     let int_const = |n: i64| {
         Expr2::Const(
             n.to_string(),
-            crate::ast::Literal::new(n as f64),
+            simlin_base::ast::Literal::new(n as f64),
             Loc::default(),
         )
     };
@@ -1088,19 +1105,19 @@ fn test_lookup_table_polarity_defensive_subscript_branches() {
 
 #[test]
 fn test_fishbanks_loops() {
-    use buffa::Message;
+    use simlin_formats::buffa::Message;
     use std::fs;
 
     let proto_bytes =
         fs::read("../../test/fishbanks.protobin").expect("Failed to read fishbanks.protobin file");
-    let project_io = crate::project_io::Project::decode_from_slice(&proto_bytes)
+    let project_io = simlin_formats::project_io::Project::decode_from_slice(&proto_bytes)
         .expect("Failed to decode fishbanks.protobin");
-    let datamodel_project = crate::serde::deserialize(project_io).unwrap();
+    let datamodel_project = simlin_formats::serde::deserialize(project_io).unwrap();
 
     let db = SimlinDb::default();
     let result = sync_from_datamodel(&db, &datamodel_project);
 
-    let model_name = crate::canonicalize(&datamodel_project.models[0].name);
+    let model_name = simlin_base::canonicalize(&datamodel_project.models[0].name);
     let model = result.models[model_name.as_ref()].source;
     let detected = model_detected_loops(&db, model, result.project);
 
@@ -1165,19 +1182,19 @@ fn test_fishbanks_loops() {
 
 #[test]
 fn test_logistic_growth_loops() {
-    use buffa::Message;
+    use simlin_formats::buffa::Message;
     use std::fs;
 
     let proto_bytes = fs::read("../../test/logistic-growth.protobin")
         .expect("Failed to read logistic-growth.protobin file");
-    let project_io = crate::project_io::Project::decode_from_slice(&proto_bytes)
+    let project_io = simlin_formats::project_io::Project::decode_from_slice(&proto_bytes)
         .expect("Failed to decode logistic-growth.protobin");
-    let datamodel_project = crate::serde::deserialize(project_io).unwrap();
+    let datamodel_project = simlin_formats::serde::deserialize(project_io).unwrap();
 
     let db = SimlinDb::default();
     let result = sync_from_datamodel(&db, &datamodel_project);
 
-    let model_name = crate::canonicalize(&datamodel_project.models[0].name);
+    let model_name = simlin_base::canonicalize(&datamodel_project.models[0].name);
     let model = result.models[model_name.as_ref()].source;
     let detected = model_detected_loops(&db, model, result.project);
 
@@ -1614,8 +1631,8 @@ fn test_loop_id_assignment_undetermined_polarity() {
 
 #[test]
 fn test_builtin_polarity_monotone_increasing() {
-    use crate::ast::{Ast, Expr2, Loc};
-    use crate::builtins::BuiltinFn;
+    use simlin_base::ast::{Ast, Expr2, Loc};
+    use simlin_base::builtins::BuiltinFn;
 
     let x_var = Ident::new("x");
     let x_expr = || Box::new(Expr2::Var(x_var.clone(), None, Loc::default()));
@@ -1649,9 +1666,9 @@ fn test_builtin_polarity_monotone_increasing() {
 
 #[test]
 fn test_builtin_polarity_monotone_negative_inner() {
-    use crate::ast::UnaryOp;
-    use crate::ast::{Ast, Expr2, Loc};
-    use crate::builtins::BuiltinFn;
+    use simlin_base::ast::UnaryOp;
+    use simlin_base::ast::{Ast, Expr2, Loc};
+    use simlin_base::builtins::BuiltinFn;
 
     let x_var = Ident::new("x");
     // -x has Negative polarity
@@ -1677,8 +1694,8 @@ fn test_builtin_polarity_monotone_negative_inner() {
 
 #[test]
 fn test_builtin_polarity_non_monotone_returns_unknown() {
-    use crate::ast::{Ast, Expr2, Loc};
-    use crate::builtins::BuiltinFn;
+    use simlin_base::ast::{Ast, Expr2, Loc};
+    use simlin_base::builtins::BuiltinFn;
 
     let x_var = Ident::new("x");
     let x_expr = || Box::new(Expr2::Var(x_var.clone(), None, Loc::default()));
@@ -1705,15 +1722,15 @@ fn test_builtin_polarity_non_monotone_returns_unknown() {
 
 #[test]
 fn test_builtin_polarity_max_min_scalar() {
-    use crate::ast::{Ast, Expr2, Loc};
-    use crate::builtins::BuiltinFn;
+    use simlin_base::ast::{Ast, Expr2, Loc};
+    use simlin_base::builtins::BuiltinFn;
 
     let x_var = Ident::new("x");
     let x_expr = || Box::new(Expr2::Var(x_var.clone(), None, Loc::default()));
     let const_5 = || {
         Box::new(Expr2::Const(
             "5".to_string(),
-            crate::ast::Literal::new(5.0),
+            simlin_base::ast::Literal::new(5.0),
             Loc::default(),
         ))
     };
@@ -1750,8 +1767,8 @@ fn test_builtin_polarity_max_min_scalar() {
 
 #[test]
 fn test_expr_references_var() {
-    use crate::ast::{Expr2, Loc};
-    use crate::builtins::BuiltinFn;
+    use simlin_base::ast::{Expr2, Loc};
+    use simlin_base::builtins::BuiltinFn;
 
     let x_var = Ident::new("x");
     let y_var = Ident::new("y");
@@ -1759,7 +1776,7 @@ fn test_expr_references_var() {
     let const_5 = || {
         Expr2::Const(
             "5".to_string(),
-            crate::ast::Literal::new(5.0),
+            simlin_base::ast::Literal::new(5.0),
             Loc::default(),
         )
     };
@@ -1793,7 +1810,7 @@ fn test_expr_references_var() {
     assert!(!expr_references_var(&add, &y_var));
 
     // Subscript: array[x] references x through the index expression
-    use crate::ast::IndexExpr2;
+    use simlin_base::ast::IndexExpr2;
     let array_var = Ident::new("array");
     let subscript_with_x = Expr2::Subscript(
         array_var.clone(),
@@ -1841,8 +1858,8 @@ fn test_expr_references_var() {
 
 #[test]
 fn test_max_min_polarity_with_non_monotone_arg() {
-    use crate::ast::{Ast, Expr2, Loc};
-    use crate::builtins::BuiltinFn;
+    use simlin_base::ast::{Ast, Expr2, Loc};
+    use simlin_base::builtins::BuiltinFn;
 
     let x_var = Ident::new("x");
     let x_expr = || Box::new(Expr2::Var(x_var.clone(), None, Loc::default()));
@@ -1850,7 +1867,7 @@ fn test_max_min_polarity_with_non_monotone_arg() {
     let const_5 = || {
         Box::new(Expr2::Const(
             "5".to_string(),
-            crate::ast::Literal::new(5.0),
+            simlin_base::ast::Literal::new(5.0),
             Loc::default(),
         ))
     };
@@ -1947,8 +1964,8 @@ fn test_variadic_mean_polarity_with_non_monotone_arg() {
     // of order. Without this, MEAN(ABS(x), x) would silently mis-classify
     // as Positive because the second arg overwrites the first arg's
     // Unknown-with-self-reference state.
-    use crate::ast::{Ast, Expr2, Loc, UnaryOp};
-    use crate::builtins::BuiltinFn;
+    use simlin_base::ast::{Ast, Expr2, Loc, UnaryOp};
+    use simlin_base::builtins::BuiltinFn;
 
     let x_var = Ident::new("x");
     let x_expr = || Expr2::Var(x_var.clone(), None, Loc::default());
@@ -2012,8 +2029,8 @@ fn test_variadic_mean_polarity_with_non_monotone_arg() {
 
 #[test]
 fn test_add_sub_div_polarity_with_non_monotone_arg() {
-    use crate::ast::{Ast, Expr2, Loc};
-    use crate::builtins::BuiltinFn;
+    use simlin_base::ast::{Ast, Expr2, Loc};
+    use simlin_base::builtins::BuiltinFn;
 
     let x_var = Ident::new("x");
     let x_expr = || Box::new(Expr2::Var(x_var.clone(), None, Loc::default()));
@@ -2021,7 +2038,7 @@ fn test_add_sub_div_polarity_with_non_monotone_arg() {
     let const_5 = || {
         Box::new(Expr2::Const(
             "5".to_string(),
-            crate::ast::Literal::new(5.0),
+            simlin_base::ast::Literal::new(5.0),
             Loc::default(),
         ))
     };
@@ -4764,11 +4781,11 @@ proptest! {
 /// Positive.
 #[test]
 fn test_source_to_agg_polarity_discriminates_body_sign() {
-    use crate::ast::{Ast, Expr2, IndexExpr2};
-    let loc = crate::ast::Loc::default();
+    use simlin_base::ast::{Ast, Expr2, IndexExpr2};
+    let loc = simlin_base::ast::Loc::default();
     let scale: Ident<Canonical> = Ident::new("scale");
     let var = |n: &str| Expr2::Var(Ident::new(n), None, loc);
-    let cnst = |v: f64| Expr2::Const(format!("{v}"), crate::ast::Literal::new(v), loc);
+    let cnst = |v: f64| Expr2::Const(format!("{v}"), simlin_base::ast::Literal::new(v), loc);
     let op2 =
         |op: BinaryOp, l: Expr2, r: Expr2| Expr2::Op2(op, Box::new(l), Box::new(r), None, loc);
     let pop_wild = || {
@@ -4782,7 +4799,7 @@ fn test_source_to_agg_polarity_discriminates_body_sign() {
     // The analyzed unit is the reducer CALL, exactly as it rides on
     // `ltm_agg::AggNode::reducer` (GH #983) -- an aggregate node's equation is
     // one reducer application, so there is no enclosing `Ast` to supply.
-    let sum = |arg: Expr2| crate::builtins::BuiltinFn::Sum(Box::new(arg));
+    let sum = |arg: Expr2| simlin_base::builtins::BuiltinFn::Sum(Box::new(arg));
     let empty_vars = IdentMap::default();
 
     // SUM(pop[*] * scale): the co-factor is a bare arrayed reference,
@@ -4825,8 +4842,11 @@ fn test_source_to_agg_polarity_discriminates_body_sign() {
 
     // STDDEV(pop[*] * scale): a non-monotone reducer stays Unknown even
     // with a convention-positive body.
-    let stddev =
-        crate::builtins::BuiltinFn::Stddev(Box::new(op2(BinaryOp::Mul, pop_wild(), var("scale"))));
+    let stddev = simlin_base::builtins::BuiltinFn::Stddev(Box::new(op2(
+        BinaryOp::Mul,
+        pop_wild(),
+        var("scale"),
+    )));
     assert_eq!(
         analyze_source_to_agg_polarity(&stddev, &scale, &empty_vars),
         LinkPolarity::Unknown,

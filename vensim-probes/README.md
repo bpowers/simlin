@@ -5,7 +5,7 @@ checked-in ground truth. Each model is small, self-contained, and uses values
 chosen so that **every candidate rule produces a different output**.
 
 Nothing here is committed to `test/`. Each `.mdl` carries a generated sketch
-(`cargo run -p simlin-engine --example layout_probe_models`) so it opens with a
+(`cargo run -p simlin-tests --features instruments --example layout_probe_models`) so it opens with a
 visible diagram; that harness splices only the sketch block and leaves the
 equation text byte-identical.
 

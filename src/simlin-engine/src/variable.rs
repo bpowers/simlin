@@ -6,28 +6,28 @@ use std::collections::BTreeSet;
 
 use indexmap::IndexMap;
 
-#[cfg(test)]
-use crate::ast::Loc;
-#[cfg(test)]
-use crate::ast::LoweringScope;
-use crate::ast::{Ast, Expr0, Expr1, Expr2, IndexExpr1, IndexExpr2};
-use crate::builtins::{BuiltinContents, BuiltinFn, walk_builtin_expr};
 use crate::builtins_visitor::{
     SnapshotIndexFacts, empty_macro_registry, instantiate_implicit_modules,
 };
 use crate::capture::{ImplicitVar, insert_implicit_var};
-use crate::common::{
+use crate::diagnostic::DiagnosticError;
+use crate::units;
+use crate::units::parse_units;
+#[cfg(test)]
+use simlin_base::ast::Loc;
+#[cfg(test)]
+use simlin_base::ast::LoweringScope;
+use simlin_base::ast::{Ast, Expr0, Expr1, Expr2, IndexExpr1, IndexExpr2};
+use simlin_base::builtins::{BuiltinContents, BuiltinFn, walk_builtin_expr};
+use simlin_base::common::{
     Canonical, CanonicalDimensionName, CanonicalElementName, DimensionName, EquationError,
     EquationResult, Ident, IdentMap, IdentSet, canonicalize,
 };
-use crate::datamodel;
-use crate::db::SourceVariableKind;
-use crate::diagnostic::DiagnosticError;
-use crate::dimensions::{Dimension, DimensionsContext};
-use crate::lexer::LexerType;
-use crate::module_functions::MacroRegistry;
-use crate::units::parse_units;
-use crate::{ErrorCode, eqn_err, units};
+use simlin_base::datamodel;
+use simlin_base::dimensions::{Dimension, DimensionsContext};
+use simlin_base::lexer::LexerType;
+use simlin_base::module_functions::MacroRegistry;
+use simlin_base::{ErrorCode, eqn_err};
 
 /// A graphical function's points, as the compiler and the VM read them.
 ///
@@ -37,9 +37,8 @@ use crate::{ErrorCode, eqn_err, units};
 /// rebuild, defeating salsa backdating. The XMILE reader admits one, since
 /// `f64::from_str` accepts `"NaN"` in a `<ypts>` list unvalidated. Accepted
 /// knowingly, on the same terms as the bytecode types: see the "Float equality
-/// in this crate" section on [`crate::ast::Literal`].
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+/// in this crate" section on [`simlin_base::ast::Literal`].
+#[derive(Debug, Clone, PartialEq)]
 pub struct Table {
     pub x: Vec<f64>,
     pub y: Vec<f64>,
@@ -109,8 +108,7 @@ pub struct ModuleInput {
 /// reads. Nothing rewrites the body to get there: a rewrite is a second
 /// resolution rule, and the two drift exactly where the rules are non-trivial
 /// (GH #1035).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ElementScope {
     pub dims: Vec<CanonicalDimensionName>,
     pub element: Vec<CanonicalElementName>,
@@ -126,8 +124,7 @@ pub struct ElementScope {
 /// `Aux` covers both auxiliaries and flows (`is_flow` says which) because they
 /// lower identically: one slot per element holding the value of one equation.
 /// A flow is distinguished only by where a stock's integration reads it.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum VarKind<MI = ModuleInput, E = Expr2> {
     Stock {
         init_ast: Option<Ast<E>>,
@@ -154,8 +151,7 @@ pub enum VarKind<MI = ModuleInput, E = Expr2> {
     },
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Variable<MI = ModuleInput, E = Expr2> {
     pub ident: Ident<Canonical>,
     pub units: Option<datamodel::UnitMap>,
@@ -310,9 +306,7 @@ impl<MI, E> Variable<MI, E> {
 /// is checked instead, so the refusal names what the graphical function
 /// holds: a bound that is not a finite number, or a minimum above the
 /// maximum, which would spread the points downward.
-pub(crate) fn parse_table(
-    gf: Option<&datamodel::GraphicalFunction>,
-) -> EquationResult<Option<Table>> {
+pub fn parse_table(gf: Option<&datamodel::GraphicalFunction>) -> EquationResult<Option<Table>> {
     let Some(gf) = gf else {
         return Ok(None);
     };
@@ -418,7 +412,7 @@ pub(crate) fn reorder_arrayed_element_tables<T>(
     empty: impl Fn() -> T,
     clone_table: impl Fn(&T) -> T,
 ) -> Vec<T> {
-    crate::dimensions::SubscriptIterator::new(dims)
+    simlin_base::dimensions::SubscriptIterator::new(dims)
         .map(|subscripts| {
             let key = CanonicalElementName::from_parts(&subscripts);
             present.get(&key).map(&clone_table).unwrap_or_else(&empty)
@@ -526,15 +520,6 @@ fn build_tables(
     (tables, errors)
 }
 
-/// An equation string with no functional content: empty/whitespace-only (the
-/// canonical lookup-only form) or exactly the MDL lookup sentinel `"0+0"` (a
-/// legacy back-compat read-shim -- older serialized models may still carry it).
-/// The trimmed comparison mirrors `mdl::writer::is_lookup_only_equation`.
-pub(crate) fn is_empty_or_sentinel(equation: &str) -> bool {
-    let trimmed = equation.trim();
-    trimmed.is_empty() || trimmed == crate::mdl::LOOKUP_SENTINEL
-}
-
 /// Whether a variable is a standalone "lookup-only" table: it carries a
 /// graphical function and has no functional input expression to feed it. Such
 /// a variable is a *table indexed by an explicit input* (`y = table(input)`),
@@ -560,11 +545,11 @@ pub(crate) fn is_empty_or_sentinel(equation: &str) -> bool {
 /// Returns `false` for WITH LOOKUP (`var = WITH LOOKUP(input, table)`: tables
 /// present but a *real* input equation), for an ordinary aux (a real equation,
 /// no tables), and for an empty-RHS aux with no `gf` at all.
-pub(crate) fn is_lookup_only(
+pub fn is_lookup_only(
     eqn: &datamodel::Equation,
     gf: Option<&datamodel::GraphicalFunction>,
 ) -> bool {
-    use crate::datamodel::Equation;
+    use simlin_base::datamodel::{Equation, is_empty_or_sentinel};
     match eqn {
         Equation::Scalar(s) | Equation::ApplyToAll(_, s) => gf.is_some() && is_empty_or_sentinel(s),
         // The per-element gf is the 4th tuple field
@@ -595,7 +580,7 @@ pub(crate) fn is_lookup_only(
 /// remedy. A parenthesized `(nan)` is likewise outside the rule; nothing
 /// produces it, and admitting it would mean deciding how far to unwrap.
 pub(crate) fn is_nan_literal(equation: &str) -> bool {
-    use crate::lexer::{Lexer, LexerType, Token};
+    use simlin_base::lexer::{Lexer, LexerType, Token};
     let mut lexer = Lexer::new(equation, LexerType::Equation);
     matches!(lexer.next(), Some(Ok((_, Token::Nan, _)))) && lexer.next().is_none()
 }
@@ -627,7 +612,7 @@ pub(crate) enum UnfilledArms {
 /// Arms rather than whole variables, deliberately. An arrayed variable's
 /// elements are separate simulated series, so an unfilled `x[b]` stops `x[b]`'s
 /// line on the graph exactly the way an unfilled scalar stops its own, and costs
-/// the same backward hunt (`crate::float`). Reporting only the all-arms case
+/// the same backward hunt (`simlin_base::float`). Reporting only the all-arms case
 /// would go silent precisely where the model is most confusing -- some lines
 /// fine, one stopping -- so a partially-unfilled variable is reported too, and
 /// [`UnfilledArms::Partial`] names the arms so the message can point at them.
@@ -665,7 +650,7 @@ pub(crate) fn unfilled_arms(ast: &Ast<Expr0>) -> Option<UnfilledArms> {
             let mut unfilled: Vec<String> = vec![];
             let mut slots_with_an_arm = 0usize;
             let mut default_is_selected = false;
-            for combination in crate::dimensions::SubscriptIterator::new(dims) {
+            for combination in simlin_base::dimensions::SubscriptIterator::new(dims) {
                 let key = CanonicalElementName::from_parts(&combination);
                 match elements.get(&key) {
                     Some(expr) => {
@@ -732,7 +717,7 @@ pub(crate) fn elements_without_an_arm(
     if *apply_default_to_missing && default.is_some() {
         return vec![];
     }
-    crate::dimensions::SubscriptIterator::new(dims)
+    simlin_base::dimensions::SubscriptIterator::new(dims)
         .map(|combination| CanonicalElementName::from_parts(&combination))
         .filter(|key| !elements.contains_key(key) && !has_own_table(key))
         .collect()
@@ -790,7 +775,7 @@ pub(crate) fn is_nan_constant_for_test(expr: &Expr0) -> bool {
 ///
 /// Silence is the right answer rather than a guess in either direction. This
 /// warning's whole value is that a practitioner can trust it and skip the
-/// backward hunt (`crate::float`), so a warning that MIGHT be false is worse
+/// backward hunt (`simlin_base::float`), so a warning that MIGHT be false is worse
 /// than one that is absent. Note this is not the declared-name resolution rule
 /// batch 1 rejected: that one resolved the ambiguity in favour of one reading
 /// and would have shipped a wrong VALUE. This ships no claim.
@@ -806,7 +791,7 @@ pub(crate) fn may_have_unfilled_arms(
     if nan_names_a_variable {
         return false;
     }
-    use crate::datamodel::Equation;
+    use simlin_base::datamodel::Equation;
     match equation {
         Equation::Scalar(s) | Equation::ApplyToAll(_, s) => is_nan_literal(s),
         Equation::Arrayed(_, elements, default, _) => {
@@ -1223,7 +1208,7 @@ mod is_lookup_only_tests {
     #[test]
     fn is_lookup_only_covers_every_equation_shape() {
         use datamodel::Equation::{ApplyToAll, Scalar};
-        let sentinel = crate::mdl::LOOKUP_SENTINEL;
+        let sentinel = simlin_base::datamodel::LOOKUP_SENTINEL;
         let cases: Vec<(&str, datamodel::Equation, bool, bool)> = vec![
             // -- scalar --
             ("scalar empty + gf", Scalar(String::new()), true, true),
@@ -1461,6 +1446,26 @@ fn parse_equation(
                     (None, errors)
                 }
             }
+        }
+    }
+}
+
+/// Which of the datamodel's kinds of variable a [`VariableSource`] is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SourceVariableKind {
+    Stock,
+    Flow,
+    Aux,
+    Module,
+}
+
+impl SourceVariableKind {
+    pub(crate) fn from_datamodel_variable(var: &datamodel::Variable) -> Self {
+        match var {
+            datamodel::Variable::Stock(_) => SourceVariableKind::Stock,
+            datamodel::Variable::Flow(_) => SourceVariableKind::Flow,
+            datamodel::Variable::Aux(_) => SourceVariableKind::Aux,
+            datamodel::Variable::Module(_) => SourceVariableKind::Module,
         }
     }
 }
@@ -2200,7 +2205,7 @@ pub(crate) fn identifier_set<E: DepExpr>(
 /// Panics on parse or lowering errors -- intended for test use only.
 #[cfg(test)]
 pub(crate) fn scalar_ast(eqn: &str) -> Ast<Expr2> {
-    use crate::ast::lower_ast;
+    use simlin_base::ast::lower_ast;
 
     let (ast, err) = parse_equation(
         &datamodel::Equation::Scalar(eqn.to_owned()),
@@ -2228,7 +2233,7 @@ fn scalar_typed(eqn: &str) -> Ast<Expr1> {
         None,
     );
     assert!(err.is_empty(), "parse error in test equation: {eqn}");
-    crate::ast::typed_ast(&ast.unwrap(), &DimensionsContext::default()).unwrap()
+    simlin_base::ast::typed_ast(&ast.unwrap(), &DimensionsContext::default()).unwrap()
 }
 
 /// Table-driven matrix test for `classify_dependencies`.
@@ -2243,7 +2248,7 @@ fn scalar_typed(eqn: &str) -> Ast<Expr1> {
 /// must agree, which is what pins the two `DepExpr` projections to one walk.
 #[test]
 fn test_classify_dependencies_matrix() {
-    use crate::common::CanonicalElementName;
+    use simlin_base::common::CanonicalElementName;
 
     enum Source {
         Eqn(&'static str),
@@ -2266,8 +2271,8 @@ fn test_classify_dependencies_matrix() {
     use DepLag::{Current, Initial, Previous};
 
     let loc = Loc::new(0, 1);
-    let const_one = Expr2::Const("1".to_string(), crate::ast::Literal::new(1.0), loc);
-    let const_zero = Expr2::Const("0".to_string(), crate::ast::Literal::new(0.0), loc);
+    let const_one = Expr2::Const("1".to_string(), simlin_base::ast::Literal::new(1.0), loc);
+    let const_zero = Expr2::Const("0".to_string(), simlin_base::ast::Literal::new(0.0), loc);
     let var = |name: &str| Expr2::Var(Ident::new(name), None, loc);
     let previous = |name: &str| {
         Expr2::App(
@@ -2279,7 +2284,7 @@ fn test_classify_dependencies_matrix() {
     let init = |name: &str| Expr2::App(BuiltinFn::Init(Box::new(var(name))), None, loc);
     let add = |l: Expr2, r: Expr2| {
         Expr2::Op2(
-            crate::ast::BinaryOp::Add,
+            simlin_base::ast::BinaryOp::Add,
             Box::new(l),
             Box::new(r),
             None,
@@ -2374,7 +2379,10 @@ fn test_classify_dependencies_matrix() {
             label: "direct_star_range",
             source: Source::Ast(subscript(
                 "arr",
-                IndexExpr2::StarRange(crate::common::CanonicalDimensionName::from_raw("dim1"), loc),
+                IndexExpr2::StarRange(
+                    simlin_base::common::CanonicalDimensionName::from_raw("dim1"),
+                    loc,
+                ),
             )),
             dimensions: vec![],
             module_inputs: None,
@@ -2751,7 +2759,7 @@ fn test_parse_equation_arrayed_preserves_default_expression() {
 
 #[test]
 fn test_tables() {
-    use crate::common::canonicalize;
+    use simlin_base::common::canonicalize;
     let input = datamodel::Variable::Aux(datamodel::Aux {
         ident: canonicalize("lookup function table").into_owned(),
         equation: datamodel::Equation::Scalar("0".to_string()),
@@ -2783,7 +2791,7 @@ fn test_tables() {
         kind: VarKind::Aux {
             ast: Some(Ast::Scalar(Expr0::Const(
                 "0".to_string(),
-                crate::ast::Literal::new(0.0),
+                simlin_base::ast::Literal::new(0.0),
                 Loc::new(0, 1),
             ))),
             init_ast: None,

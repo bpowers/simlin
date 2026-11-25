@@ -389,9 +389,7 @@ exist.
 - `overflow: bool` on a flow (present iff `<overflow/>`).
 
 `Queue` is a bare marker struct (no options) mirroring `Conveyor`'s placement
-and derive set (`Clone, PartialEq, Eq`, plus an UNCONDITIONAL
-`Debug` -- a `debug-derive`-gated Debug breaks the no-default-features WASM
-build).
+and derive set (`Debug, Clone, PartialEq, Eq`).
 Keeping it a struct (rather than a bool) leaves room for any future
 vendor attribute without churning construction sites, matching `Conveyor`.
 
@@ -419,7 +417,7 @@ conveyors are (`QueueNonEulerMethod`, mirroring `ConveyorNonEulerMethod`).
 
 ### 10.4 wasmgen
 
-A queue model IS lowered by the wasm backend (`wasmgen/passes.rs`).
+A queue model IS lowered by the wasm backend (`src/simlin-wasmgen/src/passes.rs`).
 The wasmgen
 datamodel entry point routes through the same `queue_compile::compile_sim`
 dispatch the VM takes, so it compiles the identical expanded project and resolves
@@ -461,7 +459,7 @@ mirroring `ConveyorLtmDegraded` and emitted from the same
 
 ### 10.6 Readers, writers, and other surfaces
 
-- XMILE reader/writer (`src/simlin-engine/src/xmile/`): recognize `<queue/>` on
+- XMILE reader/writer (`src/simlin-formats/src/xmile/`): recognize `<queue/>` on
   a stock, `<overflow/>` on a flow, and the `<uses_queue>` header; emit them.
   This alone fixes the round-trip corruption.
 - MDL: Vensim has no queue primitive; not covered.

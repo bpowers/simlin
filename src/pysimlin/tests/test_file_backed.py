@@ -227,7 +227,7 @@ class TestEditAutosave:
         assert "models" in doc
         names = {a["name"] for a in doc["models"][0]["auxiliaries"]}
         assert "new_aux" in names
-        # Pretty-printed like simlin-serve / simlin-mcp-core write it.
+        # Pretty-printed like simlin-mcp-core writes it.
         assert data.startswith(b"{\n  ")
         assert simlin.load(path).get_variable("new_aux") is not None
 

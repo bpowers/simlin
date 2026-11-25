@@ -5,7 +5,7 @@
 //! Contract for the `UnfilledEquation` advisory: a variable whose equation is
 //! nothing but the NaN literal has no usable equation, and the engine says so
 //! before the model is ever run. What the shape means and why it earns a
-//! diagnostic is on `common::ErrorCode::UnfilledEquation` and `crate::float`.
+//! diagnostic is on `common::ErrorCode::UnfilledEquation` and `simlin_base::float`.
 //!
 //! Two levels are pinned here, because neither implies the other: the pure
 //! per-shape decision (`variable::unfilled_arms` over every `datamodel::Equation`
@@ -17,14 +17,14 @@
 
 use std::collections::BTreeSet;
 
-use crate::ast::{Ast, Expr0};
-use crate::common::{CanonicalElementName, ErrorCode, IdentMap};
-use crate::datamodel;
 use crate::db::{
     Diagnostic, DiagnosticError, DiagnosticSeverity, SimlinDb, collect_all_diagnostics,
     compile_project_incremental, sync_from_datamodel_incremental,
 };
 use crate::variable::{UnfilledArms, is_nan_literal, unfilled_arms};
+use simlin_base::ast::{Ast, Expr0};
+use simlin_base::common::{CanonicalElementName, ErrorCode, IdentMap};
+use simlin_base::datamodel;
 
 // ---------------------------------------------------------------------------
 // The atom: is this equation text nothing but the NaN literal?
@@ -47,7 +47,7 @@ fn the_atom_accepts_every_lone_nan_spelling() {
 
 /// "Nothing but the NaN literal" is exactly one token. A NaN *inside* a larger
 /// expression is a different claim with a different remedy -- a modeller
-/// deliberately using NaN as an out-of-range sentinel (`crate::float`) -- and is
+/// deliberately using NaN as an out-of-range sentinel (`simlin_base::float`) -- and is
 /// none of this diagnostic's business. A name that merely starts with `nan`
 /// lexes as an identifier and is an ordinary reference.
 ///
@@ -112,7 +112,7 @@ const EQUATION_SHAPES: [&str; 3] = ["Scalar", "ApplyToAll", "Arrayed"];
 /// `None` for text with no expression at all, which is exactly what that
 /// function drops before collecting its map.
 fn expr(text: &str) -> Option<Expr0> {
-    Expr0::new(text, crate::lexer::LexerType::Equation).expect("fixture must parse")
+    Expr0::new(text, simlin_base::lexer::LexerType::Equation).expect("fixture must parse")
 }
 
 fn scalar_ast(text: &str) -> Ast<Expr0> {
@@ -128,8 +128,8 @@ fn a2a_ast(text: &str) -> Ast<Expr0> {
 
 /// Resolved dimensions declaring exactly `elements`, built through the same
 /// `From<&datamodel::Dimension>` conversion the parser uses.
-fn test_dims(elements: &[&str]) -> Vec<crate::dimensions::Dimension> {
-    vec![crate::dimensions::Dimension::from(
+fn test_dims(elements: &[&str]) -> Vec<simlin_base::dimensions::Dimension> {
+    vec![simlin_base::dimensions::Dimension::from(
         &datamodel::Dimension::named(
             "d".to_string(),
             elements.iter().map(|e| e.to_string()).collect(),
@@ -208,7 +208,7 @@ fn decision_cell(ast: &Ast<Expr0>) -> String {
             let mut with_arm = 0usize;
             let mut unfilled = 0usize;
             let mut uncovered = false;
-            for combination in crate::dimensions::SubscriptIterator::new(dims) {
+            for combination in simlin_base::dimensions::SubscriptIterator::new(dims) {
                 let key = CanonicalElementName::from_parts(&combination);
                 match elements.get(&key) {
                     Some(e) => {
@@ -623,7 +623,7 @@ fn read_xmile(dimensions: &str, vars: &str) -> datamodel::Project {
 }
 
 fn read_xmile_with_models(dimensions: &str, vars: &str, extra_models: &str) -> datamodel::Project {
-    crate::compat::open_xmile(&mut xmile_doc(dimensions, vars, extra_models).as_bytes())
+    simlin_formats::compat::open_xmile(&mut xmile_doc(dimensions, vars, extra_models).as_bytes())
         .expect("XMILE must parse")
 }
 
@@ -656,7 +656,7 @@ fn an_mdl_a_function_of_placeholder_warns_naming_the_variable() {
         "revenue = marketing * price\n\t~\t\n\t~\t|\n\n",
         "\\\\\\---/// Sketch information - do not modify anything except names\n"
     );
-    let project = crate::compat::open_vensim(mdl).expect("MDL must parse");
+    let project = simlin_formats::compat::open_vensim(mdl).expect("MDL must parse");
 
     // The premise: the importer really does store the placeholder as the NaN
     // literal. If this stops holding, the rest of the test proves nothing.
@@ -971,7 +971,7 @@ fn a_model_declaring_a_variable_named_nan_gets_no_findings() {
         "b = nan\n\t~\t\n\t~\t|\n\n",
         "\\\\\\---/// Sketch information - do not modify anything except names\n"
     );
-    let project = crate::compat::open_vensim(mdl).expect("MDL must parse");
+    let project = simlin_formats::compat::open_vensim(mdl).expect("MDL must parse");
     assert_eq!(
         Vec::<(String, String, String)>::new(),
         unfilled_findings(&project),

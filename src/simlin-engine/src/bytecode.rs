@@ -7,14 +7,14 @@ use std::sync::Arc;
 
 use smallvec::SmallVec;
 
-use crate::common::{Canonical, Ident};
+use simlin_base::common::{Canonical, Ident};
 
 // ============================================================================
 // Type Aliases
 // ============================================================================
 
-pub type LiteralId = u16;
-pub type ModuleId = u16;
+pub(crate) type LiteralId = u16;
+pub(crate) type ModuleId = u16;
 /// Module-relative result-slot offset baked into opcodes.
 ///
 /// u16 keeps opcode payloads compact (the VM dispatch loop is sensitive to
@@ -24,22 +24,22 @@ pub type ModuleId = u16;
 /// error by `compiler::symbolic::check_layout_addressable` /
 /// `resolve_var_ref`; a silent overflow here would wrap writes into the
 /// implicit-global slots (time/dt) and corrupt every result.
-pub type VariableOffset = u16;
-pub type ModuleInputOffset = u16;
+pub(crate) type VariableOffset = u16;
+pub(crate) type ModuleInputOffset = u16;
 pub type GraphicalFunctionId = u8;
 /// The number of tables in a graphical-function run: the length that
 /// pairs with a `GraphicalFunctionId` base on every lookup opcode
 /// (`Lookup`, `LookupDirect`, `LookupArray`). A type of its own so the
 /// opcode tables can tell the run's length from an unrelated `u16`.
-pub type TableCount = u16;
+pub(crate) type TableCount = u16;
 
 // New types for array support
-pub type ViewId = u16; // Index into static_views table
-pub type DimId = u16; // Index into dimensions table
-pub type TempId = u8; // Temp array ID (max 256 temps per module)
-pub type PcOffset = i16; // Relative PC offset for jumps (signed for backward jumps)
-pub type NameId = u16; // Index into names table
-pub type DimListId = u16; // Index into dim_lists table (for [DimId; 4] or [u16; 4])
+pub(crate) type ViewId = u16; // Index into static_views table
+pub(crate) type DimId = u16; // Index into dimensions table
+pub(crate) type TempId = u8; // Temp array ID (max 256 temps per module)
+pub(crate) type PcOffset = i16; // Relative PC offset for jumps (signed for backward jumps)
+pub(crate) type NameId = u16; // Index into names table
+pub(crate) type DimListId = u16; // Index into dim_lists table (for [DimId; 4] or [u16; 4])
 
 /// Fixed capacity for the VM arithmetic stack.
 ///
@@ -79,8 +79,8 @@ macro_rules! lookup_modes {
 
         impl LookupMode {
             /// Every mode, for tests whose rows are the modes.
-            #[cfg(test)]
-            pub(crate) const ALL: [LookupMode; [$(LookupMode::$name),+].len()] =
+            #[cfg(any(test, feature = "test-support"))]
+            pub const ALL: [LookupMode; [$(LookupMode::$name),+].len()] =
                 [$(LookupMode::$name),+];
         }
     };
@@ -152,8 +152,8 @@ impl LookupMode {
     ///   check the last two points: where they differ, the last point's y is
     ///   what the table answers at its last x and beyond, and the one before
     ///   it up to there.
-    pub(crate) fn of_kind(kind: crate::datamodel::GraphicalFunctionKind) -> LookupMode {
-        use crate::datamodel::GraphicalFunctionKind;
+    pub(crate) fn of_kind(kind: simlin_base::datamodel::GraphicalFunctionKind) -> LookupMode {
+        use simlin_base::datamodel::GraphicalFunctionKind;
         match kind {
             GraphicalFunctionKind::Continuous => LookupMode::Interpolate,
             GraphicalFunctionKind::Extrapolate => LookupMode::Extrapolate,
@@ -174,14 +174,14 @@ impl LookupMode {
 #[derive(Clone, Debug, PartialEq)]
 pub struct DimensionInfo {
     /// Index into names table for this dimension's name
-    pub name_id: NameId,
+    pub(crate) name_id: NameId,
     /// Number of elements in this dimension
-    pub size: u16,
+    pub(crate) size: u16,
     /// true = indexed dimension (1..n), false = named elements
     pub is_indexed: bool,
     /// For named dimensions: indices into names table for each element name
     /// For indexed dimensions: empty
-    pub element_name_ids: SmallVec<[NameId; 8]>,
+    pub(crate) element_name_ids: SmallVec<[NameId; 8]>,
 }
 
 impl DimensionInfo {
@@ -222,8 +222,7 @@ impl DimensionInfo {
 /// This replaces an `is_temp: bool`, so that adding the snapshot regions
 /// (GH #995) made every dereference site a compile error until it said which
 /// region it meant, rather than silently keeping the old two-way split.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ViewStorage {
     /// `curr[base_off + ..]` -- this timestep's values.
     Curr,
@@ -253,8 +252,7 @@ pub struct RuntimeSparseMapping {
 
 /// A runtime array view used during VM execution.
 /// More dynamic than compile-time ArrayView - supports incremental building.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeView {
     /// Base offset: a slot offset for the three chunk-shaped regions
     /// (`Curr`/`Prev`/`Initial`), a temp id for `Temp`
@@ -277,7 +275,11 @@ pub struct RuntimeView {
 
 impl RuntimeView {
     /// Create a new contiguous view for a variable
-    pub fn for_var(base_off: u32, dims: SmallVec<[u16; 4]>, dim_ids: SmallVec<[DimId; 4]>) -> Self {
+    pub(crate) fn for_var(
+        base_off: u32,
+        dims: SmallVec<[u16; 4]>,
+        dim_ids: SmallVec<[DimId; 4]>,
+    ) -> Self {
         let mut strides = SmallVec::new();
         let mut stride = 1i32;
         // Build strides from right to left for row-major order
@@ -301,7 +303,7 @@ impl RuntimeView {
 
     /// Create an invalid view (for out-of-bounds subscripts)
     #[allow(dead_code)]
-    pub fn invalid() -> Self {
+    pub(crate) fn invalid() -> Self {
         RuntimeView {
             base_off: 0,
             storage: ViewStorage::Curr,
@@ -317,7 +319,11 @@ impl RuntimeView {
     /// Apply a single-element subscript with bounds checking.
     /// If index is out of bounds (using 1-based indexing), marks view as invalid.
     /// Returns true if subscript was valid, false otherwise.
-    pub fn apply_single_subscript_checked(&mut self, dim_idx: usize, index_1based: u16) -> bool {
+    pub(crate) fn apply_single_subscript_checked(
+        &mut self,
+        dim_idx: usize,
+        index_1based: u16,
+    ) -> bool {
         if dim_idx >= self.dims.len() {
             self.is_valid = false;
             return false;
@@ -360,7 +366,7 @@ impl RuntimeView {
     /// `offset_for_iter_index` arithmetic (index decompose + stride dot
     /// product) collapses to `start + k` for these views, so iteration and
     /// reduction loops over them can be plain linear scans (GH #603).
-    pub fn dense_linear_start(&self) -> Option<usize> {
+    pub(crate) fn dense_linear_start(&self) -> Option<usize> {
         if !self.sparse.is_empty() {
             return None;
         }
@@ -385,7 +391,7 @@ impl RuntimeView {
     /// early-exit-free loop shape also keeps LLVM's loop-idiom recognition
     /// from converting it back into a bcmp call).
     #[inline]
-    pub fn same_shape(&self, other: &RuntimeView) -> bool {
+    pub(crate) fn same_shape(&self, other: &RuntimeView) -> bool {
         let n = self.dims.len();
         if n != other.dims.len() || self.dim_ids.len() != other.dim_ids.len() {
             return false;
@@ -452,7 +458,7 @@ impl RuntimeView {
     }
 
     /// Apply a single-element subscript, removing one dimension
-    pub fn apply_single_subscript(&mut self, dim_idx: usize, index: u16) {
+    pub(crate) fn apply_single_subscript(&mut self, dim_idx: usize, index: u16) {
         debug_assert!(dim_idx < self.dims.len());
         debug_assert!(index < self.dims[dim_idx]);
 
@@ -500,7 +506,7 @@ impl RuntimeView {
     ///
     /// Returns true if a non-empty range was applied, false if the range
     /// was empty (but the view remains valid).
-    pub fn apply_range_checked(
+    pub(crate) fn apply_range_checked(
         &mut self,
         dim_idx: usize,
         start_1based: u16,
@@ -578,7 +584,7 @@ impl RuntimeView {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(crate) enum BuiltinId {
+pub enum BuiltinId {
     Abs,
     Arccos,
     Arcsin,
@@ -611,7 +617,7 @@ impl BuiltinId {
     /// This is the single statement of that fact, and its three consumers --
     /// `compiler::codegen` (how many operands to push), `Opcode::stack_effect`
     /// (how many the fused opcode pops), and the `Opcode::Apply` arms in
-    /// `vm.rs` and `wasmgen::lower` -- all read it, so they cannot disagree.
+    /// `vm.rs` and `simlin_wasmgen::lower` -- all read it, so they cannot disagree.
     /// Before it existed, `Apply` unconditionally popped 3 and codegen padded
     /// every shorter call with `LoadConstant(0.0)` pushes that `apply` then
     /// discarded: 0.73 wasted pads per executed `Apply` on C-LEARN (583k
@@ -628,7 +634,7 @@ impl BuiltinId {
     /// rather than a pad: `PULSE`'s third defaults to `0` and `apply` reads it,
     /// `SAFEDIV`'s third IS the divide-by-zero result, and `RAMP`'s third
     /// defaults to `final_time` via `LoadGlobalVar`.
-    pub(crate) fn arity(self) -> u8 {
+    pub fn arity(self) -> u8 {
         match self {
             BuiltinId::Abs
             | BuiltinId::Arccos
@@ -656,7 +662,7 @@ impl BuiltinId {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Op2 {
+pub enum Op2 {
     Add,
     Sub,
     Exp,
@@ -733,7 +739,7 @@ pub(crate) use bind_kind;
 /// from it -- [`Opcode`] itself, [`Opcode::stack_effect`], [`Opcode::name`]
 /// and [`Opcode::jump_offset`] -- and the test module derives its every-variant
 /// rows from the same rows. The VM (`vm.rs`) and the wasm backend
-/// (`wasmgen::lower`) are the semantics and match on the variants by hand, so
+/// (`simlin_wasmgen::lower`) are the semantics and match on the variants by hand, so
 /// adding an opcode is one row here plus its two execution arms.
 ///
 /// A row is
@@ -1318,9 +1324,8 @@ macro_rules! declare_opcodes {
         ///
         /// Declared by [`opcode_table!`], which also states each variant's effect
         /// on the arithmetic stack.
-        #[cfg_attr(feature = "debug-derive", derive(Debug))]
-        #[derive(Clone, Copy, PartialEq)]
-        pub(crate) enum Opcode {
+        #[derive(Debug, Clone, Copy, PartialEq)]
+        pub enum Opcode {
             $( $(#[$meta])* $name $({ $( $(#[$fmeta])* $field: $ty ),* })?, )*
         }
 
@@ -1332,16 +1337,15 @@ macro_rules! declare_opcodes {
             /// Opcodes that only affect the view stack or the iter stack return
             /// (0, 0) since they don't touch the arithmetic stack.
             #[allow(unused_variables)]
-            pub(crate) fn stack_effect(&self) -> (u8, u8) {
+            pub fn stack_effect(&self) -> (u8, u8) {
                 match *self {
                     $( Opcode::$name $({ $($field),* })? => ($pops, $pushes), )*
                 }
             }
 
             /// Static variant name, independent of payload. Used for bytecode-composition
-            /// profiling (opcode histograms) and human-readable diagnostics without
-            /// depending on the optional `debug-derive` Debug impl.
-            pub(crate) fn name(&self) -> &'static str {
+            /// profiling (opcode histograms) and human-readable diagnostics.
+            pub fn name(&self) -> &'static str {
                 match self {
                     $( Opcode::$name { .. } => stringify!($name), )*
                 }
@@ -1378,21 +1382,19 @@ opcode_table!(declare_opcodes);
 // Module and Array Declarations
 // ============================================================================
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ModuleDeclaration {
-    pub(crate) model_name: Ident<Canonical>,
+    pub model_name: Ident<Canonical>,
     /// The set of input names for this module instantiation.
     /// Different instantiations of the same model with different input sets
     /// need separate compiled modules (the ModuleInput offsets differ).
-    pub(crate) input_set: BTreeSet<Ident<Canonical>>,
-    pub(crate) off: usize, // offset within the parent module
+    pub input_set: BTreeSet<Ident<Canonical>>,
+    pub off: usize, // offset within the parent module
 }
 
 /// A static array view for compile-time known subscripts.
 /// Stored in ByteCodeContext and referenced by ViewId.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StaticArrayView {
     /// Base variable offset within the region named by `storage` (a temp id
     /// when that is `ViewStorage::Temp`)
@@ -1426,6 +1428,11 @@ impl StaticArrayView {
     /// (non-star-range) view -- the overwhelmingly common case -- so we take a
     /// free fresh empty `SmallVec` then and only fall back to a real clone for a
     /// genuinely sparse view.
+    ///
+    /// `#[inline]`: the VM's dispatch loop is its one production caller, and
+    /// being public for simlin-wasmgen's tests it is otherwise emitted out of
+    /// line (about 2% of a C-LEARN run without LTO).
+    #[inline]
     pub fn to_runtime_view(&self, module_off: u32) -> RuntimeView {
         let sparse = if self.sparse.is_empty() {
             SmallVec::new()
@@ -1467,21 +1474,20 @@ impl StaticArrayView {
 /// `PartialEq`, not by bit pattern: a NaN makes this value unequal to a
 /// bit-identical rebuild and so unable to backdate, and two tables differing
 /// only in a zero's sign compare equal. Both are accepted, knowingly -- see the
-/// "Float equality in this crate" section on [`crate::ast::Literal`] for the
+/// "Float equality in this crate" section on [`simlin_base::ast::Literal`] for the
 /// position, the corrected premise behind GH #642, and what would change the
 /// decision.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ByteCodeContext {
     // === Existing fields ===
     /// Graphical function lookup tables
-    pub(crate) graphical_functions: Vec<Vec<(f64, f64)>>,
+    pub graphical_functions: Vec<Vec<(f64, f64)>>,
     /// Module declarations for nested modules
-    pub(crate) modules: Vec<ModuleDeclaration>,
+    pub modules: Vec<ModuleDeclaration>,
 
     // === Array support fields ===
     /// Dimension information table (indexed by DimId)
-    pub(crate) dimensions: Vec<DimensionInfo>,
+    pub dimensions: Vec<DimensionInfo>,
     /// Interned names table (dimension names, element names)
     pub(crate) names: Vec<String>,
     /// Pre-computed static views (indexed by ViewId)
@@ -1489,19 +1495,19 @@ pub struct ByteCodeContext {
 
     // === Temp array info ===
     /// Offset of each temp array in temp_storage (indexed by TempId)
-    pub(crate) temp_offsets: Vec<usize>,
+    pub temp_offsets: Vec<usize>,
     /// Total size needed for temp_storage
-    pub(crate) temp_total_size: usize,
+    pub temp_total_size: usize,
 
     // === Dim list side table ===
     /// Packed (n_dims, [DimId or u16; 4]) entries referenced by DimListId.
     /// Each entry stores the dimension count and up to 4 IDs.
-    pub(crate) dim_lists: Vec<(u8, [u16; 4])>,
+    pub dim_lists: Vec<(u8, [u16; 4])>,
 }
 
 impl ByteCodeContext {
     /// Get a static view by ID. Read by the wasm backend's `PushStaticView`
-    /// lowering (`wasmgen::lower`).
+    /// lowering (`simlin_wasmgen::lower`).
     pub fn get_static_view(&self, id: ViewId) -> Option<&StaticArrayView> {
         self.static_views.get(id as usize)
     }
@@ -1512,7 +1518,7 @@ impl ByteCodeContext {
     /// by `add_dim_list` during compilation, so an invalid ID indicates a
     /// compiler bug that should surface immediately rather than be silently
     /// converted to a default value.
-    pub fn get_dim_list(&self, id: DimListId) -> (u8, &[u16; 4]) {
+    pub(crate) fn get_dim_list(&self, id: DimListId) -> (u8, &[u16; 4]) {
         let (n, ref ids) = self.dim_lists[id as usize];
         (n, ids)
     }
@@ -1523,7 +1529,7 @@ impl ByteCodeContext {
 // gated. The two READERS above do -- `get_static_view` and `get_dim_list` are
 // on the wasm-lowering and VM hot paths respectively -- which is why this is
 // two blocks rather than one `#[allow(dead_code)]` block over everything.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl ByteCodeContext {
     /// Intern a name (dimension or element name) and return its NameId.
     /// If the name already exists, returns the existing ID.
@@ -1588,13 +1594,12 @@ impl ByteCodeContext {
 /// bit pattern: a NaN makes this value unequal to a bit-identical rebuild and
 /// so unable to backdate, and two pools differing only in a zero's sign compare
 /// equal. Both are accepted, knowingly -- see the "Float equality in this
-/// crate" section on [`crate::ast::Literal`] for the position, the corrected
+/// crate" section on [`simlin_base::ast::Literal`] for the position, the corrected
 /// premise behind GH #642, and what would change the decision.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ByteCode {
-    pub(crate) literals: Vec<f64>,
-    pub(crate) code: Vec<Opcode>,
+    pub literals: Vec<f64>,
+    pub code: Vec<Opcode>,
 }
 
 impl ByteCode {
@@ -2358,15 +2363,12 @@ pub(crate) mod tests {
     fn every_row_names_itself_and_reports_its_jump() {
         let mut names: HashSet<&'static str> = HashSet::new();
         for row in rows() {
-            #[cfg(feature = "debug-derive")]
-            {
-                let debug = format!("{:?}", row.input);
-                let spelled: String = debug
-                    .chars()
-                    .take_while(|c| c.is_ascii_alphanumeric())
-                    .collect();
-                assert_eq!(row.input.name(), spelled, "{}: name", row.name);
-            }
+            let debug = format!("{:?}", row.input);
+            let spelled: String = debug
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric())
+                .collect();
+            assert_eq!(row.input.name(), spelled, "{}: name", row.name);
             assert!(
                 names.insert(row.input.name()),
                 "{}: duplicate variant name",
@@ -4442,8 +4444,7 @@ pub(crate) mod tests {
 
 /// A single variable's compiled initial-value bytecode, along with the
 /// data-buffer offsets it writes to (from AssignCurr nodes).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CompiledInitial {
     // Used for `set_value` error messages.
     #[allow(dead_code)]
@@ -4453,19 +4454,18 @@ pub struct CompiledInitial {
     /// `Vm::eval_initials_skipping` to identify a variable by the slots it writes
     /// (so the conveyor/queue container stocks can be skipped when reconciling
     /// INIT(<container access>) against the published belt/FIFO values).
-    pub(crate) offsets: Vec<usize>,
-    pub(crate) bytecode: ByteCode,
+    pub offsets: Vec<usize>,
+    pub bytecode: ByteCode,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CompiledModule {
     pub(crate) ident: Ident<Canonical>,
-    pub(crate) n_slots: usize,
-    pub(crate) context: Arc<ByteCodeContext>,
-    pub(crate) compiled_initials: Arc<Vec<CompiledInitial>>,
-    pub(crate) compiled_flows: Arc<ByteCode>,
-    pub(crate) compiled_stocks: Arc<ByteCode>,
+    pub n_slots: usize,
+    pub context: Arc<ByteCodeContext>,
+    pub compiled_initials: Arc<Vec<CompiledInitial>>,
+    pub compiled_flows: Arc<ByteCode>,
+    pub compiled_stocks: Arc<ByteCode>,
     /// Opcode length of the run-invariant prefix of `compiled_flows.code`
     /// (time-invariant variable hoisting, GH #712). The flow runlist is
     /// partitioned so every run-invariant variable's bytecode precedes every

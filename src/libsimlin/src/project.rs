@@ -8,8 +8,8 @@
 //! reference counting, querying models, and checking simulatability.
 
 use anyhow::{anyhow, Result};
-use simlin_engine::buffa::Message;
-use simlin_engine::{self as engine, serde as engine_serde};
+use simlin_formats::buffa::Message;
+use simlin_formats::serde as engine_serde;
 use std::ffi::{CStr, CString};
 use std::io::BufReader;
 use std::os::raw::c_char;
@@ -58,20 +58,21 @@ pub unsafe extern "C" fn simlin_project_open_protobuf(
         // crafted payload from amplifying into gigabytes, and real projects sit
         // far below it: C-LEARN, the largest model in the test corpus, needs
         // under a twentieth of it.
-        let pb_project =
-            engine::project_io::Project::decode_from_slice(slice).map_err(|decode_err| {
+        let pb_project = simlin_formats::project_io::Project::decode_from_slice(slice).map_err(
+            |decode_err| {
                 FfiError::new(SimlinErrorCode::ProtobufDecode)
                     .with_message(format!("failed to decode project protobuf: {decode_err}"))
-            })?;
+            },
+        )?;
 
         // Bytes that decode are not thereby a project: one that lacks what
         // every writer writes (an empty buffer, a truncated save) is refused
         // with what it lacks.
-        let datamodel_project: engine::datamodel::Project = engine_serde::deserialize(pb_project)
-            .map_err(|err| {
-            FfiError::new(SimlinErrorCode::ProtobufDecode)
-                .with_message(format!("the protobuf is not a project: {}", err.reason()))
-        })?;
+        let datamodel_project: simlin_base::datamodel::Project =
+            engine_serde::deserialize(pb_project).map_err(|err| {
+                FfiError::new(SimlinErrorCode::ProtobufDecode)
+                    .with_message(format!("the protobuf is not a project: {}", err.reason()))
+            })?;
         Ok(Box::into_raw(Box::new(SimlinProject::new(
             datamodel_project,
         ))))
@@ -126,24 +127,24 @@ pub unsafe extern "C" fn simlin_project_open_json(
                 .with_message(format!("input JSON is not valid UTF-8: {utf8_err}"))
         })?;
 
-        let datamodel_project: engine::datamodel::Project = match format {
+        let datamodel_project: simlin_base::datamodel::Project = match format {
             ffi::SimlinJsonFormat::Native => {
-                let json_project: engine::json::Project = engine::json::Project::from_reader(
-                    json_str.as_bytes(),
-                )
-                .map_err(|engine_err: engine::Error| {
-                    FfiError::new(SimlinErrorCode::Generic).with_message(engine_err.to_string())
-                })?;
-                json_project.into()
-            }
-            ffi::SimlinJsonFormat::Sdai => {
-                let sdai_model: engine::json_sdai::SdaiModel =
-                    engine::json_sdai::SdaiModel::from_reader(json_str.as_bytes()).map_err(
-                        |engine_err: engine::Error| {
+                let json_project: simlin_formats::json::Project =
+                    simlin_formats::json::Project::from_reader(json_str.as_bytes()).map_err(
+                        |engine_err: simlin_base::Error| {
                             FfiError::new(SimlinErrorCode::Generic)
                                 .with_message(engine_err.to_string())
                         },
                     )?;
+                json_project.into()
+            }
+            ffi::SimlinJsonFormat::Sdai => {
+                let sdai_model: simlin_formats::json_sdai::SdaiModel =
+                    simlin_formats::json_sdai::SdaiModel::from_reader(json_str.as_bytes())
+                        .map_err(|engine_err: simlin_base::Error| {
+                            FfiError::new(SimlinErrorCode::Generic)
+                                .with_message(engine_err.to_string())
+                        })?;
                 sdai_model.into()
             }
         };
@@ -207,8 +208,8 @@ pub unsafe extern "C" fn simlin_project_new(
 }
 
 /// The datamodel `simlin_project_new` creates.
-fn new_datamodel(name: String) -> engine::datamodel::Project {
-    use engine::datamodel;
+fn new_datamodel(name: String) -> simlin_base::datamodel::Project {
+    use simlin_base::datamodel;
     datamodel::Project {
         name,
         sim_specs: datamodel::SimSpecs {
@@ -364,7 +365,7 @@ pub unsafe extern "C" fn simlin_project_get_simulation_key(
 
     let project_ref = ffi_try!(out_error, require_project(project));
     let contents = project_ref.datamodel.lock().unwrap().shared();
-    *out_key = engine::db::simulation_key(&contents);
+    *out_key = simlin_engine::db::simulation_key(&contents);
 }
 
 /// Writes the project's dimensions as UTF-8 JSON to a buffer the caller frees
@@ -404,11 +405,11 @@ pub unsafe extern "C" fn simlin_project_get_dimensions(
 
     let project_ref = ffi_try!(out_error, require_project(project));
     let contents = project_ref.datamodel.lock().unwrap().shared();
-    let dimensions: Vec<engine::json::Dimension> = contents
+    let dimensions: Vec<simlin_formats::json::Dimension> = contents
         .dimensions
         .iter()
         .cloned()
-        .map(engine::json::Dimension::from)
+        .map(simlin_formats::json::Dimension::from)
         .collect();
     let bytes = match serde_json::to_vec(&dimensions) {
         Ok(bytes) => bytes,
@@ -567,8 +568,8 @@ pub unsafe extern "C" fn simlin_project_add_model(
     // The engine's `AddModel` is the one statement of which names are taken
     // (a name whose canonical form is another model's is) and of what a new
     // model holds.
-    let add = engine::ProjectPatch {
-        project_ops: vec![engine::ProjectOperation::AddModel {
+    let add = simlin_base::ProjectPatch {
+        project_ops: vec![simlin_base::ProjectOperation::AddModel {
             name: model_name_str.to_string(),
         }],
         models: vec![],
@@ -577,7 +578,7 @@ pub unsafe extern "C" fn simlin_project_add_model(
     // of the contents advances the revision and drops the hit indexes, so a
     // refused add must not take one.
     let mut staged = (*datamodel_locked.shared()).clone();
-    if let Err(err) = engine::apply_patch(&mut staged, add) {
+    if let Err(err) = simlin_edit::apply_patch(&mut staged, add) {
         store_error(
             out_error,
             SimlinError::new(SimlinErrorCode::from(err.code)).with_message(err.to_string()),
@@ -802,7 +803,7 @@ pub unsafe extern "C" fn simlin_project_open_xmile(
     let slice = std::slice::from_raw_parts(data, len);
     let mut reader = BufReader::new(slice);
 
-    match simlin_engine::open_xmile(&mut reader) {
+    match simlin_formats::open_xmile(&mut reader) {
         Ok(datamodel_project) => Box::into_raw(Box::new(SimlinProject::new(datamodel_project))),
         Err(err) => {
             store_error(
@@ -856,7 +857,7 @@ pub unsafe extern "C" fn simlin_project_open_vensim(
         }
     };
 
-    match simlin_engine::open_vensim(contents) {
+    match simlin_formats::open_vensim(contents) {
         Ok(datamodel_project) => Box::into_raw(Box::new(SimlinProject::new(datamodel_project))),
         Err(err) => {
             store_error(
@@ -883,7 +884,7 @@ pub unsafe extern "C" fn simlin_project_open_vensim(
 /// opens rather than a variant of each.
 ///
 /// What it covers is what the engine's readers report
-/// (`simlin_engine::ImportWarning`): for MDL the sketch and the file's custom
+/// (`simlin_formats::ImportWarning`): for MDL the sketch and the file's custom
 /// outputs, for XMILE what the reader skips among the variables, the views
 /// and the stories. A NULL report says the file loses none of those, not
 /// that the project holds everything the file says.
@@ -904,7 +905,7 @@ pub unsafe extern "C" fn simlin_project_open_vensim(
 /// in `out_collected_errors` (NULL when the file loses nothing): for MDL, one
 /// per kind and sketch view for what a modeler put on a view, and one per
 /// kind over the whole sketch for what follows from what the diagram does
-/// not draw (see `simlin_engine::mdl::parse_mdl_with_warnings`). `message` is
+/// not draw (see `simlin_formats::mdl::parse_mdl_with_warnings`). `message` is
 /// `"MDL import: <reason>"` or `"XMILE import: <reason>"` and `details` the
 /// bare reason, such as `29 comments on view 'View 1' are not kept, such as
 /// 'The World3 Model'` or `2 sliders on interface page 1 are not kept:
@@ -979,11 +980,11 @@ pub unsafe extern "C" fn simlin_import_losses(
                 return;
             };
             #[cfg(feature = "file_io")]
-            let provider = data_dir.map(simlin_engine::FilesystemDataProvider::new);
+            let provider = data_dir.map(simlin_formats::FilesystemDataProvider::new);
             #[cfg(feature = "file_io")]
             let provider = provider
                 .as_ref()
-                .map(|provider| provider as &dyn simlin_engine::DataProvider);
+                .map(|provider| provider as &dyn simlin_formats::DataProvider);
             #[cfg(not(feature = "file_io"))]
             let provider = {
                 let _ = data_dir;
@@ -991,13 +992,13 @@ pub unsafe extern "C" fn simlin_import_losses(
             };
             (
                 "MDL",
-                simlin_engine::open_vensim_with_data_and_warnings(contents, provider)
+                simlin_formats::open_vensim_with_data_and_warnings(contents, provider)
                     .map(|(_, warnings)| warnings),
             )
         }
         Ok(ffi::SimlinSaveFormat::Xmile) => (
             "XMILE",
-            simlin_engine::open_xmile_with_warnings(&mut BufReader::new(slice))
+            simlin_formats::open_xmile_with_warnings(&mut BufReader::new(slice))
                 .map(|(_, warnings)| warnings),
         ),
         Ok(
@@ -1018,7 +1019,7 @@ pub unsafe extern "C" fn simlin_import_losses(
     };
     match read {
         Ok(warnings) => {
-            let summary = simlin_engine::ImportWarning::summary(&warnings);
+            let summary = simlin_formats::ImportWarning::summary(&warnings);
             store_warnings(
                 out_collected_errors,
                 &format!("{source} import"),
@@ -1081,7 +1082,7 @@ pub unsafe extern "C" fn simlin_project_open_vensim_with_data(
     };
 
     let result = if data_dir.is_null() {
-        simlin_engine::open_vensim(contents)
+        simlin_formats::open_vensim(contents)
     } else {
         let dir_slice = std::slice::from_raw_parts(data_dir, data_dir_len);
         let dir_str = match std::str::from_utf8(dir_slice) {
@@ -1098,13 +1099,13 @@ pub unsafe extern "C" fn simlin_project_open_vensim_with_data(
 
         #[cfg(feature = "file_io")]
         {
-            let provider = simlin_engine::FilesystemDataProvider::new(dir_str);
-            simlin_engine::open_vensim_with_data(contents, Some(&provider))
+            let provider = simlin_formats::FilesystemDataProvider::new(dir_str);
+            simlin_formats::open_vensim_with_data(contents, Some(&provider))
         }
         #[cfg(not(feature = "file_io"))]
         {
             let _ = dir_str;
-            simlin_engine::open_vensim(contents)
+            simlin_formats::open_vensim(contents)
         }
     };
 
@@ -1160,7 +1161,7 @@ pub unsafe extern "C" fn simlin_project_open_systems(
         }
     };
 
-    match simlin_engine::open_systems(contents) {
+    match simlin_formats::open_systems(contents) {
         Ok(datamodel_project) => Box::into_raw(Box::new(SimlinProject::new(datamodel_project))),
         Err(err) => {
             store_error(
@@ -1216,12 +1217,12 @@ pub unsafe extern "C" fn simlin_project_is_simulatable(
     let Some(source_project) = db_locked.current_source_project() else {
         return false;
     };
-    engine::build_sim(
+    simlin_engine::build_sim(
         &mut db_locked,
         source_project,
         &contents,
         model_name,
-        engine::db::LtmOverlay::Off,
+        simlin_engine::db::LtmOverlay::Off,
     )
     .is_ok()
 }
@@ -1266,12 +1267,12 @@ pub unsafe extern "C" fn simlin_project_get_errors(
     // additionally routes a conveyor/queue model through its special expansion
     // build path (also LTM-off), so a valid special-stock model is not
     // mis-reported as a project error by the ordinary path's NotExpanded guard.
-    let vm_error = engine::build_sim(
+    let vm_error = simlin_engine::build_sim(
         &mut db_locked,
         source_project,
         &contents,
         "main",
-        engine::db::LtmOverlay::Off,
+        simlin_engine::db::LtmOverlay::Off,
     )
     .err();
 
@@ -1291,7 +1292,7 @@ pub unsafe extern "C" fn simlin_project_get_errors(
         source_project,
         vm_error.as_ref(),
         &contents,
-        engine::db::LtmOverlay::from(ltm_requested),
+        simlin_engine::db::LtmOverlay::from(ltm_requested),
     );
 
     if all_errors.is_empty() {

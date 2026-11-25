@@ -20,8 +20,8 @@
 //! flow (`db::ltm::link_scores`), not the generators in isolation.
 
 use super::*;
-use crate::datamodel;
 use crate::test_common::TestProject;
+use simlin_base::datamodel;
 
 /// Render one synthetic variable's equation as a stable, fully-structured
 /// string: `Scalar`/`ApplyToAll` are their diagnostic text; `Arrayed` lists
@@ -2150,7 +2150,8 @@ TIME STEP = 1 ~~|
 fn lookup_table_runtime_index_is_frozen_through_the_production_path() {
     use crate::db::{DiagnosticError, collect_model_diagnostics};
 
-    let project = crate::open_vensim(&arrayed_gf_lookup_mdl("idx")).expect("the MDL parses");
+    let project =
+        simlin_formats::open_vensim(&arrayed_gf_lookup_mdl("idx")).expect("the MDL parses");
 
     // The upstream limitation, asserted rather than assumed: `y` itself has no
     // bytecode, which is why there is no numeric oracle here.
@@ -2206,7 +2207,8 @@ fn lookup_table_runtime_index_is_frozen_through_the_production_path() {
 /// model, same production path, index static instead of runtime.
 #[test]
 fn lookup_table_head_and_static_index_survive_the_wrap() {
-    let project = crate::open_vensim(&arrayed_gf_lookup_mdl("A1")).expect("the MDL parses");
+    let project =
+        simlin_formats::open_vensim(&arrayed_gf_lookup_mdl("A1")).expect("the MDL parses");
     let (db, model, source_project) = char_fixture_db(&project);
     assert!(
         fragment_compile_failures(&db, model, source_project).is_empty(),
@@ -2520,9 +2522,9 @@ fn indexed_axis_index_model(index_expr: &str, one_value: &str) -> datamodel::Pro
         .get_mut(0)
         .expect("main model")
         .variables
-        .push(crate::datamodel::Variable::Aux(datamodel::Aux {
+        .push(simlin_base::datamodel::Variable::Aux(datamodel::Aux {
             ident: "q".to_string(),
-            equation: crate::datamodel::Equation::Arrayed(
+            equation: simlin_base::datamodel::Equation::Arrayed(
                 vec!["D".to_string()],
                 vec![
                     ("1".to_string(), "100".to_string(), None, None),

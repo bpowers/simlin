@@ -52,8 +52,8 @@
 # Linguist hints (GitHub language stats); unrelated to line endings.
 src/app/scripts/* linguist-vendored
 src/app/config/* linguist-vendored
-src/simlin-engine/src/stdlib.gen.rs linguist-generated=true
-src/simlin-engine/src/project_io.gen.rs linguist-generated=true
+src/simlin-base/src/stdlib.gen.rs linguist-generated=true
+src/simlin-formats/src/project_io.gen.rs linguist-generated=true
 
 # --- Preserve byte-for-byte (no EOL conversion) -----------------------------
 # These rules come last so they win over the `* text=auto eol=lf` default for
@@ -79,4 +79,3 @@ test/** -text
 # byte-exact (e.g. the SIR_output.csv golden the libsimlin tests reference).
 src/libsimlin/testdata/**          -text
 src/pysimlin/tests/fixtures/**     -text
-src/simlin-serve/tests/fixtures/** -text

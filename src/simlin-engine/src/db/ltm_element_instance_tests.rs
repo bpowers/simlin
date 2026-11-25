@@ -658,8 +658,8 @@ fn an_arrayed_capture_helpers_scores_compile() {
 /// through that same edge.
 #[test]
 fn an_unresolved_pathway_link_warns_once_per_edge() {
-    use crate::datamodel;
     use crate::testutils::{x_aux, x_model};
+    use simlin_base::datamodel;
 
     let input = datamodel::Variable::Aux(datamodel::Aux {
         ident: "input_val".to_string(),
@@ -782,8 +782,8 @@ fn an_unresolved_pathway_link_warns_once_per_edge() {
 /// to hold live, and the denominator names a port the element never reads.
 #[test]
 fn each_element_scores_the_module_port_that_element_reads() {
-    use crate::datamodel;
     use crate::testutils::{x_aux, x_model};
+    use simlin_base::datamodel;
 
     let input = datamodel::Variable::Aux(datamodel::Aux {
         ident: "input_val".to_string(),

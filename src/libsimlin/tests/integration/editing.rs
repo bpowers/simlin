@@ -5,7 +5,7 @@
 //! The diagram editing FFI, from a press to an applied patch.
 //!
 //! What a tap or a drag plans is the engine's decision, pinned by the decision
-//! tables in `simlin_engine::editing`'s tests. These tests pin the boundary:
+//! tables in `simlin_edit::editing`'s tests. These tests pin the boundary:
 //! each entry point marshals a press in and a plan out, the patch a plan carries
 //! applies through `simlin_project_apply_patch` to the edit the plan described,
 //! a model the editor cannot plan against is refused with a code a host can act
@@ -16,7 +16,7 @@ use std::ptr;
 
 use serde_json::{json, Value};
 use simlin::*;
-use simlin_engine::datamodel::{self, Variable, ViewElement};
+use simlin_base::datamodel::{self, Variable, ViewElement};
 use simlin_engine::test_common::TestProject;
 
 use crate::common::{expect_error_code, expect_no_error, open_project_from_datamodel};
@@ -30,7 +30,7 @@ const LINK: i32 = 5;
 /// variable the diagram does not draw, loaded through the production JSON
 /// conversion.
 fn project() -> *mut SimlinProject {
-    let project: simlin_engine::json::Project = serde_json::from_value(json!({
+    let project: simlin_formats::json::Project = serde_json::from_value(json!({
         "name": "editing",
         "simSpecs": {"startTime": 0.0, "endTime": 10.0, "dt": "1"},
         "models": [{

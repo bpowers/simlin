@@ -1,14 +1,11 @@
 # simlin-mcp-core
 
-Transport-agnostic core library shared by every Simlin MCP server.
+Transport-agnostic core library of the Simlin MCP server.
 
 ## Purpose
 
 Owns the MCP tool surface (`ReadModel`, `EditModel`, `CreateModel`) as async free functions parameterised by a [`ProjectAccess`] backing store, plus the rmcp `ServerHandler` that wires those functions into MCP.
-Two binaries mount this library against different transports and storage strategies:
-
-- `simlin-mcp` -- stdio entry point for the `@simlin/mcp` npm package; uses a stateless `FileSystemAccess` impl that re-reads the file on every call.
-- `simlin-serve` -- HTTP host inside the `@simlin/serve` npm package; uses a `RegistryAccess` impl backed by an in-memory `LoroDoc` plus optimistic-lock versioning, and adds its own `ListProjects` and `Simulate` tools alongside the three reused ones.
+`simlin-mcp`, the stdio entry point for the `@simlin/mcp` npm package, mounts this library with the stateless `FileSystemAccess` impl, which re-reads the file on every call.
 
 The library is generic over a concrete `A: ProjectAccess` (not `dyn`) so rmcp's `tool_router` macro sees a fully concrete handler type.
 Native async-fn-in-trait (AFIT) avoids the heap allocation `async-trait` would force.
@@ -17,27 +14,28 @@ Native async-fn-in-trait (AFIT) avoids the heap allocation `async-trait` would f
 
 - `src/lib.rs` -- Module declarations + `pub use` re-exports for the stable surface (`ProjectAccess`, `OpenedProject`, `SaveOutcome`, `AccessError`, `SimlinMcpServer`, `ResourceContent`, `LoopDominanceSummary`, `DominantPeriodOutput`, `ErrorOutput`, `SourceFormat`).
 - `src/access.rs` -- The `ProjectAccess` trait plus the `OpenedProject` and `SaveOutcome` structs.
-  `version` is the optimistic-lock token: stateless impls return `0`, registry-backed impls return their monotonically-increasing counter.
+  `version` is the optimistic-lock token: a stateless impl returns `0`, an impl holding shared state returns a monotonically increasing counter.
   `save` returns a `SaveOutcome { version, warnings }`: `warnings` is the on-disk writer's non-fatal lossiness channel (today only the MDL writer produces any) and is always paired with a write that succeeded -- a serialization problem that would corrupt the file is an `Err`.
 - `src/errors.rs` -- `AccessError` (NotFound / IoError / ParseError / VersionMismatch / WriteError / Validation).
   The `Validation` variant carries `Vec<ErrorOutput>` so the wire shape stays identical to the pre-refactor `simlin-mcp` server.
-- `src/types.rs` -- Wire-format types preserved verbatim from the pre-rmcp binary (`SourceFormat`, `LoopDominanceSummary`, `DominantPeriodOutput`, `ErrorOutput`) plus `build_empty_project` and `build_empty_project_with_specs` shared with the new-project HTTP route in `simlin-serve` for byte-identical create output, and the MDL export wire helpers: `mdl_export_warnings_to_outputs` / `mdl_export_error_to_output` are the one place the MDL writer's warnings and hard errors become wire `ErrorOutput`s (`generic` code, `model` kind, `MDL export:` message prefix, scoped to the single non-macro model) -- both `FileSystemAccess` and `simlin-serve`'s writer go through them so pysimlin, stdio MCP, and serve report the same thing -- and `preflight_export` dry-runs the writer for a `SourceFormat` (warnings a save would report, or the `Validation` error it would fail with).
+- `src/types.rs` -- Wire-format types preserved verbatim from the pre-rmcp binary (`SourceFormat`, `LoopDominanceSummary`, `DominantPeriodOutput`, `ErrorOutput`) plus `default_sim_specs` and `build_empty_project` (the shape of a new model), `model_snapshot` (the JSON of the analyzed model, without its diagrams), and the MDL export wire helpers: `mdl_export_warnings_to_outputs` / `mdl_export_error_to_output` are the one place the MDL writer's warnings and hard errors become wire `ErrorOutput`s (`generic` code, `model` kind, `MDL export:` message prefix, scoped to the single non-macro model), the same shape pysimlin reports -- and `preflight_export` dry-runs the writer for a `SourceFormat` (warnings a save would report, or the `Validation` error it would fail with).
 - `src/open.rs` -- Format-detection + parsing helpers (`format_for_extension`, `open_project`, `resolve_model_name`).
   I/O-free: callers pass already-loaded bytes.
   `format_for_extension` is the single extension dispatcher for the MCP surface: `open_project` picks its parser with it and `create_model` picks the writer for a fresh file with it, so a path's extension always names the format on disk (`.stmx`/`.xmile`/`.xml` XMILE, `.mdl` Vensim, everything else content-detected JSON).
   `ensure_variable_uids` is private: `open_project` is the only caller, and running it is part of what opening a project means rather than a step a caller may skip.
+- `src/relationships.rs` -- `generate_relationships`, the relationships an SD-AI file states, from the polarities of the model's causal links.
 - `src/fs_access.rs` -- `FileSystemAccess`, the stateless filesystem `ProjectAccess` impl.
   Used by the `simlin-mcp` binary (re-exported there as `simlin_mcp::access::FileSystemAccess`) AND by this crate's integration suites (`test_support::TestFileSystemAccess` is a type alias for it).
   It lives here rather than in the binary so the tests exercise the shipping impl -- a hand-maintained near-copy drifts at exactly the points where this file is non-trivial (the MDL lossiness-warning channel and the SD-AI `relationships` regeneration on save), so a test saving through a copy proves something about a simpler function than the one that ships.
-  Every `SourceFormat` is written back in place in its own format; `Mdl` goes through `simlin_engine::to_mdl_with_warnings`, whose hard errors (more than one non-macro model, an ordinary Module variable) fail the save and whose lossiness warnings ride `SaveOutcome::warnings`.
-- `src/tools/` -- The three reused tools (`read_model.rs`, `edit_model.rs`, `create_model.rs`) as async free functions taking `&impl ProjectAccess`.
+  Every `SourceFormat` is written back in place in its own format; `Mdl` goes through `simlin_formats::to_mdl_with_warnings`, whose hard errors (more than one non-macro model, an ordinary Module variable) fail the save and whose lossiness warnings ride `SaveOutcome::warnings`.
+- `src/tools/` -- The three tools (`read_model.rs`, `edit_model.rs`, `create_model.rs`) as async free functions taking `&impl ProjectAccess`.
   Exposed types use `#[serde(rename_all = "camelCase")]`; the curated *input* types deliberately exclude engine-internal fields (`uid`, `compat`, `aiState`), while both tool outputs embed the full engine `json::Model`, which serializes `uid`/`compat` when populated.
   `read_model`/`edit_model` both unconditionally run LTM loop analysis (`analysis::analyze_model`), so they (1) carry an `analysisError` field that surfaces the actionable compile error (naming the variable that failed to compile) when a model can't be compiled for LTM instead of returning a silent empty `loopDominance` (GH #660), and (2) collect their `collect_all_diagnostics` passes with the LTM overlay on (`simlin_engine::db::LtmOverlay::On`, the same harvest libsimlin's `simlin_project_get_errors` runs for a project that requested LTM, GH #466), surfacing the LTM auto-flip-to-discovery advisory and synthetic-fragment compile-failure warnings in a model-scoped `warnings` field that a collection under `Off` never carries (GH #662).
   `edit_model` enables LTM on both its pre- and post-edit diagnostic passes so the new-error gate compares like-with-like (the LTM advisories are Warnings, so they do not affect the Error-severity gate).
   Both outputs also carry the discovery-completeness triple `enumerationComplete` / `retainedLoops` / `universeLoops` from `analysis::ModelAnalysis`, plus `truncated` (elided when false, like `aggRecoveryTruncated`: candidate generation stopped early, which the fallback's candidate bound can cause even without a wall-clock budget).
   `enumerationComplete` is the one result-level flag that is ALWAYS serialized: `aggRecoveryTruncated` elides its `false` because the interesting value there is `true`, whereas here the interesting value IS `false` (a sampled analysis), and a client that cannot see the field reads a sample as exhaustive -- the exact mistake the flag exists to prevent.
   `retainedLoops` is likewise unconditional (`0` is a real statement, so no absence would mean anything a `0` does not); `universeLoops` is the only optional one, elided when `enumerationComplete` is false because a sample has no universe to report, which is a different claim from a universe of zero.
-  `edit_model` pre-flights the writer (`preflight_export`) before touching the store -- a project the format cannot hold is a `Validation` error and never lands, so a registry-backed store is not left holding a merged doc it cannot persist -- and appends the writer's lossiness warnings to that same `warnings` field: the store's `SaveOutcome::warnings` after a real write, the pre-flight's on a `dryRun`, so an agent can preview what a save would degrade.
+  `edit_model` pre-flights the writer (`preflight_export`) before touching the store -- a project the format cannot hold is a `Validation` error and never lands -- and appends the writer's lossiness warnings to that same `warnings` field: the store's `SaveOutcome::warnings` after a real write, the pre-flight's on a `dryRun`, so an agent can preview what a save would degrade.
   After a real (non-dry-run) edit with variable operations, `edit_model` syncs the model's first view (`incremental_layout` over a non-empty view, a full layout otherwise) and replaces that view only: a project can carry several views, and the others are the author's.
   A sync that fails never fails the edit; it leaves every view as it was and adds a `generic`-code, `model`-kind warning prefixed `diagram sync:`, since an agent that is not told reads the stale diagram as current.
 - `src/server.rs` -- `SimlinMcpServer<A: ProjectAccess>` rmcp `ServerHandler` impl with the three `#[tool]` macros plus `list_resources` and `read_resource`.
@@ -63,22 +61,22 @@ Concretely:
 ## Contracts
 
 - **`ProjectAccess` trait** -- the stable surface every transport mounts against.
-  Production callers use `&Path` keys; backends interpret that as a filesystem path or registry key.
+  Production callers use `&Path` keys, which the shipping backend reads as a filesystem path.
   `expected_version: Option<u64>` on `save` is the optimistic-lock token (`None` = skip the check).
   Trait methods use AFIT (`-> impl Future + Send`) so callers always know `A` statically and avoid `async-trait`'s allocation.
-- **`SimlinMcpServer<A>` is `Clone`** -- rmcp's streamable-HTTP factory expects `Self: Clone`.
+- **`SimlinMcpServer<A>` is `Clone`**, so rmcp's session machinery can copy the handler freely.
   Internal state lives behind `Arc` so cloning is cheap.
 - **Tool wire shape is byte-identical to pre-refactor `simlin-mcp`** -- existing `@simlin/mcp` clients render success and error responses verbatim.
   The `error` string in `AccessError::Validation`'s structured output is `"edit introduces compilation errors"`; that exact phrase must not change.
-- **`build_empty_project` is the single source of truth for empty-project shape** -- both the MCP `CreateModel` tool and the equivalent HTTP create route in `simlin-serve` go through it so the parity integration test keeps passing.
+- **`build_empty_project` is the single source of truth for empty-project shape, and `default_sim_specs` for its sim-specs** -- `CreateModel` goes through both, and `CreateModelInput`'s schema description documents those defaults to clients.
 - **`ErrorOutput.code` strings come from `ErrorCode`'s `Display` impl** -- a regression test in `types.rs` locks the snake_case rendering down. pysimlin derives the same codes via `SimlinErrorCode`; both surfaces stay aligned.
 
 ## Dependencies
 
-- Depends on `simlin-engine` for parsing, diagnostics, and the `datamodel::Project` shape.
+- Depends on `simlin-formats` for parsing and writing files, `simlin-engine` for diagnostics and loop analysis, and `simlin-base` for the `datamodel::Project` shape.
 - Depends on `rmcp` (server + macros + schemars features) for the `ServerHandler` trait and `#[tool_router]` / `#[tool_handler]` macros.
 - Depends on `tokio` (rt-multi-thread + macros + fs) because the trait methods are `async` and `read_model.rs` etc. await the access impl.
-- Used-by: `simlin-mcp` (binary), `simlin-serve` (library + binary).
+- Used-by: `simlin-mcp`.
   No other crate consumes it.
 
 ## Build / Test

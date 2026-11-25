@@ -21,7 +21,7 @@ Usage:
     # build each side into its own target dir first, e.g.
     #   git worktree add ../simlin-base main
     #   CARGO_TARGET_DIR=/path/to/base-target cargo build --release \
-    #       -p simlin-engine --example clearn_profile --features file_io
+    #       -p simlin-tests --features instruments --example clearn_profile
     scripts/perf-ab.py --a base-target/release/examples/clearn_profile \
                        --b target/release/examples/clearn_profile \
                        --rounds 7 --model test/metasd/WRLD3-03/wrld3-03.mdl --ltm
@@ -40,7 +40,7 @@ import statistics
 import subprocess
 import sys
 
-# `phase()` in examples/clearn_profile.rs prints:
+# `phase()` in src/simlin-tests/examples/clearn_profile.rs prints:
 #   "<name padded to 22>  <ms> ms | allocs ..."
 PHASE_RE = re.compile(r"^(\S.*?)\s{2,}([0-9.]+) ms \|")
 # Trailing "compile x20: 12.34 ms/iter" / "run x200: 5.67 ms/iter" lines.

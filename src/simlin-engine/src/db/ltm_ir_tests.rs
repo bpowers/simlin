@@ -17,9 +17,9 @@
 //!    `enumerate_agg_nodes` (the sole hoisting decider).
 
 use super::*;
-use crate::common::{Canonical, Ident};
 use crate::db::{SimlinDb, sync_from_datamodel};
 use crate::test_common::TestProject;
+use simlin_base::common::{Canonical, Ident};
 
 // ── Layer 1: the per-AST-site (shape, in_reducer) contract ─────────────────
 
@@ -45,8 +45,8 @@ mod collect_reference_sites_tests {
             .unwrap_or_else(|| panic!("variable '{target_name}' not found"));
 
         let dm_dims = crate::db::project_datamodel_dims(&db, source_project);
-        let dim_ctx = crate::dimensions::DimensionsContext::from(dm_dims.as_slice());
-        let mut lookup_dims = |name: &str| -> Vec<crate::dimensions::Dimension> {
+        let dim_ctx = simlin_base::dimensions::DimensionsContext::from(dm_dims.as_slice());
+        let mut lookup_dims = |name: &str| -> Vec<simlin_base::dimensions::Dimension> {
             variables
                 .get(&Ident::<Canonical>::new(name))
                 .and_then(|v| v.get_dimensions())
@@ -914,9 +914,9 @@ mod model_ltm_reference_sites_tests {
 // pin would fail without the corresponding addition.
 mod occurrence_ir_tests {
     use super::*;
-    use crate::datamodel;
     use crate::db::ltm_ir::{OccurrenceAxis, OccurrenceRef, OccurrenceSite};
     use crate::testutils::{x_aux, x_flow, x_model, x_module, x_stock};
+    use simlin_base::datamodel;
 
     /// Sync `datamodel`, run `model_ltm_reference_sites`, and return the
     /// occurrence stream for `target` in `model_name` (empty if none).

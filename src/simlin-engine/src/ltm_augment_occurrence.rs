@@ -13,9 +13,9 @@
 
 use std::collections::HashMap;
 
-use crate::common::{Canonical, Ident};
 use crate::db::RefShape;
 use crate::db::ltm_ir::{OccurrenceRef, OccurrenceSite};
+use simlin_base::common::{Canonical, Ident};
 
 /// The ceteris-paribus wrap's view of the occurrence IR for ONE slot of a
 /// target equation: the per-occurrence access shape and per-axis

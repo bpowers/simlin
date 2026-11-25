@@ -2459,29 +2459,30 @@ fn element_graph_flow_to_stock_across_an_element_map_reads_the_map() {
 /// whether an edge may carry an arrayed score at all -- so a row here pins all
 /// three. The end-to-end pins are `a_permuted_mapped_pair_scores_the_maps_diagonal`
 /// and `an_agreeing_mapped_pair_keeps_the_arrayed_score` in
-/// `tests/integration/ltm_array_agg.rs`.
+/// `simlin-tests/tests/integration/ltm_array_agg.rs`.
 #[test]
 fn bare_axis_pairing_enumeration() {
     use super::BareAxis;
-    use crate::common::{CanonicalDimensionName, CanonicalElementName};
-    use crate::dimensions::DimensionsContext;
+    use simlin_base::common::{CanonicalDimensionName, CanonicalElementName};
+    use simlin_base::dimensions::DimensionsContext;
 
     let named = |name: &str, elems: &[&str]| {
-        crate::datamodel::Dimension::named(
+        simlin_base::datamodel::Dimension::named(
             name.to_string(),
             elems.iter().map(|e| e.to_string()).collect(),
         )
     };
-    let with_map = |mut d: crate::datamodel::Dimension, target: &str, pairs: &[(&str, &str)]| {
-        d.mappings = vec![crate::datamodel::DimensionMapping {
-            target: target.to_string(),
-            element_map: pairs
-                .iter()
-                .map(|(a, b)| (a.to_string(), b.to_string()))
-                .collect(),
-        }];
-        d
-    };
+    let with_map =
+        |mut d: simlin_base::datamodel::Dimension, target: &str, pairs: &[(&str, &str)]| {
+            d.mappings = vec![simlin_base::datamodel::DimensionMapping {
+                target: target.to_string(),
+                element_map: pairs
+                    .iter()
+                    .map(|(a, b)| (a.to_string(), b.to_string()))
+                    .collect(),
+            }];
+            d
+        };
     let elems = |names: &[&str]| -> Vec<CanonicalElementName> {
         names
             .iter()
@@ -2491,7 +2492,7 @@ fn bare_axis_pairing_enumeration() {
     use super::BareSpelling;
     // The pairing of `from` (declared over `from_names`) read into `to`
     // (declared over `to_names`) under `dims`, for one spelling.
-    let pairing_for = |dims: &[crate::datamodel::Dimension],
+    let pairing_for = |dims: &[simlin_base::datamodel::Dimension],
                        from_names: &[&str],
                        to_names: &[&str],
                        spelling: BareSpelling| {
@@ -2508,15 +2509,16 @@ fn bare_axis_pairing_enumeration() {
     // The rows below hold for BOTH spellings unless they say otherwise; the
     // equation's and the wiring's relations differ only on the parent-mapping
     // row at the end.
-    let pairing = |dims: &[crate::datamodel::Dimension], from_names: &[&str], to_names: &[&str]| {
-        let equation = pairing_for(dims, from_names, to_names, BareSpelling::Equation);
-        assert_eq!(
-            equation,
-            pairing_for(dims, from_names, to_names, BareSpelling::StockFlow),
-            "{from_names:?} -> {to_names:?}: the two spellings agree on this row"
-        );
-        equation
-    };
+    let pairing =
+        |dims: &[simlin_base::datamodel::Dimension], from_names: &[&str], to_names: &[&str]| {
+            let equation = pairing_for(dims, from_names, to_names, BareSpelling::Equation);
+            assert_eq!(
+                equation,
+                pairing_for(dims, from_names, to_names, BareSpelling::StockFlow),
+                "{from_names:?} -> {to_names:?}: the two spellings agree on this row"
+            );
+            equation
+        };
 
     // EXACT: two axes of one name pair positionally.
     assert_eq!(
@@ -2621,8 +2623,8 @@ fn bare_axis_pairing_enumeration() {
     assert_eq!(
         pairing(
             &[
-                crate::datamodel::Dimension::indexed("I".to_string(), 3),
-                crate::datamodel::Dimension::indexed("J".to_string(), 3),
+                simlin_base::datamodel::Dimension::indexed("I".to_string(), 3),
+                simlin_base::datamodel::Dimension::indexed("J".to_string(), 3),
             ],
             &["J"],
             &["I"]

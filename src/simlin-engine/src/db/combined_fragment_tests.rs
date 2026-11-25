@@ -18,12 +18,12 @@
 //! the `ref.mdl` / `interleaved.mdl` simulation tests (Tasks 7/8).
 
 use super::combine_scc_fragment;
-use crate::common::{Canonical, Ident, IdentMap};
 use crate::compiler::symbolic::{
     PerVarBytecodes, SymStaticViewBase, SymVarRef, SymbolicByteCode, SymbolicModuleDecl,
     SymbolicOpcode, SymbolicStaticView,
 };
 use crate::db::{ResolvedScc, SccPhase};
+use simlin_base::common::{Canonical, Ident, IdentMap};
 use smallvec::SmallVec;
 use std::collections::{BTreeSet, HashMap};
 
@@ -33,7 +33,7 @@ fn id(s: &str) -> Ident<Canonical> {
 
 fn vref(name: &str, element_offset: usize) -> SymVarRef {
     SymVarRef {
-        name: crate::common::Ident::new(name),
+        name: simlin_base::common::Ident::new(name),
         element_offset,
     }
 }
@@ -849,8 +849,8 @@ fn assemble_module_resolved_scc_member_offsets_match_acyclic_layout() {
 /// (Task 6). Mirrors the `two_stock_init_recurrence_project` shape
 /// empirically confirmed in `db/dep_graph_tests.rs`; kept self-contained
 /// here so the combined-fragment determinism coverage lives in one file.
-fn two_stock_init_recurrence_datamodel() -> crate::datamodel::Project {
-    use crate::datamodel::{self, Dimension, Equation, Flow, Stock, Variable};
+fn two_stock_init_recurrence_datamodel() -> simlin_base::datamodel::Project {
+    use simlin_base::datamodel::{self, Dimension, Equation, Flow, Stock, Variable};
     let dims = vec!["t".to_string()];
     let arrayed = |eqs: Vec<(&str, &str)>| {
         Equation::Arrayed(
@@ -936,7 +936,7 @@ fn two_stock_init_recurrence_datamodel() -> crate::datamodel::Project {
 /// derives `PartialEq`), so this is the precise determinism probe for the
 /// interleave + per-member resource renumber.
 fn fresh_resolved_scc_and_combined_fragment(
-    dm: &crate::datamodel::Project,
+    dm: &simlin_base::datamodel::Project,
 ) -> (Vec<ResolvedScc>, crate::compiler::symbolic::PerVarBytecodes) {
     let db = SimlinDb::default();
     let result = sync_from_datamodel(&db, dm);

@@ -70,7 +70,7 @@ impl ErrorDetail {
     }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Debug)]
 struct OwnedDetail {
     code: SimlinErrorCode,
     message: Option<CString>,

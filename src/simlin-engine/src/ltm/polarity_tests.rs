@@ -12,7 +12,7 @@
 //! lint; included via `#[path]` as a child of it, so `use super::*` resolves
 //! that file's imports and private helpers.
 
-use crate::common::IdentMap;
+use simlin_base::common::IdentMap;
 use std::sync::Arc;
 
 use super::*;
@@ -33,12 +33,12 @@ fn test_flip_polarity() {
 
 #[test]
 fn test_literal_sign() {
-    use crate::ast::{Expr2, Loc, UnaryOp};
+    use simlin_base::ast::{Expr2, Loc, UnaryOp};
 
     let cnst = |text: &str, v: f64| {
         Expr2::Const(
             text.to_string(),
-            crate::ast::Literal::new(v),
+            simlin_base::ast::Literal::new(v),
             Loc::default(),
         )
     };
@@ -78,9 +78,15 @@ fn test_literal_sign() {
 
 #[test]
 fn test_provable_value_sign() {
-    use crate::ast::{Ast, Expr2, Loc, UnaryOp};
+    use simlin_base::ast::{Ast, Expr2, Loc, UnaryOp};
 
-    let cnst = |v: f64| Expr2::Const(format!("{v}"), crate::ast::Literal::new(v), Loc::default());
+    let cnst = |v: f64| {
+        Expr2::Const(
+            format!("{v}"),
+            simlin_base::ast::Literal::new(v),
+            Loc::default(),
+        )
+    };
     let neg = |e: Expr2| Expr2::Op1(UnaryOp::Negative, Box::new(e), None, Loc::default());
     let var = |n: &str| Expr2::Var(Ident::new(n), None, Loc::default());
     use crate::variable::VarKind;
@@ -161,8 +167,8 @@ fn test_provable_value_sign() {
 #[test]
 fn test_analyze_link_polarity_arrayed() {
     // Test analyze_link_polarity with Arrayed AST (covers lines 935-947)
-    use crate::ast::{Ast, Expr2, Loc};
-    use crate::common::CanonicalElementName;
+    use simlin_base::ast::{Ast, Expr2, Loc};
+    use simlin_base::common::CanonicalElementName;
 
     let x_var = Ident::new("x");
 
@@ -175,7 +181,7 @@ fn test_analyze_link_polarity_arrayed() {
             Box::new(Expr2::Var(x_var.clone(), None, Loc::default())),
             Box::new(Expr2::Const(
                 "2".to_string(),
-                crate::ast::Literal::new(2.0),
+                simlin_base::ast::Literal::new(2.0),
                 Loc::default(),
             )),
             None,
@@ -189,7 +195,7 @@ fn test_analyze_link_polarity_arrayed() {
             Box::new(Expr2::Var(x_var.clone(), None, Loc::default())),
             Box::new(Expr2::Const(
                 "10".to_string(),
-                crate::ast::Literal::new(10.0),
+                simlin_base::ast::Literal::new(10.0),
                 Loc::default(),
             )),
             None,
@@ -215,7 +221,7 @@ fn test_analyze_link_polarity_arrayed() {
     mixed_elements.insert(
         CanonicalElementName::from_raw("dim2"),
         Expr2::Op1(
-            crate::ast::UnaryOp::Negative,
+            simlin_base::ast::UnaryOp::Negative,
             Box::new(Expr2::Var(x_var.clone(), None, Loc::default())),
             None,
             Loc::default(),
@@ -234,7 +240,7 @@ fn test_analyze_link_polarity_arrayed() {
 #[test]
 fn test_analyze_expr_polarity_if_then_else() {
     // Test analyze_expr_polarity with If-Then-Else (covers lines 1033-1042)
-    use crate::ast::{Expr2, Loc};
+    use simlin_base::ast::{Expr2, Loc};
 
     let x_var = Ident::new("x");
 
@@ -242,7 +248,7 @@ fn test_analyze_expr_polarity_if_then_else() {
     let if_expr = Expr2::If(
         Box::new(Expr2::Const(
             "1".to_string(),
-            crate::ast::Literal::new(1.0),
+            simlin_base::ast::Literal::new(1.0),
             Loc::default(),
         )),
         Box::new(Expr2::Var(x_var.clone(), None, Loc::default())),
@@ -251,7 +257,7 @@ fn test_analyze_expr_polarity_if_then_else() {
             Box::new(Expr2::Var(x_var.clone(), None, Loc::default())),
             Box::new(Expr2::Const(
                 "2".to_string(),
-                crate::ast::Literal::new(2.0),
+                simlin_base::ast::Literal::new(2.0),
                 Loc::default(),
             )),
             None,
@@ -273,12 +279,12 @@ fn test_analyze_expr_polarity_if_then_else() {
     let mixed_if = Expr2::If(
         Box::new(Expr2::Const(
             "1".to_string(),
-            crate::ast::Literal::new(1.0),
+            simlin_base::ast::Literal::new(1.0),
             Loc::default(),
         )),
         Box::new(Expr2::Var(x_var.clone(), None, Loc::default())),
         Box::new(Expr2::Op1(
-            crate::ast::UnaryOp::Negative,
+            simlin_base::ast::UnaryOp::Negative,
             Box::new(Expr2::Var(x_var.clone(), None, Loc::default())),
             None,
             Loc::default(),
@@ -299,7 +305,7 @@ fn test_analyze_expr_polarity_if_then_else() {
 #[test]
 fn test_analyze_expr_polarity_unary_not() {
     // Test analyze_expr_polarity with unary NOT operator (covers lines 1026-1031)
-    use crate::ast::{Expr2, Loc, UnaryOp};
+    use simlin_base::ast::{Expr2, Loc, UnaryOp};
 
     let x_var = Ident::new("x");
 
@@ -322,7 +328,7 @@ fn test_analyze_expr_polarity_unary_not() {
 #[test]
 fn test_analyze_expr_polarity_division_edge_cases() {
     // Test division polarity analysis edge cases (covers lines 1013-1022)
-    use crate::ast::{Expr2, Loc};
+    use simlin_base::ast::{Expr2, Loc};
 
     let x_var = Ident::new("x");
     let y_var = Ident::new("y");
@@ -333,7 +339,7 @@ fn test_analyze_expr_polarity_division_edge_cases() {
         Box::new(Expr2::Var(x_var.clone(), None, Loc::default())),
         Box::new(Expr2::Const(
             "10".to_string(),
-            crate::ast::Literal::new(10.0),
+            simlin_base::ast::Literal::new(10.0),
             Loc::default(),
         )),
         None,
@@ -353,7 +359,7 @@ fn test_analyze_expr_polarity_division_edge_cases() {
         BinaryOp::Div,
         Box::new(Expr2::Const(
             "100".to_string(),
-            crate::ast::Literal::new(100.0),
+            simlin_base::ast::Literal::new(100.0),
             Loc::default(),
         )),
         Box::new(Expr2::Var(y_var.clone(), None, Loc::default())),
@@ -376,8 +382,8 @@ fn test_analyze_expr_polarity_array_reducers() {
     // in their argument: their polarity equals the inner expression's polarity.
     // STDDEV and RANK are not monotone: they must return Unknown even when the
     // argument has a known polarity.
-    use crate::ast::{Expr2, Loc, UnaryOp};
-    use crate::builtins::BuiltinFn;
+    use simlin_base::ast::{Expr2, Loc, UnaryOp};
+    use simlin_base::builtins::BuiltinFn;
 
     let x_var = Ident::new("x");
     let pos_inner = || Expr2::Var(x_var.clone(), None, Loc::default());
@@ -482,7 +488,7 @@ fn test_analyze_expr_polarity_array_reducers() {
     // RANK depends on the rest of the array, so polarity is undefined.
     let direction = Expr2::Const(
         "1".to_string(),
-        crate::ast::Literal::new(1.0),
+        simlin_base::ast::Literal::new(1.0),
         Loc::default(),
     );
     let rank = Expr2::App(
@@ -504,9 +510,9 @@ fn test_analyze_expr_polarity_array_reducers() {
 /// to Unknown for the production case the issue actually targets.
 #[test]
 fn test_analyze_expr_polarity_array_reducers_subscript_wildcard() {
-    use crate::ast::{Expr2, IndexExpr2, Loc, UnaryOp};
-    use crate::builtins::BuiltinFn;
     use LinkPolarity::{Negative, Positive, Unknown};
+    use simlin_base::ast::{Expr2, IndexExpr2, Loc, UnaryOp};
+    use simlin_base::builtins::BuiltinFn;
 
     let x = Ident::new("x");
     let y = Ident::new("y");
@@ -523,7 +529,7 @@ fn test_analyze_expr_polarity_array_reducers_subscript_wildcard() {
     let one = || {
         Expr2::Const(
             "1".to_string(),
-            crate::ast::Literal::new(1.0),
+            simlin_base::ast::Literal::new(1.0),
             Loc::default(),
         )
     };
@@ -606,16 +612,22 @@ fn test_analyze_expr_polarity_array_reducers_subscript_wildcard() {
 /// `from_var`.
 #[test]
 fn test_analyze_expr_polarity_subscript_self_indexing() {
-    use crate::ast::{Expr2, IndexExpr2, Loc};
-    use crate::builtins::BuiltinFn;
     use LinkPolarity::{Positive, Unknown};
+    use simlin_base::ast::{Expr2, IndexExpr2, Loc};
+    use simlin_base::builtins::BuiltinFn;
 
     let arr = Ident::new("arr");
     let other = Ident::new("other");
     let i = Ident::new("i");
 
     let var = |id: &Ident<Canonical>| Expr2::Var(id.clone(), None, Loc::default());
-    let lit = |n: f64| Expr2::Const(format!("{n}"), crate::ast::Literal::new(n), Loc::default());
+    let lit = |n: f64| {
+        Expr2::Const(
+            format!("{n}"),
+            simlin_base::ast::Literal::new(n),
+            Loc::default(),
+        )
+    };
 
     // arr[*] -- wildcard index, no reference to arr in the index.
     let arr_wildcard = Expr2::Subscript(
@@ -966,7 +978,7 @@ fn test_graphical_function_polarity_uniform_50pt_import_noise() {
 
 #[test]
 fn test_lookup_table_polarity_in_links() {
-    use crate::datamodel;
+    use simlin_base::datamodel;
 
     // Create a model with a lookup table. The flow scales the lookup result
     // by a positive CONSTANT (not by `water` itself): with `water` appearing
@@ -1029,7 +1041,7 @@ fn test_lookup_table_polarity_in_links() {
 /// (the lexer takes no leading sign), a shape hand-built `Const(-5.0)`
 /// fixtures never exercise.
 fn link_polarities_for(
-    variables: Vec<crate::datamodel::Variable>,
+    variables: Vec<simlin_base::datamodel::Variable>,
 ) -> (HashMap<(String, String), LinkPolarity>, Vec<DetectedLoop>) {
     let model = x_model("main", variables);
     let sim_specs = sim_specs_with_units("months");
@@ -1209,7 +1221,7 @@ fn test_mul_cofactor_referencing_from_var_stays_unknown() {
 /// exactly like a bare Var (mirroring `operand_positive_by_convention`).
 #[test]
 fn test_mul_subscript_cofactor_is_positive_by_convention() {
-    use crate::datamodel::{self, Dimension, DimensionElements};
+    use simlin_base::datamodel::{self, Dimension, DimensionElements};
 
     let arr = datamodel::Variable::Aux(datamodel::Aux {
         ident: "arr".to_string(),

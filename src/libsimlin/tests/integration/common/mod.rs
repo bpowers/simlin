@@ -3,8 +3,8 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use simlin::*;
-use simlin_engine::buffa::Message;
-use simlin_engine::serde as engine_serde;
+use simlin_formats::buffa::Message;
+use simlin_formats::serde as engine_serde;
 use std::ffi::CStr;
 use std::ptr;
 
@@ -44,7 +44,7 @@ pub unsafe fn expect_error_code(err: *mut SimlinError, expected: SimlinErrorCode
 }
 
 pub fn open_project_from_datamodel(
-    project: &simlin_engine::datamodel::Project,
+    project: &simlin_base::datamodel::Project,
 ) -> *mut SimlinProject {
     let buf = engine_serde::serialize(project).unwrap().encode_to_vec();
     unsafe {

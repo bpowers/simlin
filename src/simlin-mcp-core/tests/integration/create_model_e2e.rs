@@ -31,7 +31,7 @@ async fn create_model_with_default_specs_writes_parseable_file() {
 
     // The written file must be parseable native Simlin JSON.
     let contents = std::fs::read_to_string(&path).unwrap();
-    let project: simlin_engine::json::Project = serde_json::from_str(&contents).unwrap();
+    let project: simlin_formats::json::Project = serde_json::from_str(&contents).unwrap();
     assert_eq!(project.name, "new-model");
     assert_eq!(project.models.len(), 1);
     assert_eq!(project.models[0].name, "main");
@@ -46,7 +46,7 @@ async fn create_model_with_custom_sim_specs_persists_them() {
 
     let input = CreateModelInput {
         project_path: path.to_str().unwrap().to_string(),
-        sim_specs: Some(simlin_engine::json::SimSpecs {
+        sim_specs: Some(simlin_formats::json::SimSpecs {
             start_time: 10.0,
             end_time: 200.0,
             dt: "0.5".to_string(),
@@ -62,7 +62,7 @@ async fn create_model_with_custom_sim_specs_persists_them() {
     assert_eq!(output.sim_specs.dt, "0.5");
 
     let contents = std::fs::read_to_string(&path).unwrap();
-    let project: simlin_engine::json::Project = serde_json::from_str(&contents).unwrap();
+    let project: simlin_formats::json::Project = serde_json::from_str(&contents).unwrap();
     assert_eq!(project.sim_specs.start_time, 10.0);
     assert_eq!(project.sim_specs.end_time, 200.0);
 }

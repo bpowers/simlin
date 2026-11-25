@@ -4,20 +4,19 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{Ast, BinaryOp, Expr2};
-use crate::builtins::{BuiltinFn, Loc};
-use crate::common::{Canonical, ErrorCode, Ident, IdentMap, UnitError, canonicalize};
-use crate::datamodel::UnitMap;
 #[cfg(test)]
 use crate::testutils::{sim_specs_with_units, x_aux, x_flow, x_model, x_project, x_stock};
 use crate::units::{Context, UnitOp, Units, combine};
 use crate::units_check::UnitModel;
 use crate::variable::{VarKind, Variable};
+use simlin_base::ast::{Ast, BinaryOp, Expr2};
+use simlin_base::builtins::{BuiltinFn, Loc};
+use simlin_base::common::{Canonical, ErrorCode, Ident, IdentMap, UnitError, canonicalize};
+use simlin_base::datamodel::UnitMap;
 
 /// Source of a constraint for error reporting.
 /// Tracks which variable a constraint relates to and optionally where in that variable's equation.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct ConstraintSource {
     /// Variable identifier with module prefix (e.g., "module1·varname")
     var: String,
@@ -27,8 +26,7 @@ struct ConstraintSource {
 
 /// A constraint with source tracking for error reporting.
 /// Each constraint represents an equation of the form `1 == unit_map`.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct LocatedConstraint {
     /// The unit map representing the constraint
     unit_map: UnitMap,
@@ -97,8 +95,7 @@ impl LocatedConstraint {
 /// shared metavariables), so a single bad equation no longer discards the
 /// units resolved for the rest of the model -- and the conflict set is
 /// complete rather than just the first contradiction encountered (GH #614).
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub(crate) struct InferenceResult {
     pub resolved: IdentMap<Ident<Canonical>, UnitMap>,
     pub conflicts: Vec<UnitError>,
@@ -1324,7 +1321,7 @@ fn test_inference() {
     let units_ctx = Context::new_with_builtins(&[], &sim_specs).0;
 
     // test cases where we should be able to infer all units
-    let test_cases: &[&[(crate::datamodel::Variable, &'static str)]] = &[
+    let test_cases: &[&[(simlin_base::datamodel::Variable, &'static str)]] = &[
         &[
             (x_aux("input", "6", Some("widget")), "widget"),
             (x_flow("delay", "3", Some("parsec")), "parsec"),
@@ -1442,7 +1439,7 @@ fn test_inference_negative() {
     let sim_specs = sim_specs_with_units("parsec");
 
     // test cases where we should expect to fail
-    let test_cases: &[&[(crate::datamodel::Variable, &'static str)]] = &[
+    let test_cases: &[&[(simlin_base::datamodel::Variable, &'static str)]] = &[
         &[
             // the "+ TIME" here causes constraints to fail
             (x_aux("input", "6 + TIME", Some("widget")), "widget"),
@@ -1608,7 +1605,7 @@ fn test_macro_body_units_naming_parameters_are_polymorphic() {
     // output's units declared as the parameter name `amount` (the polymorphic
     // idiom). Instantiated with a `widget` argument, the result must infer to
     // `widget`, not conflict against a bogus `amount` base unit.
-    let macro_model = crate::datamodel::Model {
+    let macro_model = simlin_base::datamodel::Model {
         name: "scaleit".to_string(),
         sim_specs: None,
         variables: vec![
@@ -1619,7 +1616,7 @@ fn test_macro_body_units_naming_parameters_are_polymorphic() {
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
-        macro_spec: Some(crate::datamodel::MacroSpec {
+        macro_spec: Some(simlin_base::datamodel::MacroSpec {
             parameters: vec!["amount".to_string()],
             primary_output: "scaleit".to_string(),
             additional_outputs: vec![],
@@ -1668,7 +1665,7 @@ fn test_macro_param_named_units_resolve_to_actual_arg() {
     //   held       = 5     ~ amount  (CONSTANT equation -> units come ONLY
     //                                 from the parameter-named declaration)
     //   amount     = 0               (parameter placeholder)
-    let macro_model = crate::datamodel::Model {
+    let macro_model = simlin_base::datamodel::Model {
         name: "carryunits".to_string(),
         sim_specs: None,
         variables: vec![
@@ -1680,7 +1677,7 @@ fn test_macro_param_named_units_resolve_to_actual_arg() {
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
-        macro_spec: Some(crate::datamodel::MacroSpec {
+        macro_spec: Some(simlin_base::datamodel::MacroSpec {
             parameters: vec!["amount".to_string()],
             primary_output: "carryunits".to_string(),
             additional_outputs: vec![],
@@ -1726,7 +1723,7 @@ fn test_inconsistent_macro_reports_clear_user_facing_conflict() {
     //   squareit = amount * amount  ~ amount  (equation units = amount^2, but
     //                                          the signature declares `amount`)
     //   amount   = 0
-    let macro_model = crate::datamodel::Model {
+    let macro_model = simlin_base::datamodel::Model {
         name: "squareit".to_string(),
         sim_specs: None,
         variables: vec![
@@ -1737,7 +1734,7 @@ fn test_inconsistent_macro_reports_clear_user_facing_conflict() {
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
-        macro_spec: Some(crate::datamodel::MacroSpec {
+        macro_spec: Some(simlin_base::datamodel::MacroSpec {
             parameters: vec!["amount".to_string()],
             primary_output: "squareit".to_string(),
             additional_outputs: vec![],
@@ -1799,7 +1796,7 @@ fn test_macro_mixed_param_and_base_units_infer_cleanly() {
     //   flag    = 1                       ~ dmnl          (genuine base unit)
     //   xfrom   = 0
     //   tstart  = 0
-    let macro_model = crate::datamodel::Model {
+    let macro_model = simlin_base::datamodel::Model {
         name: "rampish".to_string(),
         sim_specs: None,
         variables: vec![
@@ -1813,7 +1810,7 @@ fn test_macro_mixed_param_and_base_units_infer_cleanly() {
         views: vec![],
         loop_metadata: vec![],
         groups: vec![],
-        macro_spec: Some(crate::datamodel::MacroSpec {
+        macro_spec: Some(simlin_base::datamodel::MacroSpec {
             parameters: vec!["xfrom".to_string(), "tstart".to_string()],
             primary_output: "rampish".to_string(),
             additional_outputs: vec![],
@@ -1895,7 +1892,7 @@ pub(crate) fn infer(
 /// ever looks up module targets, so the two agree).
 #[cfg(test)]
 fn infer_project(
-    project_datamodel: &crate::datamodel::Project,
+    project_datamodel: &simlin_base::datamodel::Project,
     model_name: &str,
 ) -> InferenceResult {
     let db = crate::db::SimlinDb::default();
@@ -2224,7 +2221,7 @@ fn test_previous_infers_units_from_lagged_arg() {
     // position has explicit units "widget". prev_pos has no declared
     // units; inference should propagate "widget" from position
     // through PREVIOUS(position, 0).
-    let test_case: &[(crate::datamodel::Variable, &str)] = &[
+    let test_case: &[(simlin_base::datamodel::Variable, &str)] = &[
         (x_aux("position", "10", Some("widget")), "widget"),
         (x_aux("prev_pos", "PREVIOUS(position)", None), "widget"),
     ];
@@ -2271,7 +2268,7 @@ fn test_previous_constrains_fallback_units() {
     // "seed" has wrong units ("wallop" vs "widget"). PREVIOUS(position, seed)
     // should fail inference because the fallback is constrained to match
     // the lagged argument.
-    let test_case: &[(crate::datamodel::Variable, &str)] = &[
+    let test_case: &[(simlin_base::datamodel::Variable, &str)] = &[
         (x_aux("position", "10", Some("widget")), "widget"),
         (x_aux("seed", "0", Some("wallop")), "wallop"),
         (
@@ -2318,7 +2315,7 @@ fn test_multi_metavar_constraint_mismatch() {
 
     let sim_specs = sim_specs_with_units("parsec");
 
-    let test_case: &[(crate::datamodel::Variable, &'static str)] = &[
+    let test_case: &[(simlin_base::datamodel::Variable, &'static str)] = &[
         (x_aux("a", "10", None), ""),                    // no units declared
         (x_aux("b", "2", None), ""),                     // no units declared
         (x_aux("x", "a / b", Some("meter")), "meter"),   // declared as meters
@@ -2352,7 +2349,7 @@ fn test_constraint(unit_map: UnitMap) -> LocatedConstraint {
 #[test]
 fn test_find_constraint_mismatch_direct() {
     // Test the find_constraint_mismatch function directly
-    use crate::datamodel::UnitMap;
+    use simlin_base::datamodel::UnitMap;
 
     // Case 1: Direct concrete-only mismatch
     let constraints = vec![test_constraint(
@@ -2447,7 +2444,7 @@ fn test_find_constraint_mismatch_direct() {
 
 #[test]
 fn test_located_constraint_merge_sources() {
-    use crate::builtins::Loc;
+    use simlin_base::builtins::Loc;
 
     // Test merge_sources deduplication
     let mut constraint1 = LocatedConstraint::new(UnitMap::new(), "var_a", Some(Loc::new(0, 10)));
@@ -2493,7 +2490,7 @@ fn test_located_constraint_merge_sources() {
 
 #[test]
 fn test_located_constraint_primary_accessors() {
-    use crate::builtins::Loc;
+    use simlin_base::builtins::Loc;
 
     // Test primary_var and primary_loc with sources
     let constraint = LocatedConstraint::new(UnitMap::new(), "primary_var", Some(Loc::new(5, 15)));

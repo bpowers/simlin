@@ -7,7 +7,7 @@
 //! per-file lint cap (GH #645).
 
 use super::*;
-use crate::datamodel;
+use simlin_base::datamodel;
 
 use super::tests::simple_project;
 // ── Incremental compilation tests ──────────────────────────────
@@ -204,17 +204,17 @@ fn test_assemble_simulation_simple() {
     // Verify offsets exist for the variables
     assert!(
         compiled
-            .get_offset(&crate::common::Ident::new("alpha"))
+            .get_offset(&simlin_base::common::Ident::new("alpha"))
             .is_some()
     );
     assert!(
         compiled
-            .get_offset(&crate::common::Ident::new("beta"))
+            .get_offset(&simlin_base::common::Ident::new("beta"))
             .is_some()
     );
     assert!(
         compiled
-            .get_offset(&crate::common::Ident::new("time"))
+            .get_offset(&simlin_base::common::Ident::new("time"))
             .is_some()
     );
 }
@@ -324,7 +324,7 @@ fn test_incremental_teacup_via_persistent_sync() {
     .expect("incremental compilation failed");
 
     // Verify constant detection
-    let room_temp_ident = crate::common::Ident::new("room_temperature");
+    let room_temp_ident = simlin_base::common::Ident::new("room_temperature");
     let incr_off = incr_compiled
         .get_offset(&room_temp_ident)
         .expect("no offset for room_temperature in incremental");
@@ -338,7 +338,7 @@ fn test_incremental_teacup_via_persistent_sync() {
     vm.run_to_end().unwrap();
     let results = vm.into_results();
 
-    let temp_ident = crate::common::Ident::new("teacup_temperature");
+    let temp_ident = simlin_base::common::Ident::new("teacup_temperature");
     let temp_off = results.offsets[&temp_ident];
     let first_temp = results.data[temp_off];
     assert!(
@@ -814,7 +814,7 @@ fn test_incremental_teacup_xmile_file() {
     }
     let xmile_data = std::fs::read(&xmile_path).unwrap();
     let mut reader = BufReader::new(xmile_data.as_slice());
-    let dm_project = crate::open_xmile(&mut reader).expect("failed to parse teacup.stmx");
+    let dm_project = simlin_formats::open_xmile(&mut reader).expect("failed to parse teacup.stmx");
 
     let mut db = SimlinDb::default();
     let persistent_state = sync_from_datamodel_incremental(&mut db, &dm_project, None);
@@ -830,7 +830,7 @@ fn test_incremental_teacup_xmile_file() {
     .expect("incremental compilation failed");
 
     // Constant detection must work for XMILE-loaded models
-    let room_temp_ident = crate::common::Ident::new("room_temperature");
+    let room_temp_ident = simlin_base::common::Ident::new("room_temperature");
     let incr_off = incr_compiled
         .get_offset(&room_temp_ident)
         .expect("no offset for room_temperature");
@@ -844,7 +844,7 @@ fn test_incremental_teacup_xmile_file() {
     vm.run_to_end().unwrap();
     let results = vm.into_results();
 
-    let temp_ident = crate::common::Ident::new("teacup_temperature");
+    let temp_ident = simlin_base::common::Ident::new("teacup_temperature");
     let temp_off = results.offsets[&temp_ident];
     let first_temp = results.data[temp_off];
     assert!(
@@ -1359,7 +1359,7 @@ fn test_incremental_compile_smooth_over_module_output() {
     incr_vm
         .run_to_end()
         .expect("incremental simulation should run");
-    let smoothed = crate::common::Ident::new("smoothed");
+    let smoothed = simlin_base::common::Ident::new("smoothed");
     let series = incr_vm
         .get_series(&smoothed)
         .expect("smoothed should exist in simulation output");
@@ -1547,8 +1547,8 @@ fn test_incremental_compile_distinguishes_module_input_sets() {
     vm.run_to_end()
         .expect("incremental simulation should run to completion");
 
-    let out_without = crate::common::Ident::new("out_without");
-    let out_with = crate::common::Ident::new("out_with");
+    let out_without = simlin_base::common::Ident::new("out_without");
+    let out_with = simlin_base::common::Ident::new("out_with");
     let out_without_series = vm
         .get_series(&out_without)
         .expect("out_without should exist");
@@ -1708,7 +1708,7 @@ fn pre_lookup_smth1_project() -> datamodel::Project {
 fn run_smoothed_series(compiled: std::sync::Arc<crate::vm::CompiledSimulation>) -> Vec<f64> {
     let mut vm = crate::vm::Vm::new(compiled).expect("VM should build");
     vm.run_to_end().expect("simulation should run");
-    let smoothed = crate::common::Ident::new("smoothed");
+    let smoothed = simlin_base::common::Ident::new("smoothed");
     vm.get_series(&smoothed)
         .expect("smoothed should exist in simulation output")
         .to_vec()
@@ -1943,7 +1943,7 @@ fn test_implicit_module_offsets_in_flattened_map() {
         crate::db::LtmOverlay::Off,
     );
     assert_eq!(
-        offsets.get(&crate::common::Ident::new("trailing")),
+        offsets.get(&simlin_base::common::Ident::new("trailing")),
         Some(&layout.get("trailing").expect("trailing").offset),
         "`trailing` must be keyed at its layout slot, past the implicit module's slots"
     );
@@ -1957,8 +1957,8 @@ fn test_implicit_module_offsets_in_flattened_map() {
     vm.run_to_end().expect("simulation should run to end");
 
     // "trailing" should be 42 at every timestep.
-    let trailing_ident: crate::common::Ident<crate::common::Canonical> =
-        crate::common::Ident::new("trailing");
+    let trailing_ident: simlin_base::common::Ident<simlin_base::common::Canonical> =
+        simlin_base::common::Ident::new("trailing");
     let trailing_series = vm
         .get_series(&trailing_ident)
         .expect("trailing variable should be in results");
@@ -2032,7 +2032,7 @@ fn test_incremental_stdlib_restored_after_user_override_removed() {
     );
 
     // The real stdlib delay1 has variables like "delay_time", "output", etc.
-    let real_stdlib = crate::stdlib::get("delay1").unwrap();
+    let real_stdlib = simlin_base::stdlib::get("delay1").unwrap();
     let expected_vars: std::collections::HashSet<String> = real_stdlib
         .variables
         .iter()
@@ -2055,7 +2055,7 @@ fn test_initial_sync_marks_stdlib_models() {
 
     let state = sync_from_datamodel_incremental(&mut db, &project, None);
 
-    for stdlib_name in crate::stdlib::MODEL_NAMES {
+    for stdlib_name in simlin_base::stdlib::MODEL_NAMES {
         let canonical = canonicalize(&format!("stdlib\u{205A}{stdlib_name}")).into_owned();
         let pm = state
             .models

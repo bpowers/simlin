@@ -50,8 +50,9 @@ export { WIDGET_ROOT_CLASS };
 export const NOTICE_TIMEOUT_MS = 5000;
 
 /**
- * Coalesce a burst of selection changes into one trait sync (same value as
- * simlin-serve's EditorHost): a box-select fires per drag frame.
+ * Coalesce a burst of selection changes into one trait sync: a box-select
+ * fires per drag frame. 150ms keeps point-and-click feel responsive while
+ * smoothing drags.
  */
 export const SELECTION_DEBOUNCE_MS = 150;
 

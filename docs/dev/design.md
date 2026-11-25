@@ -1,8 +1,7 @@
 # Product Design Context
 
 Design context for user-facing surfaces: `src/diagram` (editor and component
-library), `src/app` (the hosted application), `src/simlin-serve`'s web UI, and
-`website`.
+library), `src/app` (the hosted application), and `website`.
 Consult this when doing frontend or visual-design work.
 
 ## Users
@@ -40,7 +39,7 @@ Evolve it toward a lighter, more distinctive look: thinner borders, subtler elev
 
 ## Design Tokens Reference
 
-These tokens govern the surfaces that load `src/diagram/theme.css`: the editor packages (`src/diagram`, `src/app`, and `simlin-serve`'s web UI).
+These tokens govern the surfaces that load `src/diagram/theme.css`: the editor packages (`src/diagram` and `src/app`) and the notebook widget.
 The website does not consume `theme.css` -- it carries its own brand palette (Simlin red, `--rp-c-brand: #c83639`, defined in `website/src/css/custom.css`) -- but the users, brand personality, and design principles above apply there too.
 
 - **Primary**: #1976d2 | **Secondary**: #dc004e | **Selected**: #4444dd

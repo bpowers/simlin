@@ -24,9 +24,7 @@
 use std::collections::{BTreeSet, HashSet};
 
 use crate::bytecode::{ModuleDeclaration, Opcode};
-use crate::common::{Canonical, Ident, canonicalize};
 use crate::compiler::symbolic::VariableLayout;
-use crate::datamodel;
 use crate::db::{
     ModuleInputSet, SccPhase, SimlinDb, SourceProject, SyncResult, assemble_module,
     assemble_simulation, compute_layout, model_dependency_graph, model_flows_invariant,
@@ -36,6 +34,8 @@ use crate::testutils::{
     x_arrayed, x_aux, x_flow, x_model, x_module, x_module_named, x_project, x_stock,
 };
 use crate::vm::Vm;
+use simlin_base::common::{Canonical, Ident, canonicalize};
+use simlin_base::datamodel;
 
 fn sim_specs() -> datamodel::SimSpecs {
     datamodel::SimSpecs {
@@ -254,7 +254,7 @@ fn an_xmile_internal_module_reference_compiles_and_binds_nothing() {
 <aux name="output"><eqn>input + 1</eqn></aux>
 </variables></model>
 </xmile>"#;
-    let project = crate::compat::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
+    let project = simlin_formats::compat::open_xmile(&mut std::io::BufReader::new(xml.as_bytes()))
         .expect("the fixture is well-formed XMILE");
     let db = SimlinDb::default();
     let sync = sync_from_datamodel(&db, &project);
@@ -406,7 +406,7 @@ fn module_target(
     if let Some(svar) = model.variables(db).get(var) {
         assert_eq!(
             svar.kind(db),
-            crate::db::SourceVariableKind::Module,
+            crate::variable::SourceVariableKind::Module,
             "`{var}` is used as a module path segment but is not a module variable"
         );
         return svar.model_name(db).clone();
@@ -518,7 +518,7 @@ fn assert_module_decls_sit_at_layout_slots(
     for (name, entry) in layout.iter() {
         let is_module = source_vars
             .get(name)
-            .is_some_and(|v| v.kind(db) == crate::db::SourceVariableKind::Module)
+            .is_some_and(|v| v.kind(db) == crate::variable::SourceVariableKind::Module)
             || implicit.get(name).is_some_and(|m| m.is_module);
         if !is_module {
             continue;

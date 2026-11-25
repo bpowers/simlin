@@ -8,8 +8,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-PROTO_FILE="$ROOT_DIR/src/simlin-engine/src/project_io.proto"
-OUTPUT_FILE="$ROOT_DIR/src/simlin-engine/src/project_io.gen.rs"
+PROTO_FILE="$ROOT_DIR/src/simlin-formats/src/project_io.proto"
+OUTPUT_FILE="$ROOT_DIR/src/simlin-formats/src/project_io.gen.rs"
 
 # Read the toolchain channel from rust-toolchain.toml so the temp crate uses the
 # same Rust version as the repo (e.g., for edition 2024 support)

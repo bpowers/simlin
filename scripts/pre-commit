@@ -133,6 +133,12 @@ trap cleanup_pipelines EXIT INT TERM
     echo "[rust] Running clippy..."
     cargo clippy --all-targets --all-features -- -D warnings
 
+    # And once more over what ships. The pass above turns on every feature and
+    # every dev-dependency, so an item only a test configuration uses looks
+    # used; CI's Build job compiles the default features with warnings denied
+    # and fails on it.
+    cargo clippy --workspace -- -D warnings
+
     # Compile test binaries untimed, mirroring CI (ci.yaml runs
     # `cargo test --no-run` before its 3-minute-capped test step), so
     # the cap below measures test execution rather than compilation --
@@ -222,10 +228,10 @@ PIPELINE_PIDS+=($PID_A)
     #
     # The variable belongs HERE and not in src/engine/build.sh or
     # package.json.  Only the PR gates set it: this hook and the build steps
-    # in .github/workflows/ci.yaml (the deploy assembly, the notebook-widget
-    # assets for pysimlin-e2e, the serve SPA).  Every other caller of an
+    # in .github/workflows/ci.yaml (the deploy assembly and the
+    # notebook-widget assets for pysimlin-e2e).  Every other caller of an
     # engine build must keep the shipping artifact -- scripts/deploy-web.sh,
-    # scripts/deploy-web-staged.sh, ts-release.yml, serve-release.yml,
+    # scripts/deploy-web-staged.sh, ts-release.yml,
     # release.yml's widget-assets job (which runs
     # src/pysimlin/scripts/stage_widget_assets.py --require-opt, refusing a
     # raw wasm), and wasm-opt.yml, whose whole point is that blob -- because

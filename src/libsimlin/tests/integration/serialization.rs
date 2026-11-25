@@ -7,10 +7,9 @@ use std::ptr;
 
 use serde_json::Value;
 use simlin::*;
-use simlin_engine::buffa::{Message, MessageField};
-use simlin_engine::serde as engine_serde;
 use simlin_engine::test_common::TestProject;
-use simlin_engine::{self as engine};
+use simlin_formats::buffa::{Message, MessageField};
+use simlin_formats::serde as engine_serde;
 
 use crate::common::{expect_error_code, expect_no_error, open_project_from_datamodel};
 
@@ -201,7 +200,7 @@ fn test_project_serialize_json_native() {
         let json_str = std::str::from_utf8(slice).expect("valid utf-8 JSON");
 
         let actual: Value = serde_json::from_str(json_str).expect("parsed json");
-        let expected_project: engine::json::Project = datamodel.clone().into();
+        let expected_project: simlin_formats::json::Project = datamodel.clone().into();
         let expected = serde_json::to_value(expected_project).unwrap();
 
         assert_eq!(actual, expected);
@@ -236,7 +235,7 @@ fn test_project_serialize_json_sdai() {
         let json_str = std::str::from_utf8(slice).expect("valid utf-8 SDAI JSON");
 
         let actual: Value = serde_json::from_str(json_str).expect("parsed json");
-        let expected_model: engine::json_sdai::SdaiModel = datamodel.clone().into();
+        let expected_model: simlin_formats::json_sdai::SdaiModel = datamodel.clone().into();
         let expected = serde_json::to_value(expected_model).unwrap();
 
         assert_eq!(actual, expected);
@@ -555,20 +554,20 @@ fn test_project_serialize_null_safety() {
         assert!(output.is_null());
 
         // Test with null output pointer
-        let project = engine::project_io::Project {
+        let project = simlin_formats::project_io::Project {
             name: "test".to_string(),
-            sim_specs: MessageField::some(engine::project_io::SimSpecs {
+            sim_specs: MessageField::some(simlin_formats::project_io::SimSpecs {
                 start: 0.0,
                 stop: 10.0,
-                dt: MessageField::some(engine::project_io::Dt {
+                dt: MessageField::some(simlin_formats::project_io::Dt {
                     value: 1.0,
                     is_reciprocal: false,
                 }),
                 save_step: MessageField::none(),
-                sim_method: engine::project_io::SimMethod::Euler.into(),
+                sim_method: simlin_formats::project_io::SimMethod::Euler.into(),
                 time_units: None,
             }),
-            models: vec![engine::project_io::Model {
+            models: vec![simlin_formats::project_io::Model {
                 name: "main".to_string(),
                 variables: vec![],
                 views: vec![],
@@ -638,7 +637,7 @@ unsafe fn view_element_count(proj: *mut SimlinProject, model_name: &str) -> usiz
     model
         .views
         .first()
-        .map(|engine::datamodel::View::StockFlow(sf)| sf.elements.len())
+        .map(|simlin_base::datamodel::View::StockFlow(sf)| sf.elements.len())
         .unwrap_or(0)
 }
 
@@ -739,7 +738,7 @@ fn test_serialize_mdl_reports_lossiness_warnings_non_fatally() {
             "",
             true,
             false,
-            engine::datamodel::Visibility::Private,
+            simlin_base::datamodel::Visibility::Private,
             None,
         )
         .flow("inflow", "1", None)
@@ -805,7 +804,7 @@ fn test_serialize_mdl_hard_error_for_multi_model_project() {
     let mut datamodel = TestProject::new("mdl_multi")
         .aux("a", "1", None)
         .build_datamodel();
-    datamodel.models.push(engine::datamodel::Model {
+    datamodel.models.push(simlin_base::datamodel::Model {
         name: "second".to_string(),
         sim_specs: None,
         variables: vec![].into(),
@@ -971,7 +970,7 @@ fn test_check_save_fails_for_a_format_that_cannot_hold_the_project() {
     let mut datamodel = TestProject::new("check_multi")
         .aux("a", "1", None)
         .build_datamodel();
-    datamodel.models.push(engine::datamodel::Model {
+    datamodel.models.push(simlin_base::datamodel::Model {
         name: "second".to_string(),
         sim_specs: None,
         variables: vec![].into(),

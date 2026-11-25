@@ -7,16 +7,17 @@ use std::sync::Arc;
 
 use smallvec::SmallVec;
 
-use crate::alloc::allocate_available;
 use crate::bytecode::{
     BuiltinId, ByteCode, ByteCodeContext, CompiledInitial, CompiledModule, DimId, LookupMode, Op2,
     Opcode, RuntimeView, STACK_CAPACITY, TempId, ViewStorage,
 };
-use crate::common::{Canonical, Error, ErrorCode, ErrorKind, Ident, IdentMap, Result};
-use crate::dimensions::match_dimensions_two_pass;
+use simlin_base::alloc::allocate_available;
+use simlin_base::common::{Canonical, Error, ErrorCode, ErrorKind, Ident, IdentMap, Result};
+use simlin_base::dimensions::match_dimensions_two_pass;
+use simlin_base::results::{DT_OFF, FINAL_TIME_OFF, INITIAL_TIME_OFF, TIME_OFF};
 #[allow(unused_imports)]
-pub use crate::results::{Method, Results, Specs};
-use crate::sim_err;
+pub(crate) use simlin_base::results::{Method, Results, Specs};
+use simlin_base::sim_err;
 
 /// Key for looking up compiled modules.
 /// A model can have multiple instantiations with different input sets,
@@ -36,8 +37,7 @@ pub fn make_module_key(
 // ============================================================================
 
 /// State for array iteration within the VM.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct IterState {
     /// Index into view_stack for the source view
     view_stack_idx: usize,
@@ -49,14 +49,8 @@ struct IterState {
     size: usize,
 }
 
-pub(crate) const TIME_OFF: usize = 0;
-pub(crate) const DT_OFF: usize = 1;
-pub(crate) const INITIAL_TIME_OFF: usize = 2;
-pub(crate) const FINAL_TIME_OFF: usize = 3;
-pub(crate) const IMPLICIT_VAR_COUNT: usize = 4;
-
-pub(crate) fn is_truthy(n: f64) -> bool {
-    let is_false = crate::float::approx_eq(n, 0.0);
+pub fn is_truthy(n: f64) -> bool {
+    let is_false = simlin_base::float::approx_eq(n, 0.0);
     !is_false
 }
 
@@ -78,7 +72,7 @@ pub(crate) fn eval_op2(op: Op2, l: f64, r: f64) -> f64 {
         Op2::Gte => (l >= r) as i8 as f64,
         Op2::Lt => (l < r) as i8 as f64,
         Op2::Lte => (l <= r) as i8 as f64,
-        Op2::Eq => crate::float::approx_eq(l, r) as i8 as f64,
+        Op2::Eq => simlin_base::float::approx_eq(l, r) as i8 as f64,
         Op2::And => (is_truthy(l) && is_truthy(r)) as i8 as f64,
         Op2::Or => (is_truthy(l) || is_truthy(r)) as i8 as f64,
     }
@@ -86,8 +80,7 @@ pub(crate) fn eval_op2(op: Op2, l: f64, r: f64) -> f64 {
 
 /// Identifies a literal in a specific bytecode object that must be mutated
 /// when a constant's value is overridden via `set_value`.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 enum BytecodeLocation {
     /// A literal in a flows or stocks module's shared bytecode.
     FlowOrStock {
@@ -103,13 +96,12 @@ enum BytecodeLocation {
     },
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CompiledSimulation {
-    pub(crate) modules: IdentMap<ModuleKey, CompiledModule>,
-    pub(crate) specs: Specs,
-    pub(crate) root: ModuleKey,
-    pub(crate) offsets: IdentMap<Ident<Canonical>, usize>,
+    pub modules: IdentMap<ModuleKey, CompiledModule>,
+    pub specs: Specs,
+    pub root: ModuleKey,
+    pub offsets: IdentMap<Ident<Canonical>, usize>,
     cached_constant_info: HashMap<usize, Vec<BytecodeLocation>>,
 }
 
@@ -160,7 +152,7 @@ impl CompiledSimulation {
     /// silently weakening the oracle. The contract is maintained by the
     /// `Vm::new` code that builds `ResolvedModule`s by cloning `compiled_flows`
     /// out of this `CompiledSimulation` and fusing the clone separately.
-    #[doc(hidden)] // test-support: used by the oracle in tests/integration/simulate.rs
+    #[doc(hidden)] // test-support: used by the oracle in simlin-tests/tests/integration/simulate.rs
     pub fn invariant_flow_offsets(&self) -> Vec<usize> {
         let Some(module) = self.modules.get(&self.root) else {
             return Vec::new();
@@ -186,7 +178,7 @@ impl CompiledSimulation {
 
     /// The root module's invariant flow-prefix opcode length (GH #712). 0 when
     /// no flow variable is run-invariant. Exposed for the partition test.
-    #[doc(hidden)] // test-support: used by the oracle in tests/integration/simulate.rs
+    #[doc(hidden)] // test-support: used by the oracle in simlin-tests/tests/integration/simulate.rs
     pub fn flows_invariant_opcode_len(&self) -> usize {
         self.modules
             .get(&self.root)
@@ -235,7 +227,7 @@ impl CompiledSimulation {
     ///
     /// [`is_constant_offset`]: Self::is_constant_offset
     /// [`is_overridable_offset`]: Self::is_overridable_offset
-    pub(crate) fn constant_offsets(&self) -> impl Iterator<Item = usize> + '_ {
+    pub fn constant_offsets(&self) -> impl Iterator<Item = usize> + '_ {
         self.cached_constant_info.keys().copied()
     }
 }
@@ -249,8 +241,7 @@ impl CompiledSimulation {
 /// once at `Vm::new` lets the `EvalModule` opcode do a plain array index in the
 /// hot loop instead of cloning a `(String, BTreeSet<String>)` key and SipHashing
 /// it for a `HashMap` lookup on every module evaluation, every timestep.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct ResolvedModule {
     #[allow(dead_code)]
     ident: Ident<Canonical>,
@@ -261,8 +252,7 @@ struct ResolvedModule {
     child_targets: Vec<u32>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct CompiledSlicedSimulation {
     /// All unique compiled modules, indexed by the integer ids stored in
     /// `child_targets` (and `root_idx`).
@@ -274,9 +264,8 @@ struct CompiledSlicedSimulation {
     key_to_idx: IdentMap<ModuleKey, u32>,
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum StepPart {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StepPart {
     Initials,
     Flows,
     Stocks,
@@ -292,8 +281,7 @@ fn borrow_two(buf: &mut [f64], n_slots: usize, a: usize, b: usize) -> (&mut [f64
     if !flip { (left, right) } else { (right, left) }
 }
 
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Vm {
     /// The program this Vm runs, shared with whoever compiled it: the FFI
     /// keeps the same `Arc` to rebuild the Vm on reset, and the salsa memo
@@ -387,7 +375,6 @@ struct Stack {
     top: usize,
 }
 
-#[cfg(feature = "debug-derive")]
 impl std::fmt::Debug for Stack {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Stack")
@@ -456,7 +443,7 @@ impl Stack {
 /// bundled here. Every field is `Copy`, so a caller mints one for the length of
 /// a read loop and drops it before touching `curr`/`temp_storage` mutably.
 #[derive(Clone, Copy)]
-pub(crate) struct ChunkRegions<'a> {
+pub struct ChunkRegions<'a> {
     curr: &'a [f64],
     /// The snapshot taken after the previous step's stocks (`PREVIOUS`).
     prev: &'a [f64],
@@ -477,8 +464,8 @@ impl<'a> ChunkRegions<'a> {
     /// snapshot slices are deliberately EMPTY rather than aliases of `curr`, so
     /// a view that mis-routes to one panics instead of quietly returning
     /// plausible values.
-    #[cfg(test)]
-    pub(crate) fn curr_only(curr: &'a [f64]) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn curr_only(curr: &'a [f64]) -> Self {
         ChunkRegions {
             curr,
             prev: &[],
@@ -543,7 +530,7 @@ impl<'a> ChunkRegions<'a> {
 /// for recursive `EvalModule` calls they must be re-packed into a temporary
 /// `EvalState` because the borrow checker cannot split the struct across the
 /// call boundary.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Debug)]
 struct EvalState<'a> {
     stack: &'a mut Stack,
     temp_storage: &'a mut [f64],
@@ -759,7 +746,7 @@ fn collect_stock_offsets(
 /// Advance a multi-dimensional index in row-major order. Shared by all
 /// vector operation opcodes to iterate over array elements.
 #[inline]
-pub(crate) fn increment_indices(indices: &mut [u16], dims: &[u16]) {
+pub fn increment_indices(indices: &mut [u16], dims: &[u16]) {
     for d in (0..indices.len()).rev() {
         indices[d] += 1;
         if indices[d] < dims[d] {
@@ -774,7 +761,7 @@ pub(crate) fn increment_indices(indices: &mut [u16], dims: &[u16]) {
 /// distinguishable from a model's own NaN.
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
-pub const POISON_SENTINEL: f64 = -1.234567e123;
+pub(crate) const POISON_SENTINEL: f64 = -1.234567e123;
 
 impl Vm {
     /// A VM that runs `sim` under the specs it was compiled with.
@@ -816,11 +803,11 @@ impl Vm {
                 format!(
                     "a run from {} to {} in steps of {}, saving every {}, saves {}, each of \
                      {n_slots} values: more than can be held in memory",
-                    crate::results::written(specs.start),
-                    crate::results::written(specs.stop),
-                    crate::results::written(specs.dt),
-                    crate::results::written(specs.save_step),
-                    crate::results::written_rows(n_chunks),
+                    simlin_base::results::written(specs.start),
+                    simlin_base::results::written(specs.stop),
+                    simlin_base::results::written(specs.dt),
+                    simlin_base::results::written(specs.save_step),
+                    simlin_base::results::written_rows(n_chunks),
                 )
             )
         };
@@ -933,7 +920,7 @@ impl Vm {
     /// corrupts every stock and hides the property under test. See
     /// `only_documented_classes_carry_across_a_step`.
     #[cfg(any(test, feature = "test-support"))]
-    #[doc(hidden)] // test-support: used by tests/integration/simulate.rs
+    #[doc(hidden)] // test-support: used by simlin-tests/tests/integration/simulate.rs
     pub fn poison_next_chunk_for_test(&mut self) {
         self.poison_next = true;
     }
@@ -953,7 +940,7 @@ impl Vm {
     ///
     /// The step AT `end` is evaluated: a value set after `run_to(t)` takes
     /// effect from the step after `t`. [`Vm::run_until`] is the call that
-    /// stops before a time. A time within [`crate::results::STEP_TOLERANCE`]
+    /// stops before a time. A time within [`simlin_base::results::STEP_TOLERANCE`]
     /// of a step is that step. Steps past the stop time are never run: once
     /// the run is over a further call evaluates nothing.
     ///
@@ -969,7 +956,7 @@ impl Vm {
     /// last saved row. From there on it rests at that row, evaluated, because
     /// it takes no step past it; making it rest where the VM does is a
     /// question of the blob's ABI that this does not settle
-    /// (`wasmgen::module_tests::where_a_run_rests_on_each_backend`).
+    /// (`simlin_wasmgen::module_tests::where_a_run_rests_on_each_backend`).
     pub fn run_to(&mut self, end: f64) -> Result<()> {
         // One past the last step to evaluate. NaN compares false with every
         // step, which runs to the end.
@@ -1102,7 +1089,7 @@ impl Vm {
                 let (curr, next) = borrow_two(&mut data, n_slots, self.curr_chunk, self.next_chunk);
                 #[cfg(any(test, feature = "test-support"))]
                 if poison_next {
-                    next[IMPLICIT_VAR_COUNT..].fill(POISON_SENTINEL);
+                    next[simlin_base::results::IMPLICIT_VAR_COUNT..].fill(POISON_SENTINEL);
                 }
 
                 if self.conveyor_plans.is_empty() && self.queue_plans.is_empty() {
@@ -3547,8 +3534,8 @@ pub(crate) fn step(time: f64, dt: f64, height: f64, step_time: f64) -> f64 {
 /// and a width and is another function; the MDL reader lowers it to its own
 /// expression.)
 #[inline(never)]
-pub(crate) fn pulse(time: f64, dt: f64, volume: f64, first_pulse: f64, interval: f64) -> f64 {
-    let time = time + dt * crate::results::STEP_TOLERANCE;
+pub fn pulse(time: f64, dt: f64, volume: f64, first_pulse: f64, interval: f64) -> f64 {
+    let time = time + dt * simlin_base::results::STEP_TOLERANCE;
     if time < first_pulse {
         return 0.0;
     }
@@ -3569,9 +3556,9 @@ pub(crate) fn pulse(time: f64, dt: f64, volume: f64, first_pulse: f64, interval:
 
 /// The lookup a lookup opcode's `mode` names, over `table` at `index`: the one
 /// dispatch every lookup opcode arm goes through. The wasm backend's twin is
-/// `wasmgen::lower::HelperFns::lookup`.
+/// `simlin_wasmgen::lower::HelperFns::lookup`.
 #[inline]
-pub(crate) fn lookup_in_mode(mode: LookupMode, table: &[(f64, f64)], index: f64) -> f64 {
+pub fn lookup_in_mode(mode: LookupMode, table: &[(f64, f64)], index: f64) -> f64 {
     match mode {
         LookupMode::Interpolate => lookup(table, index),
         LookupMode::Forward => lookup_forward(table, index),
@@ -3618,7 +3605,7 @@ fn extend_end_segment(end: (f64, f64), inner: (f64, f64), index: f64) -> f64 {
 
 // `pub(crate)` so the wasm backend's lookup-helper tests can compare the
 // emitted helpers directly against the VM functions they reproduce
-// (`wasmgen::lookup`).
+// (`simlin_wasmgen::lookup`).
 #[inline(never)]
 pub(crate) fn lookup(table: &[(f64, f64)], index: f64) -> f64 {
     if table.is_empty() {
@@ -3662,7 +3649,7 @@ pub(crate) fn lookup(table: &[(f64, f64)], index: f64) -> f64 {
     // order (a NaN, which `parse_table` refuses), and the first knot is the
     // nearest there is: there is no knot before it to interpolate from.
     let i = low;
-    if i == 0 || crate::float::approx_eq(table[i].0, index) {
+    if i == 0 || simlin_base::float::approx_eq(table[i].0, index) {
         table[i].1
     } else {
         // slope = deltaY/deltaX
@@ -4940,7 +4927,7 @@ mod vm_step_grid_tests;
 /// deleting the branch changes no simulation result. (The wasm backend is not so
 /// lucky: its `reset` does not clear the snapshot regions, which is why the
 /// `select` there IS observable and is pinned by
-/// `wasmgen::module_tests::compile_simulation_repeated_run_resets_previous_fallback_for_an_array_view`.)
+/// `simlin_wasmgen::module_tests::compile_simulation_repeated_run_resets_previous_fallback_for_an_array_view`.)
 /// Keeping the branch anyway is what makes the two backends state the same rule
 /// rather than one relying on an initialization the other does not perform.
 ///

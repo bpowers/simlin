@@ -25,10 +25,10 @@
 
 use std::io::BufReader;
 
-use crate::common::{ErrorCode, Ident};
-use crate::datamodel::{self, SimSpecs};
 use crate::diagnostic::{DiagnosticCategory, DiagnosticSeverity};
 use crate::test_common::TestProject;
+use simlin_base::common::{ErrorCode, Ident};
+use simlin_base::datamodel::{self, SimSpecs};
 
 fn three_steps() -> SimSpecs {
     SimSpecs {
@@ -42,7 +42,7 @@ fn three_steps() -> SimSpecs {
 }
 
 fn parse(xml: &str) -> datamodel::Project {
-    crate::compat::open_xmile(&mut BufReader::new(xml.as_bytes())).expect("imports")
+    simlin_formats::compat::open_xmile(&mut BufReader::new(xml.as_bytes())).expect("imports")
 }
 
 #[test]
@@ -222,23 +222,12 @@ fn a_stock_list_that_repeats_a_flow_warns_once_naming_the_repeats() {
 }
 
 #[test]
-fn layout_metadata_reads_a_repeated_flow_once() {
-    let project = TestProject::new("repeat")
-        .flow("f", "1", None)
-        .stock("s", "0", &["f", "f"], &[], None)
-        .build_datamodel();
-    let name = project.models[0].name.clone();
-    let metadata = crate::layout::compute_metadata(&project, &name, None).expect("metadata");
-    assert_eq!(metadata.stock_to_inflows["s"], vec!["f".to_string()]);
-}
-
-#[test]
 fn mdl_export_writes_a_repeated_flow_once() {
     let project = TestProject::new("repeat")
         .flow("f", "1", None)
         .stock("s", "0", &["f", "f"], &[], None)
         .build_datamodel();
-    let mdl = crate::compat::to_mdl(&project).expect("exports");
+    let mdl = simlin_formats::compat::to_mdl(&project).expect("exports");
     assert!(
         mdl.contains("INTEG") && !mdl.contains("f+f") && !mdl.contains("f + f"),
         "the INTEG names f once:\n{mdl}"

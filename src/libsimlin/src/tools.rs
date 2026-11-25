@@ -2,7 +2,7 @@
 // Use of this source code is governed by the Apache License,
 // Version 2.0, that can be found in the LICENSE file.
 
-//! The agent tool surface (`simlin_engine::tools`) for native hosts: the tool
+//! The agent tool surface (`simlin_tools`) for native hosts: the tool
 //! catalog, and a session per model that answers tool calls with JSON.
 //!
 //! A host bridges each catalog entry into its agent framework and forwards the
@@ -17,8 +17,6 @@ use std::os::raw::c_char;
 use std::ptr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use simlin_engine::tools;
-
 use crate::ffi_error::SimlinError;
 use crate::lock_order::{OrderedMutex, Rank};
 use crate::{
@@ -27,12 +25,12 @@ use crate::{
 };
 
 /// One agent's work on one model: the evidence ids it has been given, what it
-/// last read, and the runs it made (`simlin_engine::tools::Session`), over the
+/// last read, and the runs it made (`simlin_tools::Session`), over the
 /// model it was made for.
 pub struct SimlinToolSession {
     /// Counted: the session keeps its model, and through it the project, alive.
     model: *const SimlinModel,
-    session: OrderedMutex<tools::Session>,
+    session: OrderedMutex<simlin_tools::Session>,
     ref_count: AtomicUsize,
     /// How many times the session's calls have been cancelled
     /// (`simlin_tool_session_cancel`). A call reads it as it begins, before it
@@ -78,7 +76,7 @@ pub unsafe extern "C" fn simlin_tools_describe(
         return;
     }
     write_bytes_to_ffi_output(
-        tools::catalog_json().as_bytes(),
+        simlin_tools::catalog_json().as_bytes(),
         out_buf,
         out_len,
         out_error,
@@ -107,7 +105,10 @@ pub unsafe extern "C" fn simlin_tool_session_new(
     crate::model_ref(model);
     Box::into_raw(Box::new(SimlinToolSession {
         model: model_ref as *const SimlinModel,
-        session: OrderedMutex::new(Rank::Session, tools::Session::new(&model_ref.model_name)),
+        session: OrderedMutex::new(
+            Rank::Session,
+            simlin_tools::Session::new(&model_ref.model_name),
+        ),
         ref_count: AtomicUsize::new(1),
         cancellations: AtomicU64::new(0),
         #[cfg(test)]
@@ -162,7 +163,7 @@ unsafe fn require_session<'a>(
 /// an exception that ends the agent's turn.
 ///
 /// One entry point, two lock footprints, chosen by the tool's effect
-/// (`simlin_engine::tools::ToolName::effect`) before any lock is taken.
+/// (`simlin_tools::ToolName::effect`) before any lock is taken.
 ///
 /// A tool that reads answers the project as it is when the call starts, at
 /// that revision. It holds the session for the call, and the project's
@@ -187,7 +188,7 @@ unsafe fn require_session<'a>(
 /// `simlin_project_apply_patch` is: it holds the session, the datamodel and
 /// the database for the whole call, so nothing lands between its gate and its
 /// edit, and when the gate passes it makes the edit before it returns
-/// (`simlin_engine::tools::ToolOutput::edited`), the database synced to the
+/// (`simlin_tools::ToolOutput::edited`), the database synced to the
 /// edited project and the contents replaced by it under both locks, which
 /// advances the revision. An edit its gate refuses is a refusal, with
 /// `out_is_error` set; it and an edit that changes nothing leave the project
@@ -272,14 +273,14 @@ pub unsafe extern "C" fn simlin_tool_session_call(
     };
     // The host's mistake, told before any lock is taken: the tool's effect
     // is what says which locks the call takes.
-    let unknown_tool = |unknown: tools::UnknownTool| {
+    let unknown_tool = |unknown: simlin_tools::UnknownTool| {
         store_error(
             out_error,
             SimlinError::new(SimlinErrorCode::DoesNotExist).with_message(unknown.to_string()),
         );
     };
-    let Some(tool) = tools::ToolName::from_name(name) else {
-        unknown_tool(tools::UnknownTool(name.to_string()));
+    let Some(tool) = simlin_tools::ToolName::from_name(name) else {
+        unknown_tool(simlin_tools::UnknownTool(name.to_string()));
         return;
     };
 
@@ -292,8 +293,12 @@ pub unsafe extern "C" fn simlin_tool_session_call(
     let cancelled = || cancellations.load(Ordering::SeqCst) != began_at;
     let project = &*(*session_ref.model).project;
     let answered = match tool.effect() {
-        tools::ToolEffect::Read => answer_read(session_ref, project, name, input, &cancelled),
-        tools::ToolEffect::Edit => answer_edit(session_ref, project, name, input, &cancelled),
+        simlin_tools::ToolEffect::Read => {
+            answer_read(session_ref, project, name, input, &cancelled)
+        }
+        simlin_tools::ToolEffect::Edit => {
+            answer_edit(session_ref, project, name, input, &cancelled)
+        }
     };
     let output = match answered {
         Ok(output) => output,
@@ -323,18 +328,18 @@ fn answer_read(
     name: &str,
     input: &str,
     cancelled: &(dyn Fn() -> bool + Sync),
-) -> Result<tools::ToolOutput, tools::UnknownTool> {
+) -> Result<simlin_tools::ToolOutput, simlin_tools::UnknownTool> {
     let mut tool_session = session.session.lock().unwrap();
     // A call cancelled while it waited for the session answers now, before it
     // waits for the database, which another session's call may hold.
     if cancelled() {
-        return Ok(tools::ToolOutput::cancelled());
+        return Ok(simlin_tools::ToolOutput::cancelled());
     }
     let (contents, revision, mut db) = snapshot(project);
     #[cfg(test)]
     crate::invoke_db_section_test_hook(project);
     let waiting = || project.is_waited_on();
-    let workspace = tools::Workspace {
+    let workspace = simlin_tools::Workspace {
         project: &contents,
         db: &mut db,
         revision,
@@ -361,21 +366,21 @@ fn answer_edit(
     name: &str,
     input: &str,
     cancelled: &(dyn Fn() -> bool + Sync),
-) -> Result<tools::ToolOutput, tools::UnknownTool> {
+) -> Result<simlin_tools::ToolOutput, simlin_tools::UnknownTool> {
     // Counted until it holds the database, which no reading call then does.
     let waiting = project.count_waiting();
     let mut tool_session = session.session.lock().unwrap();
     // A call cancelled while it waited for the session answers now, before it
     // waits for the project, whose database another session's call may hold.
     if cancelled() {
-        return Ok(tools::ToolOutput::cancelled());
+        return Ok(simlin_tools::ToolOutput::cancelled());
     }
     let mut datamodel = project.datamodel.lock().unwrap();
     let mut db = project.lock_db_with(&datamodel);
     drop(waiting);
     let revision = datamodel.revision();
     // It is the work other calls stop for, so it stops for none.
-    let workspace = tools::Workspace {
+    let workspace = simlin_tools::Workspace {
         project: &datamodel,
         db: &mut db,
         revision,
@@ -487,7 +492,7 @@ pub unsafe extern "C" fn simlin_tool_session_forget_run(
 fn snapshot(
     project: &crate::SimlinProject,
 ) -> (
-    std::sync::Arc<simlin_engine::datamodel::Project>,
+    std::sync::Arc<simlin_base::datamodel::Project>,
     u64,
     crate::DbLock<'_>,
 ) {
@@ -623,7 +628,7 @@ pub unsafe extern "C" fn simlin_tool_session_get_run(
             drop(contents);
             let (contents, revision, mut db) = snapshot(project);
             let waiting = || project.is_waited_on();
-            let workspace = tools::Workspace {
+            let workspace = simlin_tools::Workspace {
                 project: &contents,
                 db: &mut db,
                 revision,

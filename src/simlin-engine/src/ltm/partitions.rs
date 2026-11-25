@@ -6,7 +6,7 @@
 //! stock graph. Used by relative-loop-score normalization to bucket loops
 //! into the strongly-connected component of stocks they participate in.
 
-use crate::common::{Canonical, Ident, IdentMap, IdentSet};
+use simlin_base::common::{Canonical, Ident, IdentMap, IdentSet};
 
 use super::types::Loop;
 
@@ -16,7 +16,7 @@ use super::types::Loop;
 /// through the causal graph (i.e., they form a strongly connected component
 /// in the stock-to-stock reachability graph). Relative loop scores should
 /// only be compared within the same partition.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Debug)]
 pub struct CyclePartitions {
     /// Partitions as sorted Vecs of stock idents.
     /// Outer Vec is sorted by the lexicographically smallest stock in each partition.
@@ -62,12 +62,12 @@ fn element_subscript(name: &str) -> Option<&str> {
 /// Returns an empty `Vec` when `dimensions` is empty or any named dimension
 /// is missing from `dims` (a mid-edit inconsistency); callers fall back to
 /// the slot suffixes actually present on the loop's stocks in that case.
-pub(crate) fn loop_dimension_element_tuples(
+pub fn loop_dimension_element_tuples(
     dimensions: &[String],
-    dims: &[crate::datamodel::Dimension],
+    dims: &[simlin_base::datamodel::Dimension],
 ) -> Vec<String> {
-    use crate::canonicalize;
-    use crate::datamodel::DimensionElements;
+    use simlin_base::canonicalize;
+    use simlin_base::datamodel::DimensionElements;
 
     if dimensions.is_empty() {
         return Vec::new();
@@ -143,7 +143,7 @@ impl CyclePartitions {
     pub fn partition_for_loop(
         &self,
         loop_item: &Loop,
-        dims: &[crate::datamodel::Dimension],
+        dims: &[simlin_base::datamodel::Dimension],
     ) -> Vec<Option<usize>> {
         if loop_item.dimensions.is_empty() {
             // One conceptual slot.  `loop_item.stocks` are element-level names

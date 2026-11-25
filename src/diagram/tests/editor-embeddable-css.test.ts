@@ -3,13 +3,13 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 // Embeddability contracts for the Editor's stylesheets. The Editor is mounted
-// by hosts that own the whole viewport (src/app's fixed full-page shell,
-// simlin-serve's page) AND by hosts that give it one positioned box on a page
-// they own (a notebook output cell, several per page). Chrome that positions
-// or sizes itself against the VIEWPORT (position: fixed, vw/vh units) escapes
-// such a box; everything inside the Editor tree must therefore anchor to the
-// Editor root and size against it. jsdom can't do layout, so -- like
-// tests/panel-css.test.ts -- these assert the stylesheet text.
+// by hosts that own the whole viewport (src/app's fixed full-page shell) AND
+// by hosts that give it one positioned box on a page they own (a notebook
+// output cell, several per page). Chrome that positions or sizes itself against
+// the VIEWPORT (position: fixed, vw/vh units) escapes such a box; everything
+// inside the Editor tree must therefore anchor to the Editor root and size
+// against it. jsdom can't do layout, so -- like tests/panel-css.test.ts --
+// these assert the stylesheet text.
 //
 // The exemptions are deliberate and enumerated: the portaled surfaces
 // (Drawer, Dialog) are viewport-level in their default mode and correctly use

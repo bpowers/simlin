@@ -362,7 +362,7 @@ Labels can be positioned relative to their element using the `LabelSide` propert
   element's position and `labelSide` byte-for-byte. A new connector may end
   up running through a hand-placed label; that is accepted -- the human (or
   a full relayout) moves it. See `incremental_layout` in
-  `src/simlin-engine/src/layout/mod.rs`.
+  `src/simlin-layout/src/lib.rs`.
 
 ### Label Layout Calculation
 

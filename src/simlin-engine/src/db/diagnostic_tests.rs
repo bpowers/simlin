@@ -9,7 +9,7 @@
 //! accumulator with specific error codes and correct severity levels.
 
 use super::*;
-use crate::datamodel;
+use simlin_base::datamodel;
 
 /// Whether `d` was raised on one of the three unit surfaces.
 fn is_unit_diagnostic(d: &Diagnostic) -> bool {
@@ -137,8 +137,8 @@ fn test_model_all_diagnostics_triggers_all_sources() {
         d.variable.as_deref() == Some("bad_table_var")
             && matches!(
                 &d.error,
-                DiagnosticError::Model(crate::common::Error {
-                    code: crate::common::ErrorCode::BadTable,
+                DiagnosticError::Model(simlin_base::common::Error {
+                    code: simlin_base::common::ErrorCode::BadTable,
                     ..
                 })
             )
@@ -166,7 +166,7 @@ fn test_model_all_diagnostics_triggers_all_sources() {
 /// error codes for a project with various error types.
 #[test]
 fn test_ac2_1_accumulator_parity_with_old_path() {
-    use crate::common::ErrorCode;
+    use simlin_base::common::ErrorCode;
     use std::collections::HashSet;
 
     let project = datamodel::Project {
@@ -306,8 +306,8 @@ fn test_ac2_2_bad_table_specific_error() {
         d.variable.as_deref() == Some("lookup_var")
             && matches!(
                 &d.error,
-                DiagnosticError::Model(crate::common::Error {
-                    code: crate::common::ErrorCode::BadTable,
+                DiagnosticError::Model(simlin_base::common::Error {
+                    code: simlin_base::common::ErrorCode::BadTable,
                     ..
                 })
             )
@@ -361,8 +361,8 @@ fn test_ac2_3_empty_equation() {
         d.variable.as_deref() == Some("my_stock")
             && matches!(
                 &d.error,
-                DiagnosticError::Equation(crate::common::EquationError {
-                    code: crate::common::ErrorCode::EmptyEquation,
+                DiagnosticError::Equation(simlin_base::common::EquationError {
+                    code: simlin_base::common::ErrorCode::EmptyEquation,
                     ..
                 })
             )
@@ -493,11 +493,11 @@ fn test_ac2_4_mismatched_dimensions() {
             && d.severity == DiagnosticSeverity::Error
             && matches!(
                 &d.error,
-                DiagnosticError::Equation(crate::common::EquationError {
-                    code: crate::common::ErrorCode::MismatchedDimensions,
+                DiagnosticError::Equation(simlin_base::common::EquationError {
+                    code: simlin_base::common::ErrorCode::MismatchedDimensions,
                     ..
-                }) | DiagnosticError::Model(crate::common::Error {
-                    code: crate::common::ErrorCode::MismatchedDimensions,
+                }) | DiagnosticError::Model(simlin_base::common::Error {
+                    code: simlin_base::common::ErrorCode::MismatchedDimensions,
                     ..
                 })
             )
@@ -667,7 +667,7 @@ fn test_ac2_7_vm_validation_errors() {
     let err = vm_result.unwrap_err();
     assert_eq!(
         err.code,
-        crate::common::ErrorCode::BadSimSpecs,
+        simlin_base::common::ErrorCode::BadSimSpecs,
         "Vm::new should report BadSimSpecs, got: {err:?}"
     );
 
@@ -740,8 +740,8 @@ fn test_ac2_7_assembly_errors_accumulated() {
     let circular = diags.iter().find(|d| {
         matches!(
             &d.error,
-            DiagnosticError::Model(crate::common::Error {
-                code: crate::common::ErrorCode::CircularDependency,
+            DiagnosticError::Model(simlin_base::common::Error {
+                code: simlin_base::common::ErrorCode::CircularDependency,
                 ..
             })
         )
@@ -867,8 +867,8 @@ fn test_compile_var_fragment_unknown_dependency() {
         d.variable.as_deref() == Some("x")
             && matches!(
                 &d.error,
-                DiagnosticError::Equation(crate::common::EquationError {
-                    code: crate::common::ErrorCode::UnknownDependency,
+                DiagnosticError::Equation(simlin_base::common::EquationError {
+                    code: simlin_base::common::ErrorCode::UnknownDependency,
                     ..
                 })
             )
@@ -963,7 +963,7 @@ fn test_compile_var_fragment_per_phase_var_new_failure() {
             && d.severity == DiagnosticSeverity::Error
             && matches!(
                 &d.error,
-                DiagnosticError::Equation(crate::common::EquationError {
+                DiagnosticError::Equation(simlin_base::common::EquationError {
                     start: 4,
                     end: 8,
                     mismatched_read: Some(_),
@@ -1152,8 +1152,8 @@ fn has_empty_equation(diags: &[Diagnostic], name: &str) -> bool {
             && d.severity == DiagnosticSeverity::Error
             && matches!(
                 &d.error,
-                DiagnosticError::Equation(crate::common::EquationError {
-                    code: crate::common::ErrorCode::EmptyEquation,
+                DiagnosticError::Equation(simlin_base::common::EquationError {
+                    code: simlin_base::common::ErrorCode::EmptyEquation,
                     ..
                 })
             )
@@ -1389,7 +1389,7 @@ fn test_conveyor_driven_flow_malformed_equation_still_errors() {
             && d.severity == DiagnosticSeverity::Error
             && matches!(
                 &d.error,
-                DiagnosticError::Equation(e) if e.code != crate::common::ErrorCode::EmptyEquation
+                DiagnosticError::Equation(e) if e.code != simlin_base::common::ErrorCode::EmptyEquation
             )
     });
     assert!(
@@ -1711,7 +1711,10 @@ fn conveyor_spec_project(
 
 /// The Warning-severity `Model` diagnostics carrying `code`, in accumulation
 /// order.
-fn conveyor_spec_warnings(diags: &[Diagnostic], code: crate::common::ErrorCode) -> Vec<Diagnostic> {
+fn conveyor_spec_warnings(
+    diags: &[Diagnostic],
+    code: simlin_base::common::ErrorCode,
+) -> Vec<Diagnostic> {
     diags
         .iter()
         .filter(|d| {
@@ -1736,7 +1739,7 @@ fn model_diag_details(d: &Diagnostic) -> String {
 /// (round-half-away), an effective transit of 1.25.
 #[test]
 fn test_conveyor_transit_not_dt_multiple_warns() {
-    use crate::common::ErrorCode;
+    use simlin_base::common::ErrorCode;
     let db = SimlinDb::default();
     let project = conveyor_spec_project("1.3", datamodel::Dt::Dt(0.25), false, &[], None);
     let sync = sync_from_datamodel(&db, &project);
@@ -1769,7 +1772,7 @@ fn test_conveyor_transit_not_dt_multiple_warns() {
 /// no quantization warning.
 #[test]
 fn test_conveyor_transit_dt_multiple_no_warning() {
-    use crate::common::ErrorCode;
+    use simlin_base::common::ErrorCode;
     let db = SimlinDb::default();
     let project = conveyor_spec_project("4", datamodel::Dt::Dt(0.25), false, &[], None);
     let sync = sync_from_datamodel(&db, &project);
@@ -1786,7 +1789,7 @@ fn test_conveyor_transit_dt_multiple_no_warning() {
 /// known at runtime, and a false positive is worse than silence.
 #[test]
 fn test_conveyor_transit_non_constant_no_warning() {
-    use crate::common::ErrorCode;
+    use simlin_base::common::ErrorCode;
     let db = SimlinDb::default();
     let project = conveyor_spec_project(
         "t_len",
@@ -1811,7 +1814,7 @@ fn test_conveyor_transit_non_constant_no_warning() {
 /// transit of 2.
 #[test]
 fn test_conveyor_transit_warning_uses_model_sim_specs_override() {
-    use crate::common::ErrorCode;
+    use simlin_base::common::ErrorCode;
     let db = SimlinDb::default();
     let mut project = conveyor_spec_project("1.5", datamodel::Dt::Dt(0.25), false, &[], None);
     project.models[0].sim_specs = Some(datamodel::SimSpecs {
@@ -1842,7 +1845,7 @@ fn test_conveyor_transit_warning_uses_model_sim_specs_override() {
 /// warn once per conveyor, naming the stock and reporting the sum.
 #[test]
 fn test_conveyor_leak_fractions_exceed_one_warns() {
-    use crate::common::ErrorCode;
+    use simlin_base::common::ErrorCode;
     let db = SimlinDb::default();
     let project = conveyor_spec_project("4", datamodel::Dt::Dt(0.25), false, &["0.7", "0.5"], None);
     let sync = sync_from_datamodel(&db, &project);
@@ -1875,7 +1878,7 @@ fn test_conveyor_leak_fractions_exceed_one_warns() {
 /// encoding silently escapes the check.
 #[test]
 fn test_conveyor_leak_marker_eqn_form_warns() {
-    use crate::common::ErrorCode;
+    use simlin_base::common::ErrorCode;
     let db = SimlinDb::default();
     let mut project =
         conveyor_spec_project("4", datamodel::Dt::Dt(0.25), false, &["0.7", "0.5"], None);
@@ -1915,7 +1918,7 @@ fn test_conveyor_leak_marker_eqn_form_warns() {
 /// runtime: the per-term clamp must warn.
 #[test]
 fn test_conveyor_leak_negative_fraction_clamped_like_runtime() {
-    use crate::common::ErrorCode;
+    use simlin_base::common::ErrorCode;
     let db = SimlinDb::default();
     let project = conveyor_spec_project(
         "4",
@@ -1949,7 +1952,7 @@ fn test_conveyor_leak_negative_fraction_clamped_like_runtime() {
 /// contribute 0, exactly like the runtime.
 #[test]
 fn test_conveyor_leak_nan_fraction_contributes_zero() {
-    use crate::common::ErrorCode;
+    use simlin_base::common::ErrorCode;
     let db = SimlinDb::default();
     let project = conveyor_spec_project(
         "4",
@@ -1984,7 +1987,7 @@ fn test_conveyor_leak_nan_fraction_contributes_zero() {
 /// fired. Also pins the singular "1 slat" grammar.
 #[test]
 fn test_conveyor_transit_warning_display_disambiguates_near_dt() {
-    use crate::common::ErrorCode;
+    use simlin_base::common::ErrorCode;
     let db = SimlinDb::default();
     let project =
         conveyor_spec_project("0.33333", datamodel::Dt::Reciprocal(3.0), false, &[], None);
@@ -2014,7 +2017,7 @@ fn test_conveyor_transit_warning_display_disambiguates_near_dt() {
 /// read "1.3", not the full shortest-round-trip tail.
 #[test]
 fn test_conveyor_leak_fraction_sum_display_is_trimmed() {
-    use crate::common::ErrorCode;
+    use simlin_base::common::ErrorCode;
     let db = SimlinDb::default();
     let project = conveyor_spec_project(
         "4",
@@ -2043,7 +2046,7 @@ fn test_conveyor_leak_fraction_sum_display_is_trimmed() {
 /// leak fraction of 1, there will be no outflow") -- no warning.
 #[test]
 fn test_conveyor_leak_fractions_at_most_one_no_warning() {
-    use crate::common::ErrorCode;
+    use simlin_base::common::ErrorCode;
     let db = SimlinDb::default();
     let project = conveyor_spec_project("4", datamodel::Dt::Dt(0.25), false, &["0.5", "0.5"], None);
     let sync = sync_from_datamodel(&db, &project);
@@ -2060,7 +2063,7 @@ fn test_conveyor_leak_fractions_at_most_one_no_warning() {
 /// check must skip an exponential conveyor entirely.
 #[test]
 fn test_conveyor_leak_fractions_exponential_no_warning() {
-    use crate::common::ErrorCode;
+    use simlin_base::common::ErrorCode;
     let db = SimlinDb::default();
     let project = conveyor_spec_project("4", datamodel::Dt::Dt(0.25), true, &["0.7", "0.5"], None);
     let sync = sync_from_datamodel(&db, &project);
@@ -2078,7 +2081,7 @@ fn test_conveyor_leak_fractions_exponential_no_warning() {
 /// constants alone justify). Here the constant subset is 0.7 <= 1: no warning.
 #[test]
 fn test_conveyor_leak_fraction_non_constant_excluded() {
-    use crate::common::ErrorCode;
+    use simlin_base::common::ErrorCode;
     let db = SimlinDb::default();
     let project = conveyor_spec_project(
         "4",
@@ -2122,7 +2125,7 @@ fn dup_sim_specs() -> datamodel::SimSpecs {
 /// pipeline, returning the result.
 fn compile_main(
     project: &datamodel::Project,
-) -> crate::Result<std::sync::Arc<crate::vm::CompiledSimulation>> {
+) -> simlin_base::Result<std::sync::Arc<crate::vm::CompiledSimulation>> {
     let mut db = SimlinDb::default();
     let sync = sync_from_datamodel_incremental(&mut db, project, None);
     compile_project_incremental(&db, sync.project, "main", crate::db::LtmOverlay::Off)
@@ -2134,15 +2137,15 @@ fn duplicate_var_diags(diags: &[Diagnostic]) -> Vec<&Diagnostic> {
         .iter()
         .filter(|d| {
             matches!(&d.error, DiagnosticError::Model(e)
-                if e.code == crate::common::ErrorCode::DuplicateVariable)
+                if e.code == simlin_base::common::ErrorCode::DuplicateVariable)
         })
         .collect()
 }
 
 #[test]
 fn test_duplicate_case_variant_idents_fail_compile() {
-    use crate::common::ErrorCode;
     use crate::testutils::{x_aux, x_model, x_project};
+    use simlin_base::common::ErrorCode;
 
     let project = x_project(
         dup_sim_specs(),
@@ -2166,8 +2169,8 @@ fn test_duplicate_case_variant_idents_fail_compile() {
 
 #[test]
 fn test_duplicate_whitespace_underscore_idents_fail_compile() {
-    use crate::common::ErrorCode;
     use crate::testutils::{x_aux, x_model, x_project};
+    use simlin_base::common::ErrorCode;
 
     let project = x_project(
         dup_sim_specs(),
@@ -2268,8 +2271,8 @@ fn test_cross_model_same_canonical_idents_allowed() {
 
 #[test]
 fn test_incremental_sync_detects_newly_added_duplicate() {
-    use crate::common::ErrorCode;
     use crate::testutils::{x_aux, x_model, x_project};
+    use simlin_base::common::ErrorCode;
 
     // Pin the INCREMENTAL sync path (existing-model branch, salsa setters):
     // a re-sync that introduces a case twin must invalidate the duplicate
@@ -2298,7 +2301,7 @@ fn test_incremental_sync_detects_newly_added_duplicate() {
 
 #[test]
 fn test_xmile_duplicate_pair_rejected_end_to_end() {
-    use crate::common::ErrorCode;
+    use simlin_base::common::ErrorCode;
     use std::io::BufReader;
 
     // The XMILE reader stable-sorts by canonical ident but never dedups; the
@@ -2314,7 +2317,7 @@ fn test_xmile_duplicate_pair_rejected_end_to_end() {
     </variables>
   </model>
 </xmile>"#;
-    let project = crate::xmile::project_from_reader(&mut BufReader::new(xml.as_bytes()))
+    let project = simlin_formats::xmile::project_from_reader(&mut BufReader::new(xml.as_bytes()))
         .expect("the reader itself tolerates duplicates");
     let main = project.models[0].name.clone();
     let mut db = SimlinDb::default();
@@ -2384,7 +2387,10 @@ fn arrayed_elements_project(
 }
 
 fn unknown_element_warnings(diags: &[Diagnostic]) -> Vec<Diagnostic> {
-    conveyor_spec_warnings(diags, crate::common::ErrorCode::UnknownElementSubscript)
+    conveyor_spec_warnings(
+        diags,
+        simlin_base::common::ErrorCode::UnknownElementSubscript,
+    )
 }
 
 /// The typo case from GH #905: an `<element subscript="c">` entry on a
@@ -2776,7 +2782,7 @@ fn macro_build_diagnostics(diags: &[Diagnostic]) -> Vec<&Diagnostic> {
         .iter()
         .filter(|d| {
             matches!(&d.error, DiagnosticError::Model(e)
-                if e.code == crate::common::ErrorCode::DuplicateMacroName)
+                if e.code == simlin_base::common::ErrorCode::DuplicateMacroName)
         })
         .collect()
 }
@@ -2908,7 +2914,7 @@ fn unit_definition_diagnostics(diags: &[Diagnostic]) -> Vec<&Diagnostic> {
         .filter(|d| {
             matches!(
                 &d.error,
-                DiagnosticError::Unit(crate::common::UnitError::DefinitionError(_))
+                DiagnosticError::Unit(simlin_base::common::UnitError::DefinitionError(_))
             )
         })
         .collect()
@@ -3095,7 +3101,7 @@ fn variable_error_fields_are_the_lowering_channel() {
     assert!(
         lowered_errors
             .iter()
-            .any(|d| d.code() == crate::common::ErrorCode::MismatchedDimensions),
+            .any(|d| d.code() == simlin_base::common::ErrorCode::MismatchedDimensions),
         "lowering must record the dimension mismatch on the variable; got: {lowered_errors:?}"
     );
 
@@ -3104,7 +3110,7 @@ fn variable_error_fields_are_the_lowering_channel() {
         diags.iter().any(|d| {
             d.variable.as_deref() == Some("bad")
                 && matches!(&d.error, DiagnosticError::Equation(e)
-                    if e.code == crate::common::ErrorCode::MismatchedDimensions)
+                    if e.code == simlin_base::common::ErrorCode::MismatchedDimensions)
         }),
         "the recorded lowering error must reach collect_all_diagnostics; got: {diags:?}"
     );
@@ -3315,16 +3321,16 @@ fn codegen_rejection_in_the_initials_phase_is_attributable_too() {
 
 /// The `ErrorCode` a diagnostic reports, whatever variant holds it -- the same
 /// projection `libsimlin::patch::diagnostic_to_error_code` makes.
-fn diagnostic_code(d: &Diagnostic) -> crate::common::ErrorCode {
+fn diagnostic_code(d: &Diagnostic) -> simlin_base::common::ErrorCode {
     match &d.error {
         DiagnosticError::Equation(e) => e.code,
         DiagnosticError::Model(e) => e.code,
         DiagnosticError::Unit(u) => match u {
-            crate::common::UnitError::DefinitionError(e) => e.code,
-            crate::common::UnitError::ConsistencyError(code, _, _, _) => *code,
-            crate::common::UnitError::InferenceError { code, .. } => *code,
+            simlin_base::common::UnitError::DefinitionError(e) => e.code,
+            simlin_base::common::UnitError::ConsistencyError(code, _, _, _) => *code,
+            simlin_base::common::UnitError::InferenceError { code, .. } => *code,
         },
-        DiagnosticError::Assembly(_) => crate::common::ErrorCode::NotSimulatable,
+        DiagnosticError::Assembly(_) => simlin_base::common::ErrorCode::NotSimulatable,
     }
 }
 
@@ -3338,9 +3344,9 @@ fn diagnostic_reason(d: &Diagnostic) -> Option<String> {
         DiagnosticError::Equation(e) => e.details.clone(),
         DiagnosticError::Model(e) => e.details.clone(),
         DiagnosticError::Unit(u) => match u {
-            crate::common::UnitError::DefinitionError(e) => e.details.clone(),
-            crate::common::UnitError::ConsistencyError(_, _, d, _) => d.clone(),
-            crate::common::UnitError::InferenceError { details, .. } => details.clone(),
+            simlin_base::common::UnitError::DefinitionError(e) => e.details.clone(),
+            simlin_base::common::UnitError::ConsistencyError(_, _, d, _) => d.clone(),
+            simlin_base::common::UnitError::InferenceError { details, .. } => details.clone(),
         },
         DiagnosticError::Assembly(msg) => Some(msg.clone()),
     }
@@ -3386,8 +3392,8 @@ fn diagnostic_reason(d: &Diagnostic) -> Option<String> {
 /// by `db::ltm` tests.
 #[test]
 fn every_diagnostic_stage_keeps_its_message() {
-    use crate::common::ErrorCode;
     use crate::test_common::TestProject;
+    use simlin_base::common::ErrorCode;
 
     // (stage, project, code the row is about, the substring its reason must
     // contain -- None means "this stage writes no reason, by design")
@@ -3567,8 +3573,8 @@ fn every_diagnostic_stage_keeps_its_message() {
 /// array-producing-builtin path), so the two are changed and read together.
 #[test]
 fn a_lowering_rejection_never_renders_its_span_as_prose() {
-    use crate::common::ErrorCode;
     use crate::test_common::TestProject;
+    use simlin_base::common::ErrorCode;
 
     // (variable, its equation, the code the lowering raises)
     let rows = [
@@ -3633,8 +3639,8 @@ fn a_lowering_rejection_never_renders_its_span_as_prose() {
 /// NAME subject.
 #[test]
 fn a_duplicate_unit_diagnostic_names_the_declaration_that_conflicts() {
-    use crate::common::ErrorCode;
     use crate::test_common::TestProject;
+    use simlin_base::common::ErrorCode;
 
     let unit = |name: &str, equation: Option<&str>, aliases: &[&str]| datamodel::Unit {
         name: name.to_string(),
@@ -3713,7 +3719,7 @@ fn a_diagnostics_reason_reaches_the_formatted_error() {
     let err = formatted
         .errors
         .iter()
-        .find(|e| e.code == crate::common::ErrorCode::UnknownDependency)
+        .find(|e| e.code == simlin_base::common::ErrorCode::UnknownDependency)
         .unwrap_or_else(|| panic!("expected an UnknownDependency FormattedError: {formatted:#?}"));
     assert!(
         err.details
@@ -3749,7 +3755,7 @@ fn models_named(names: &[&str]) -> datamodel::Project {
 
 #[test]
 fn models_known_by_one_name_are_refused_and_reported_once() {
-    use crate::common::ErrorCode;
+    use simlin_base::common::ErrorCode;
 
     // The models, and the spellings that are one name.
     let rows: &[(&[&str], [&str; 2])] = &[
@@ -3804,8 +3810,8 @@ fn models_known_by_one_name_are_refused_and_reported_once() {
 
 #[test]
 fn models_with_distinct_names_and_one_named_for_a_stdlib_model_are_not_duplicates() {
-    use crate::common::ErrorCode;
     use crate::testutils::{x_aux, x_model, x_project};
+    use simlin_base::common::ErrorCode;
 
     let project = x_project(
         dup_sim_specs(),
@@ -3858,7 +3864,7 @@ fn a_loop_both_phases_close_is_reported_once_wherever_the_walks_meet_it() {
         let sync = sync_from_datamodel(&db, &project);
         let cycles = collect_all_diagnostics(&db, sync.project, crate::db::LtmOverlay::Off)
             .into_iter()
-            .filter(|d| d.code() == crate::common::ErrorCode::CircularDependency)
+            .filter(|d| d.code() == simlin_base::common::ErrorCode::CircularDependency)
             .map(|d| (d.variable.clone(), d.reason().map(str::to_string)))
             .collect::<Vec<_>>();
         assert_eq!(

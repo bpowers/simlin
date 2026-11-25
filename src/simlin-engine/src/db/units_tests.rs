@@ -9,10 +9,10 @@
 //! keeps its address whether or not its body re-ran.
 
 use super::*;
-use crate::common::{Canonical, Ident};
-use crate::datamodel;
 use crate::db::exec_probe::ProbedDb;
 use crate::testutils::{sim_specs_with_units, x_aux, x_model, x_module, x_project};
+use simlin_base::common::{Canonical, Ident};
+use simlin_base::datamodel;
 
 // ── fixtures ────────────────────────────────────────────────────────────
 
@@ -224,7 +224,7 @@ fn every_spliced_stdlib_model_satisfies_the_strict_predicate() {
     }
     assert_eq!(
         seen,
-        crate::stdlib::MODEL_NAMES.len(),
+        simlin_base::stdlib::MODEL_NAMES.len(),
         "every stdlib model should be spliced into a synced project"
     );
 }
@@ -310,7 +310,7 @@ fn stdlib_templates_are_scalar_and_instantiate_no_module() {
     }
     assert_eq!(
         checked,
-        crate::stdlib::MODEL_NAMES.len(),
+        simlin_base::stdlib::MODEL_NAMES.len(),
         "every stdlib model must be reached by this check"
     );
 }
@@ -530,8 +530,8 @@ fn cycle_through_helper_project(cyclic: bool) -> datamodel::Project {
 /// collector reports the cycle for `main`.
 #[test]
 fn a_module_cycle_reached_through_a_per_element_helper_still_unit_checks() {
-    use crate::common::ErrorCode;
     use crate::db::lowered_implicit_variable;
+    use simlin_base::common::ErrorCode;
     use std::sync::Arc;
 
     let project = cycle_through_helper_project;
@@ -646,7 +646,7 @@ fn a_module_cycle_reached_through_a_per_element_helper_has_no_detected_loops() {
 /// absent from `main`'s inference map and the mismatch goes unreported.
 #[test]
 fn a_two_hop_cross_module_unit_mismatch_is_still_reported() {
-    use crate::common::ErrorCode;
+    use simlin_base::common::ErrorCode;
 
     let sub_c = x_model("sub_c", vec![x_aux("input", "0", Some("gadget"))]);
     let sub_a = x_model(
@@ -705,8 +705,8 @@ fn a_two_hop_cross_module_unit_mismatch_is_still_reported() {
 /// arrayed `pop` carries the axis.
 #[test]
 fn a_module_output_read_lowers_without_bounds_on_the_unit_path() {
-    use crate::ast::{Ast, Expr2};
-    use crate::builtins::BuiltinFn;
+    use simlin_base::ast::{Ast, Expr2};
+    use simlin_base::builtins::BuiltinFn;
 
     let db = SimlinDb::default();
     let project = arrayed_module_project();
@@ -894,7 +894,7 @@ fn a_nan_bearing_lowering_compares_equal_to_its_rebuild() {
         let second = build();
 
         let holds_nan = first.ast().is_some_and(|ast| match ast {
-            crate::ast::Ast::Scalar(e) => expr2_holds_nan(e),
+            simlin_base::ast::Ast::Scalar(e) => expr2_holds_nan(e),
             _ => false,
         });
         assert_eq!(
@@ -910,16 +910,16 @@ fn a_nan_bearing_lowering_compares_equal_to_its_rebuild() {
 }
 
 /// Does this `Expr2` tree contain a NaN literal? The fixture guard above.
-fn expr2_holds_nan(expr: &crate::ast::Expr2) -> bool {
-    use crate::ast::Expr2;
+fn expr2_holds_nan(expr: &simlin_base::ast::Expr2) -> bool {
+    use simlin_base::ast::Expr2;
     match expr {
         Expr2::Const(_, n, _) => n.value().is_nan(),
         Expr2::Var(..) | Expr2::Subscript(..) => false,
         Expr2::App(builtin, _, _) => {
             let mut found = false;
-            crate::builtins::walk_builtin_expr(builtin, |c| {
-                if let crate::builtins::BuiltinContents::Expr(inner)
-                | crate::builtins::BuiltinContents::LookupTable(inner) = c
+            simlin_base::builtins::walk_builtin_expr(builtin, |c| {
+                if let simlin_base::builtins::BuiltinContents::Expr(inner)
+                | simlin_base::builtins::BuiltinContents::LookupTable(inner) = c
                 {
                     found |= expr2_holds_nan(inner);
                 }

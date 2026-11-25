@@ -44,7 +44,7 @@ Before any of the below was implemented, conveyors failed **silently and
 confusingly**:
 
 1. **Import drops the block.** The XMILE reader struct `xmile::Stock`
-   (`src/simlin-engine/src/xmile/variables.rs`) has no field for `<conveyor>`;
+   (`src/simlin-formats/src/xmile/variables.rs`) has no field for `<conveyor>`;
    quick-xml ignores unknown child elements, so the conveyor spec is discarded.
 2. **Compilation then fails on the outflow.** A conveyor outflow MUST NOT have an
    equation (the conveyor drives it — XMILE §4.3).
@@ -684,7 +684,7 @@ changing a cohort's schedule.
 
 > **Implementation note.** Neither backend quantizes on an *exponential* belt:
 > `conveyor.rs`'s `leak_step` returns from its exponential arm before reaching the
-> integer block, and `wasmgen/belt.rs` mirrors it. Whether this section should be
+> integer block, and `src/simlin-wasmgen/src/belt.rs` mirrors it. Whether this section should be
 > scoped to the linear model, or the combination rejected outright, is GH #942.
 
 ## 6. Variable transit time, `<sample>`, and `<len>`
@@ -1061,10 +1061,10 @@ rejection, `src/simlin-engine/src/db/assemble.rs`).
 ### 9.5 wasmgen
 
 The WebAssembly backend mirrors the VM opcode-for-opcode with **no silent VM
-fallback** (established rule, `src/simlin-engine/src/wasmgen`).
+fallback** (established rule, `src/simlin-wasmgen/src`).
 The conveyor
 side table and update pass are lowered to wasm the same way the GF/snapshot
-regions are, by `src/simlin-engine/src/wasmgen/belt.rs`: each belt's slats live
+regions are, by `src/simlin-wasmgen/src/belt.rs`: each belt's slats live
 in a bump-allocated growable ring addressed by a static descriptor, and the
 per-DT phase A / phase B update is emitted as unrolled, plan-specialized code
 (the only runtime loops are over the dynamic slat count).
@@ -1080,7 +1080,7 @@ loudly by `belt::reject_unsupported`, and there are exactly two such conditions 
 see below.
 Both backends simulate belts in production, and the whole
 `test/conveyors/` corpus is gated on them agreeing column-for-column
-(`tests/integration/simulate.rs`, `simulate_special_path`).
+(`src/simlin-tests/tests/integration/simulate.rs`, `simulate_special_path`).
 
 The lowering covers everything but §8 spread inputs:
 
@@ -1253,14 +1253,14 @@ LTM-through-conveyor attribution is a separate enhancement.
 
 ### 9.7 Readers, writers, and other surfaces
 
-- XMILE reader/writer (`src/simlin-engine/src/xmile/variables.rs`): add the
+- XMILE reader/writer (`src/simlin-formats/src/xmile/variables.rs`): add the
   `<conveyor>` block and `<element>`-level plumbing to `Stock`, the leak
   properties and `isee:spreadflow`/`<isee:distrib_eq>` to `Flow`; accept both
   leak encodings ([§3.3](#33-leakage-flows)); emit the `<conveyor>` block and
   `<uses_conveyor/>`.
   This alone fixes the round-trip corruption.
 - MDL: Vensim has no conveyor primitive; the `delay conveyor` name recognized in
-  `src/simlin-engine/src/mdl/builtins.rs` is a distinct, separate function — not
+  `src/simlin-formats/src/mdl/builtins.rs` is a distinct, separate function — not
   a conveyor, not covered here.
 - JSON (`src/json.rs`), TypeScript datamodel (`src/core`), and the diagram
   editor extend once the engine representation lands; the diagram renders a
@@ -1268,7 +1268,7 @@ LTM-through-conveyor attribution is a separate enhancement.
 
 ### 9.8 Errors, units, and lifecycle
 
-**New diagnostics** (added to `ErrorCode` in `src/simlin-engine/src/common.rs`):
+**New diagnostics** (added to `ErrorCode` in `src/simlin-base/src/common.rs`):
 
 | Diagnostic | Severity | Trigger |
 |---|---|---|
@@ -1440,7 +1440,7 @@ wasm blob — reproduces the VM column-for-column, synthetic driven flows and
 container auxes included.
 
 That is round-trip fidelity and backend parity, not numeric truth.
-`wasmgen/belt.rs`
+`src/simlin-wasmgen/src/belt.rs`
 reproduces `conveyor.rs` bit for bit including its quirks (GH #942), so a shared
 belt-pass bug clears every gate here.
 The VM's own numerics are pinned automatically
@@ -1453,7 +1453,7 @@ Running the prototype from a Rust test against the fixtures below is deliberatel
 not done (GH #951).
 
 Each hand-authored fixture below has one `simulate_special_path` test in
-`tests/integration/simulate.rs`, listed in `CONVEYOR_CORPUS_FIXTURES`:
+`src/simlin-tests/tests/integration/simulate.rs`, listed in `CONVEYOR_CORPUS_FIXTURES`:
 
 - `minimal_conveyor.xmile` — transit time + capacity, single outflow, no leak.
   The clean core-conveyor oracle, at its steady state (`V = inflow · T`).

@@ -6,7 +6,6 @@
 //!
 //! Exposes the automatic diagram layout engine through the C FFI.
 
-use simlin_engine::{self as engine};
 use std::ffi::CStr;
 use std::os::raw::c_char;
 
@@ -85,7 +84,7 @@ pub unsafe extern "C" fn simlin_project_diagram_sync(
                 return;
             }
         };
-        let json_patch: engine::json::ProjectPatch = match serde_json::from_str(json_str) {
+        let json_patch: simlin_formats::json::ProjectPatch = match serde_json::from_str(json_str) {
             Ok(p) => p,
             Err(e) => {
                 store_error(
@@ -96,7 +95,7 @@ pub unsafe extern "C" fn simlin_project_diagram_sync(
                 return;
             }
         };
-        let engine_patch = engine::ProjectPatch::from(json_patch);
+        let engine_patch = simlin_base::ProjectPatch::from(json_patch);
         // Collect all patches for this model and merge their ops, because a
         // ProjectPatch may legally contain multiple ModelPatch entries for the
         // same model (e.g. two separate UpsertFlow ops on the same model).
@@ -113,7 +112,7 @@ pub unsafe extern "C" fn simlin_project_diagram_sync(
         if matching_ops.is_empty() {
             None
         } else {
-            Some(simlin_engine::ModelPatch {
+            Some(simlin_base::ModelPatch {
                 name: model_name_str.to_string(),
                 ops: matching_ops,
             })
@@ -140,7 +139,7 @@ pub unsafe extern "C" fn simlin_project_diagram_sync(
         .get_model(model_name_str)
         .and_then(|m| m.views.first())
         .map(|v| match v {
-            engine::datamodel::View::StockFlow(sf) => sf,
+            simlin_base::datamodel::View::StockFlow(sf) => sf,
         });
 
     let existing_zoom = old_view.map(|sf| sf.zoom).filter(|&z| z > 0.0);
@@ -170,7 +169,7 @@ pub unsafe extern "C" fn simlin_project_diagram_sync(
             // Clone required: old_sf borrows from datamodel_locked, but
             // incremental_layout also needs &datamodel_locked for the project.
             let old_sf = old_sf.clone();
-            engine::layout::incremental_layout(
+            simlin_layout::incremental_layout(
                 &old_sf,
                 &datamodel_locked,
                 model_name_str,
@@ -178,14 +177,14 @@ pub unsafe extern "C" fn simlin_project_diagram_sync(
                 db_state,
             )
         } else {
-            engine::layout::generate_best_layout(&datamodel_locked, model_name_str, db_state)
+            simlin_layout::generate_best_layout(&datamodel_locked, model_name_str, db_state)
         }
     } else if patch_was_provided && old_view.is_some_and(|sf| !sf.elements.is_empty()) {
         // Patch was provided but no ops target this model, and the model already has
         // a non-empty view. Preserve the existing layout unchanged.
         return;
     } else {
-        engine::layout::generate_best_layout(&datamodel_locked, model_name_str, db_state)
+        simlin_layout::generate_best_layout(&datamodel_locked, model_name_str, db_state)
     };
 
     let mut layout = match new_view {
@@ -207,7 +206,7 @@ pub unsafe extern "C" fn simlin_project_diagram_sync(
     // layout syncs the first view only; any other view the project carries is
     // the author's and stays as it was.
     let model = datamodel_locked.get_model_mut(model_name_str).unwrap();
-    let view = engine::datamodel::View::StockFlow(layout);
+    let view = simlin_base::datamodel::View::StockFlow(layout);
     match model.views.first_mut() {
         Some(first) => *first = view,
         None => model.views.push(view),

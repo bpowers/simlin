@@ -27,13 +27,14 @@
 //! still compiles and computes something else. The last tests pin it over the
 //! builtin table.
 
-use crate::common::{ErrorCode, Ident};
-use crate::datamodel;
 use crate::db::{
     SimlinDb, collect_all_diagnostics, compile_project_incremental, sync_from_datamodel_incremental,
 };
-use crate::patch::{ModelOperation, ModelPatch, ProjectPatch, apply_patch};
 use crate::test_common::TestProject;
+use simlin_base::common::{ErrorCode, Ident};
+use simlin_base::datamodel;
+use simlin_base::project_patch::{ModelOperation, ModelPatch, ProjectPatch};
+use simlin_edit::patch::apply_patch;
 
 /// The equation-language keywords in their `name=` spelling.
 ///
@@ -62,7 +63,7 @@ const KEYWORD_MODEL_VARS: &str = r#"
         <aux name="c"><eqn>b + 1</eqn></aux>"#;
 
 fn read_xmile(vars: &str) -> datamodel::Project {
-    crate::compat::open_xmile(&mut xmile_doc(vars).as_bytes()).expect("XMILE must parse")
+    simlin_formats::compat::open_xmile(&mut xmile_doc(vars).as_bytes()).expect("XMILE must parse")
 }
 
 /// Diagnostics production would report for `project`, via the incremental path.
@@ -144,7 +145,7 @@ fn mdl_reader_admits_a_keyword_named_variable() {
                  c = b + 1\n\t~\t\n\t~\t|\n\n\
                  \\\\\\---/// Sketch information - do not modify anything except names\n"
             );
-            let project = crate::compat::open_vensim(&mdl)
+            let project = simlin_formats::compat::open_vensim(&mdl)
                 .unwrap_or_else(|e| panic!("MDL must parse ({keyword}, {reference}): {e:?}"));
 
             let mut idents: Vec<&str> = project.models[0]
@@ -199,7 +200,7 @@ fn a_bare_nan_reference_in_mdl_is_still_the_literal() {
         "b = nan * 2\n\t~\t\n\t~\t|\n\n",
         "\\\\\\---/// Sketch information - do not modify anything except names\n"
     );
-    let project = crate::compat::open_vensim(mdl).expect("MDL must parse");
+    let project = simlin_formats::compat::open_vensim(mdl).expect("MDL must parse");
 
     // Compiles clean either way, which is what makes the case silent: the
     // diagnostics channel cannot see it, only the number can.
@@ -219,7 +220,7 @@ fn a_bare_nan_reference_in_mdl_is_still_the_literal() {
         "b = mod * 2\n\t~\t\n\t~\t|\n\n",
         "\\\\\\---/// Sketch information - do not modify anything except names\n"
     );
-    let project = crate::compat::open_vensim(mdl_mod).expect("MDL must parse");
+    let project = simlin_formats::compat::open_vensim(mdl_mod).expect("MDL must parse");
     assert_compiles_clean(&project, "the bare-`mod` MDL model");
     assert_eq!(6.0, final_value(&project, "b"));
 }
@@ -253,7 +254,7 @@ fn a_placeholder_round_trips_even_when_nan_names_a_variable() {
     );
 
     for (label, src) in [("declares `nan`", with_nan), ("control", without_nan)] {
-        let first = crate::compat::open_vensim(src).expect("MDL must parse");
+        let first = simlin_formats::compat::open_vensim(src).expect("MDL must parse");
         assert_eq!(
             Some(datamodel::Equation::Scalar("NAN".to_string())),
             placeholder_equation(&first),
@@ -264,8 +265,8 @@ fn a_placeholder_round_trips_even_when_nan_names_a_variable() {
             "{label}: a variable with no equation must evaluate to NaN"
         );
 
-        let written = crate::mdl::project_to_mdl(&first).expect("MDL must write");
-        let second = crate::compat::open_vensim(&written).expect("re-import must parse");
+        let written = simlin_formats::mdl::project_to_mdl(&first).expect("MDL must write");
+        let second = simlin_formats::compat::open_vensim(&written).expect("re-import must parse");
         // Compared case-insensitively: the placeholder arrives as `NAN` from the
         // importer's `A FUNCTION OF` arm and comes back as `NaN` from the
         // writer's `Const` text. Both lex to the NaN literal, and that -- not
@@ -436,7 +437,10 @@ fn renaming_to_an_unspellable_name_is_refused() {
 
     let (result, project) = rename_to("x\"y");
     let err = result.expect_err("a rename to a `\"`-bearing name must be refused");
-    assert_eq!(crate::common::ErrorCode::UnclosedQuotedIdent, err.code);
+    assert_eq!(
+        simlin_base::common::ErrorCode::UnclosedQuotedIdent,
+        err.code
+    );
     assert_compiles_clean(&project, "the model a refused rename left alone");
     assert!(
         project.models[0]
@@ -464,7 +468,7 @@ fn renaming_to_an_unspellable_name_is_refused() {
 /// Every zero-argument builtin's name and alias, from the signature table, so
 /// a builtin added there has a row in the two tests below.
 fn nullary_builtin_names() -> Vec<&'static str> {
-    crate::builtins::BuiltinSig::ALL
+    simlin_base::builtins::BuiltinSig::ALL
         .iter()
         .filter(|sig| sig.max_args == Some(0))
         .flat_map(|sig| std::iter::once(sig.name).chain(sig.aliases.iter().copied()))
@@ -552,7 +556,7 @@ fn mdl_with_control(variables: &str) -> datamodel::Project {
          SAVEPER = TIME STEP\n\t~\t\n\t~\t|\n\n\
          \\\\\\---/// Sketch information - do not modify anything except names\n"
     );
-    crate::compat::open_vensim(&mdl).expect("MDL must parse")
+    simlin_formats::compat::open_vensim(&mdl).expect("MDL must parse")
 }
 
 // A Vensim model may declare a variable named like one of this engine's
@@ -591,41 +595,6 @@ fn an_mdl_flow_list_name_and_a_net_flow_expression_read_the_same_variable() {
     assert_compiles_clean(&project, "the two stocks");
     assert_eq!(final_value(&project, "s"), 0.25 * 2.0, "over 2 months");
     assert_eq!(final_value(&project, "t"), 0.25 * 2.0, "over 2 months");
-}
-
-/// An MDL save of `dt = TIME STEP` writes it as it was, and a reference to
-/// `dt` as the variable: the corpus model that declares it saves its
-/// definition so and keeps its run.
-#[test]
-fn an_mdl_save_writes_a_variable_defined_as_the_time_step_as_it_was() {
-    let project = mdl_with_control(
-        "dt = TIME STEP\n\t~\t\n\t~\t|\n\n\
-         x = dt * 2\n\t~\t\n\t~\t|\n\n",
-    );
-    let written = crate::compat::to_mdl(&project).expect("MDL must write");
-    let lines: Vec<&str> = written.lines().map(str::trim).collect();
-    assert!(lines.contains(&"dt = TIME STEP"), "{written}");
-    assert!(lines.contains(&"x = dt * 2"), "{written}");
-    let read_back = crate::compat::open_vensim(&written).expect("the save reads");
-    assert_eq!(final_value(&read_back, "dt"), 0.125);
-    assert_eq!(final_value(&read_back, "x"), 0.25);
-
-    let theil = std::fs::read_to_string("../../test/metasd/theil-statistics/Theil_2011.mdl")
-        .expect("the corpus file reads");
-    let theil = crate::compat::open_vensim(&theil).expect("the corpus file imports");
-    let written = crate::compat::to_mdl(&theil).expect("MDL must write");
-    assert!(
-        written.lines().any(|line| line.trim() == "dt = TIME STEP"),
-        "{written}"
-    );
-    let results: Vec<String> =
-        crate::save_check::check_save(&theil, crate::save_check::SaveFormat::Mdl)
-            .expect("the check runs")
-            .into_iter()
-            .filter(|c| c.kind == crate::save_check::ChangeKind::Results)
-            .map(|c| c.reason)
-            .collect();
-    assert_eq!(results, Vec::<String>::new());
 }
 
 /// A quoted builtin name the model declares no variable of is a name the
@@ -735,7 +704,7 @@ fn a_variable_named_like_a_builtin_is_scored_under_ltm() {
 }
 
 /// A variable named for one of the slots the VM keeps for the clock and the
-/// run's specs (`vm::TIME_OFF`, `DT_OFF`, `INITIAL_TIME_OFF`,
+/// run's specs (`results::TIME_OFF`, `DT_OFF`, `INITIAL_TIME_OFF`,
 /// `FINAL_TIME_OFF`) takes that slot's key in the results: the column of
 /// the name is the variable's series, and the clock is read from its slot.
 #[test]
@@ -753,7 +722,7 @@ fn a_variable_named_for_a_clock_slot_takes_its_results_key() {
         assert_eq!(column, [42.0, 42.0, 42.0], "{name}");
         let clock: Vec<f64> = results
             .iter()
-            .map(|row| row[crate::results::TIME_OFF])
+            .map(|row| row[simlin_base::results::TIME_OFF])
             .collect();
         assert_eq!(clock, [1.0, 2.0, 3.0], "{name}");
     }

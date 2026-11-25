@@ -4,7 +4,7 @@
 
 //! Standalone simulation-results FFI.
 //!
-//! `SimlinResults` is an opaque handle around an `engine::Results` table that
+//! `SimlinResults` is an opaque handle around an `simlin_base::Results` table that
 //! is not tied to a project/model/sim. Today the only producer is
 //! [`simlin_results_open_vdf`], which imports a Vensim VDF file (run,
 //! sensitivity-run, or dataset container, auto-detected by magic). The
@@ -12,8 +12,8 @@
 //! (step count, variable names, per-variable series) so callers consume the
 //! two surfaces identically.
 
-use simlin_engine::common::{Canonical, Ident};
-use simlin_engine::{self as engine, vdf};
+use simlin_base::common::{Canonical, Ident};
+use simlin_formats::vdf;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_double};
 use std::ptr;
@@ -30,7 +30,7 @@ use crate::{
 /// magic: run/sensitivity containers go through
 /// `VdfFile::to_results_via_records`, dataset containers through
 /// `VdfDatasetFile::extract_data`.
-fn parse_vdf_results(bytes: Vec<u8>) -> Result<engine::Results, String> {
+fn parse_vdf_results(bytes: Vec<u8>) -> Result<simlin_base::Results, String> {
     match vdf::probe_vdf_kind(&bytes) {
         Some(vdf::VdfKind::SimulationResults) | Some(vdf::VdfKind::SensitivityRun) => {
             let file = vdf::VdfFile::parse(bytes).map_err(|err| format!("parsing VDF: {err}"))?;

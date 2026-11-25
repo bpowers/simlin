@@ -11,8 +11,8 @@
 //! `ltm_augment.rs` under the project line-count lint; it is `#[path]`-mounted
 //! as a child module, so callers still name it `crate::ltm_augment::*`.
 
-use crate::ast::Expr0;
-use crate::builtins::UntypedBuiltinFn;
+use simlin_base::ast::Expr0;
+use simlin_base::builtins::UntypedBuiltinFn;
 
 /// Build the `PREVIOUS` call an LTM ceteris-paribus walker freezes `expr` with,
 /// choosing the FIRST-DT initial value from the position `expr` occupies.
@@ -33,7 +33,7 @@ use crate::builtins::UntypedBuiltinFn;
 /// observed as `0, NaN, 0.4974...`). A NaN the engine manufactures is
 /// indistinguishable on a graph from the modeller's own division by zero, which
 /// is what makes this a defect rather than a cosmetic wart (see
-/// [`crate::float`]'s module docs).
+/// [`simlin_base::float`]'s module docs).
 ///
 /// In index position the un-lagged index is the only well-defined answer -- at
 /// the first DT "the index one step ago" IS the current index -- and it is in
@@ -54,7 +54,7 @@ use crate::builtins::UntypedBuiltinFn;
 /// doubly-lagged read such a helper performs.
 pub(super) fn freeze_at_previous(
     expr: Expr0,
-    loc: crate::builtins::Loc,
+    loc: simlin_base::builtins::Loc,
     in_subscript_index: bool,
 ) -> Expr0 {
     let args: Box<[Expr0]> = if in_subscript_index {

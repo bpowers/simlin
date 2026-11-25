@@ -3,8 +3,7 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 //! The salsa INPUT layer: the interned key types
-//! (`LtmLinkId`/`ModuleInputSet`), the variable-kind
-//! tag (`SourceVariableKind`), the three `#[salsa::input]` structs
+//! (`LtmLinkId`/`ModuleInputSet`), the three `#[salsa::input]` structs
 //! (`SourceProject`/`SourceModel`/`SourceVariable`) that hold the synced
 //! datamodel field-by-field for fine-grained invalidation, the
 //! `source_var_is_table_only` lookup-only predicate, and the borrowed
@@ -13,7 +12,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use super::*;
-use crate::common::{Canonical, Ident};
+use simlin_base::common::{Canonical, Ident};
 
 // ── Interned identifiers ───────────────────────────────────────────────
 
@@ -80,27 +79,6 @@ impl<'db> ModuleInputSet<'db> {
             .iter()
             .map(|name| Ident::<Canonical>::new(name))
             .collect()
-    }
-}
-
-// ── Variable kind ──────────────────────────────────────────────────────
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum SourceVariableKind {
-    Stock,
-    Flow,
-    Aux,
-    Module,
-}
-
-impl SourceVariableKind {
-    pub(crate) fn from_datamodel_variable(var: &datamodel::Variable) -> Self {
-        match var {
-            datamodel::Variable::Stock(_) => SourceVariableKind::Stock,
-            datamodel::Variable::Flow(_) => SourceVariableKind::Flow,
-            datamodel::Variable::Aux(_) => SourceVariableKind::Aux,
-            datamodel::Variable::Module(_) => SourceVariableKind::Module,
-        }
     }
 }
 
@@ -294,7 +272,7 @@ pub(crate) fn source_var_is_table_only(db: &dyn Db, var: SourceVariable) -> bool
 pub(crate) fn model_is_stdlib(canonical_model_name: &str) -> bool {
     canonical_model_name
         .strip_prefix("stdlib\u{205A}")
-        .is_some_and(|suffix| crate::stdlib::MODEL_NAMES.contains(&suffix))
+        .is_some_and(|suffix| simlin_base::stdlib::MODEL_NAMES.contains(&suffix))
 }
 
 /// [`model_is_stdlib`] for a salsa model handle.

@@ -8,20 +8,20 @@
 //!
 //! Loads a project via [`ProjectAccess`] and returns a snapshot enriched
 //! with the engine's loop-dominance analysis.  All I/O is delegated to
-//! the access impl so the same body runs against either a stateless
-//! filesystem-backed impl or the registry-backed impl introduced in
-//! Phase 6.
+//! the access impl.
 
 use std::path::Path;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use simlin_engine::json;
+use simlin_formats::json;
 
 use crate::access::ProjectAccess;
 use crate::errors::AccessError;
 use crate::open::resolve_model_name;
-use crate::types::{DominantPeriodOutput, ErrorOutput, LoopDominanceSummary, PartitionOutput};
+use crate::types::{
+    DominantPeriodOutput, ErrorOutput, LoopDominanceSummary, PartitionOutput, model_snapshot,
+};
 
 /// Input for the `ReadModel` tool.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -170,6 +170,7 @@ pub async fn read_model<A: ProjectAccess>(
         simlin_engine::analysis::analyze_model(&project, &mut db, source_project, model_name, None)
             .map_err(|e| AccessError::ParseError(anyhow::anyhow!("analysis failed: {e}")))?;
 
+    let model = model_snapshot(&project, model_name)?;
     let agg_recovery_truncated = analysis.agg_recovery_truncated;
     let truncated = analysis.truncated;
     let enumeration_complete = analysis.enumeration_complete;
@@ -189,7 +190,7 @@ pub async fn read_model<A: ProjectAccess>(
         .collect();
 
     Ok(ReadModelOutput {
-        model: analysis.model,
+        model,
         time: analysis.time,
         loop_dominance,
         partitions,
@@ -216,7 +217,7 @@ pub async fn read_model<A: ProjectAccess>(
 /// pattern: Functional Core -- pure over its inputs (no I/O).
 fn format_model_diagnostics(
     diagnostics: &[simlin_engine::db::Diagnostic],
-    project: &simlin_engine::datamodel::Project,
+    project: &simlin_base::datamodel::Project,
     model_name: &str,
 ) -> (Vec<ErrorOutput>, Vec<ErrorOutput>) {
     use simlin_engine::db::DiagnosticSeverity;

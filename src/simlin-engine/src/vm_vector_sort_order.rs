@@ -46,7 +46,7 @@ use crate::vm::{ChunkRegions, Vm, increment_indices};
 /// (`SORT ORDER[*]` ranges over `0..n-1` and contains `0`, impossible for a
 /// 1-based permutation) and Ventana's official VECTOR SORT ORDER reference.
 /// (RANK is a distinct, correctly 1-based opcode, per the same file.)
-pub(crate) fn vector_sort_order(
+pub fn vector_sort_order(
     input_view: &RuntimeView,
     direction: i32,
     write_temp_id: TempId,

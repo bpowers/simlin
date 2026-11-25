@@ -8,7 +8,7 @@
 //! A host draws a model's scene (`simlin_project_render_scene`) and routes its
 //! input through these entry points, which plan against the model's first
 //! stock-and-flow view as it is when a tap lands or a drag begins
-//! (`simlin_engine::editing`). Every edit comes back as a JSON project patch the
+//! (`simlin_edit::editing`). Every edit comes back as a JSON project patch the
 //! host applies with `simlin_project_apply_patch`, so an edit lands through the
 //! one patch path with its validation and error collection; a view edit's model
 //! operations are derived when it applies (`ModelOperation::EditView`).
@@ -18,8 +18,9 @@
 //! test and the press planned from its hit read the same contents.
 
 use serde::Serialize;
-use simlin_engine::diagram::SceneElement;
-use simlin_engine::{self as engine, datamodel, editing};
+use simlin_base::datamodel;
+use simlin_diagram::SceneElement;
+use simlin_edit::editing;
 use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::ptr;
@@ -246,7 +247,7 @@ struct FrameJson<'a> {
 enum OpJson {
     EditView {
         index: u32,
-        upsert: Vec<engine::json::ViewElement>,
+        upsert: Vec<simlin_formats::json::ViewElement>,
         remove: Vec<i32>,
     },
     RenameVariable {
@@ -332,7 +333,7 @@ unsafe fn require_outputs(
 }
 
 /// The element and part of the model's diagram that `(x, y)` (model
-/// coordinates) lands on, decided in `simlin_engine::editing::HitIndex`'s tiers:
+/// coordinates) lands on, decided in `simlin_edit::editing::HitIndex`'s tiers:
 /// a body firmly holding the point, else an end handle within reach, else a
 /// label holding the point, else the nearest drawing within `tolerance` model
 /// units (the host's touch slop divided by the zoom). Writes `*out_hit = false`
@@ -675,7 +676,7 @@ pub unsafe extern "C" fn simlin_gesture_unref(gesture: *mut SimlinGesture) {
 
 /// Plan moving `selection` (`selection_len` uids) by `(dx, dy)` model units,
 /// independent of the zoom: the frame a move-selection drag of the selection
-/// plans for that travel (`simlin_engine::editing::plan_move`), which a host
+/// plans for that travel (`simlin_edit::editing::plan_move`), which a host
 /// plans to nudge the selection from the keyboard. Positioned elements move,
 /// flows follow their moved ends, a selected flow neither of whose ends moves
 /// slides its valve along its pipe, and a link moves only with its endpoints.

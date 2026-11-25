@@ -56,8 +56,7 @@ pub struct SimlinResults {
 /// `SimlinLoop.polarity_confidence` / `SimlinDiscoveredLoop.polarity_confidence`
 /// carries the `[0.0, 1.0]` confidence ratio behind the classification.
 #[repr(C)]
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SimlinLoopPolarity {
     Reinforcing = 0,
     Balancing = 1,
@@ -96,8 +95,7 @@ pub enum SimlinLtmMode {
 
 /// JSON format specifier for C API
 #[repr(C)]
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SimlinJsonFormat {
     Native = 0,
     Sdai = 1,
@@ -105,8 +103,7 @@ pub enum SimlinJsonFormat {
 
 /// The format `simlin_project_check_save` checks a save in.
 #[repr(C)]
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SimlinSaveFormat {
     Mdl = 0,
     Xmile = 1,
@@ -130,9 +127,9 @@ impl TryFrom<u32> for SimlinSaveFormat {
     }
 }
 
-impl From<SimlinSaveFormat> for simlin_engine::save_check::SaveFormat {
+impl From<SimlinSaveFormat> for simlin_save_check::SaveFormat {
     fn from(format: SimlinSaveFormat) -> Self {
-        use simlin_engine::save_check::SaveFormat;
+        use simlin_save_check::SaveFormat;
         match format {
             SimlinSaveFormat::Mdl => SaveFormat::Mdl,
             SimlinSaveFormat::Xmile => SaveFormat::Xmile,

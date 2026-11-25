@@ -3,12 +3,12 @@
 // Version 2.0, that can be found in the LICENSE file.
 
 use super::{compile_ltm_equation_fragment, scalarize_ltm_equation};
-use crate::datamodel;
 use crate::db::{
     LtmLinkId, RefShape, ShapedLinkScore, SimlinDb, compute_layout, shaped_link_score,
     sync_from_datamodel,
 };
 use crate::test_common::TestProject;
+use simlin_base::datamodel;
 
 /// The bare-element rule at each of the two parse boundaries, for both
 /// intrinsics. The source parse resolves `base_val[b2]` against `base_val`'s
@@ -1597,7 +1597,7 @@ fn colliding_index_boston_series(project: &datamodel::Project) -> Vec<u64> {
         .expect("the pop[nyc]->share link score must be emitted");
     // `+ 1` is the `boston` slot: `Region = [nyc, boston, la]`, laid out in
     // declaration order.
-    let base = offsets[&crate::common::Ident::new(&name)] + 1;
+    let base = offsets[&simlin_base::common::Ident::new(&name)] + 1;
     // Compared by BIT PATTERN, so a difference cannot hide in a rounding
     // tolerance -- the claim is that the two models produce the same score, not
     // a similar one.
@@ -1740,7 +1740,7 @@ fn an_index_naming_the_axis_own_element_stays_a_static_selector() {
 /// target's).
 ///
 /// This test constrains ONE arm of
-/// [`crate::dimensions::resolve_axis_index_name`] as the wrap consumes it:
+/// [`simlin_base::dimensions::resolve_axis_index_name`] as the wrap consumes it:
 /// `Unresolved` where the name is a DIMENSION. The other two arms are covered,
 /// and not here:
 ///
@@ -2248,7 +2248,7 @@ fn a_many_to_one_mapped_read_is_scored_per_row_and_element() {
 /// asserted, and the second is what makes the first mean anything.
 #[test]
 fn a_lookup_table_index_is_element_pinned_in_a_per_element_partial() {
-    use crate::datamodel::{
+    use simlin_base::datamodel::{
         Equation, GraphicalFunction, GraphicalFunctionKind, GraphicalFunctionScale, Variable,
     };
 
@@ -2268,7 +2268,7 @@ fn a_lookup_table_index_is_element_pinned_in_a_per_element_partial() {
         },
     };
     // A lookup-only holder: empty equation text, the table carried per element.
-    let tbl = Variable::Aux(crate::datamodel::Aux {
+    let tbl = Variable::Aux(simlin_base::datamodel::Aux {
         ident: "tbl".to_string(),
         equation: Equation::Arrayed(
             vec!["region".to_string()],
@@ -2284,7 +2284,7 @@ fn a_lookup_table_index_is_element_pinned_in_a_per_element_partial() {
         gf: None,
         ai_state: None,
         uid: None,
-        compat: crate::datamodel::Compat::default(),
+        compat: simlin_base::datamodel::Compat::default(),
     });
 
     let mut project = TestProject::new("lookup_pin")
@@ -2332,7 +2332,7 @@ fn a_lookup_table_index_is_element_pinned_in_a_per_element_partial() {
     let mut vm = crate::vm::Vm::new(compiled).expect("vm");
     vm.run_to_end().expect("run");
     let results = vm.into_results();
-    let base = offsets[&crate::common::Ident::new(&score_name)];
+    let base = offsets[&simlin_base::common::Ident::new(&score_name)];
     let series: Vec<f64> = (0..results.step_count)
         .map(|s| results.data[s * results.step_size + base])
         .collect();
@@ -2378,7 +2378,7 @@ fn a_lookup_table_index_is_element_pinned_in_a_per_element_partial() {
         .keys()
         .map(|k| k.as_str().to_string())
         .find(|k| k == "$\u{205A}ltm\u{205A}link_score\u{205A}factor\u{2192}out[a]")
-        .map(|n| offsets[&crate::common::Ident::new(&n)])
+        .map(|n| offsets[&simlin_base::common::Ident::new(&n)])
         .expect("the factor->out[a] per-element link score must be emitted");
     let series_a: Vec<f64> = (0..results.step_count)
         .map(|s| results.data[s * results.step_size + a_off])
@@ -2617,7 +2617,7 @@ fn the_ltm_fragment_body_counter_observes_a_cold_compile() {
 }
 
 /// The first arm's shared AST of an LTM equation, whatever its shape.
-fn first_arm_expr(eq: &crate::db::LtmEquation) -> &std::sync::Arc<crate::ast::Expr0> {
+fn first_arm_expr(eq: &crate::db::LtmEquation) -> &std::sync::Arc<simlin_base::ast::Expr0> {
     use crate::db::LtmEquation;
     let arm = match eq {
         LtmEquation::Scalar(arm) | LtmEquation::ApplyToAll(_, arm) => arm,
@@ -2717,7 +2717,7 @@ fn delay3_ramp_project(in_submodel: bool) -> datamodel::Project {
   {sub_model}
 </xmile>"#
     );
-    crate::compat::open_xmile(&mut source.as_bytes()).expect("the XMILE fixture imports")
+    simlin_formats::compat::open_xmile(&mut source.as_bytes()).expect("the XMILE fixture imports")
 }
 
 /// The `input -> stock` link score of a `DELAY3` instance reads the bound

@@ -33,12 +33,12 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use crate::common::{Canonical, Ident, IdentMap, IdentSet, Result};
-use crate::datamodel;
 use crate::db::LtmSyntheticVar;
 use crate::ltm::{CausalGraph, CyclePartitions, Link, LinkPolarity, Loop, LoopPolarity};
 use crate::ltm_post::{NormGroup, group_totals, relative_series};
-use crate::results::Results;
+use simlin_base::common::{Canonical, Ident, IdentMap, IdentSet, Result};
+use simlin_base::datamodel;
+use simlin_base::results::Results;
 
 // Union-graph circuit enumeration: discovery's primary candidate generator
 // (docs/design-plans/2026-08-17-ltm-discovery-exact.md). A sibling file
@@ -146,9 +146,9 @@ pub struct LinkExpansionContext {
     /// Canonical variable name -> declared dimensions, in declared order.
     /// Holds BOTH endpoints of every Bare A2A edge (the from-side projection
     /// reads the from-var's dims, the to-side offset map reads the to-var's).
-    pub declared_dims: IdentMap<Ident<Canonical>, Vec<crate::dimensions::Dimension>>,
+    pub declared_dims: IdentMap<Ident<Canonical>, Vec<simlin_base::dimensions::Dimension>>,
     /// Dimension-mapping element correspondence for the mapped (#527) leg.
-    pub dim_ctx: crate::dimensions::DimensionsContext,
+    pub dim_ctx: simlin_base::dimensions::DimensionsContext,
     /// The structural `(flow, stock)` edges: a flow feeds its stock through
     /// the wiring's axis pairing (`db::BareSpelling::StockFlow`), every other
     /// Bare link through the equation's.
@@ -163,7 +163,7 @@ const MAX_LOOPS: usize = 200;
 /// Minimum peak relative contribution to keep a loop (0.1%).
 const MIN_CONTRIBUTION: f64 = 0.001;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// Test-only override of [`MAX_LOOPS`], scoped by an active
     /// [`MaxLoopsGuard`]. Lets a test exercise the global cap (and its
@@ -176,10 +176,10 @@ thread_local! {
 }
 
 /// The loop cap for the current `rank_and_filter` call. Returns [`MAX_LOOPS`]
-/// in production builds; in `#[cfg(test)]` builds an active [`MaxLoopsGuard`]
+/// in production builds; in test builds an active [`MaxLoopsGuard`]
 /// override takes precedence.
 fn max_loops() -> usize {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     {
         if let Some(n) = MAX_LOOPS_OVERRIDE.with(|c| c.get()) {
             return n;
@@ -192,20 +192,20 @@ fn max_loops() -> usize {
 /// for the guard's lifetime, restoring the previous value on drop -- so a
 /// panicking test does not leak the override to the next test reusing the
 /// thread.
-#[cfg(test)]
-pub(crate) struct MaxLoopsGuard {
+#[cfg(any(test, feature = "test-support"))]
+pub struct MaxLoopsGuard {
     prev: Option<usize>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl MaxLoopsGuard {
-    pub(crate) fn new(cap: usize) -> Self {
+    pub fn new(cap: usize) -> Self {
         let prev = MAX_LOOPS_OVERRIDE.with(|c| c.replace(Some(cap)));
         Self { prev }
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for MaxLoopsGuard {
     fn drop(&mut self) {
         MAX_LOOPS_OVERRIDE.with(|c| c.set(self.prev));
@@ -224,7 +224,7 @@ impl Drop for MaxLoopsGuard {
 /// 2,979 survivors' series ~29 MB at 401 saved steps); C-LEARN under 10 MB.
 pub(crate) const MAX_DISCOVERY_MEMORY_BYTES: usize = 768 * 1024 * 1024;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// Test-only override of [`MAX_DISCOVERY_MEMORY_BYTES`], scoped by an
     /// active [`MemoryBudgetGuard`], so tiny fixtures can trip every phase's
@@ -235,7 +235,7 @@ thread_local! {
 
 /// The effective discovery memory bound.
 fn max_discovery_memory_bytes() -> usize {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     {
         if let Some(b) = MEMORY_BUDGET_OVERRIDE.with(|c| c.get()) {
             return b;
@@ -246,20 +246,20 @@ fn max_discovery_memory_bytes() -> usize {
 
 /// RAII guard (test-only) overriding [`max_discovery_memory_bytes`] for the
 /// current thread; restores the previous value on drop.
-#[cfg(test)]
-pub(crate) struct MemoryBudgetGuard {
+#[cfg(any(test, feature = "test-support"))]
+pub struct MemoryBudgetGuard {
     prev: Option<usize>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl MemoryBudgetGuard {
-    pub(crate) fn new(bytes: usize) -> Self {
+    pub fn new(bytes: usize) -> Self {
         let prev = MEMORY_BUDGET_OVERRIDE.with(|c| c.replace(Some(bytes)));
         Self { prev }
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for MemoryBudgetGuard {
     fn drop(&mut self) {
         MEMORY_BUDGET_OVERRIDE.with(|c| c.set(self.prev));
@@ -342,7 +342,7 @@ const LTM_LINK_SEP: char = '→';
 // --- Public types ---
 
 /// A loop found by discovery, with its scores over time.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Debug)]
 pub struct FoundLoop {
     /// The loop structure (reuses existing Loop type from ltm.rs)
     pub loop_info: Loop,
@@ -421,7 +421,7 @@ pub struct DiscoveredPartition {
 /// wall-clock time and report partial results rather than hang. See
 /// `enumeration_complete` below for the completeness statement of an
 /// un-truncated run.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Debug)]
 pub struct DiscoveryResult {
     /// Loops discovered (ranked, filtered, and ID-assigned).
     pub loops: Vec<FoundLoop>,
@@ -494,8 +494,8 @@ pub struct DiscoveryResult {
     /// `Some` exactly when the fallback ran -- the mirror of `universe_loops`
     /// being `Some` exactly when the enumeration ran, so a caller never has to
     /// ask `enumeration_complete` twice to know which candidate-count field to
-    /// read. Reported by `examples/ltm_discovery_bench` and
-    /// `examples/ltm_fallback_eval` alongside the enumeration's `universe_loops`
+    /// read. Reported by `simlin-tests/examples/ltm_discovery_bench` and
+    /// `simlin-tests/examples/ltm_fallback_eval` alongside the enumeration's `universe_loops`
     /// so the two generators' candidate VOLUMES are directly comparable, not
     /// only their final reported counts (which retention and the cap both
     /// shrink).
@@ -555,7 +555,7 @@ pub type LinkScoreOffset = ((Ident<Canonical>, Ident<Canonical>), usize);
 ///
 /// Exposed for analysis and diagnostic tooling that needs to reason about the
 /// edges discovery actually consumes -- notably
-/// `examples/ltm_edge_coverage.rs`, which reports how many causal edges carry a
+/// `simlin-tests/examples/ltm_edge_coverage.rs`, which reports how many causal edges carry a
 /// live score. Such a tool must not re-derive this mapping: an A2A score
 /// occupies one slot per element and the projection is subtle enough that a
 /// second implementation would drift, and a measuring instrument that disagrees
@@ -589,7 +589,7 @@ pub fn cross_agg_stitching_limits() -> (usize, usize) {
 /// every edge in [`link_score_offsets`]' order. Identical to the recorded series
 /// except on module-input edges, where an audit that derived activity from the
 /// raw composite alone would drop cycles production enumerates. Exposed for the
-/// audit instrument (`examples/ltm_search_graph_dump.rs`) for the same reason the
+/// audit instrument (`simlin-tests/examples/ltm_search_graph_dump.rs`) for the same reason the
 /// edge set is: it must consume what discovery consumes, never re-derive it.
 pub fn link_activity_series(
     results: &Results,
@@ -651,7 +651,7 @@ fn parse_link_offsets(
     let ltm_var_map: HashMap<String, &LtmSyntheticVar> = ltm_vars
         .iter()
         .filter(|v| v.name.contains(LINK_SCORE_PREFIX))
-        .map(|v| (crate::common::canonicalize(&v.name).into_owned(), v))
+        .map(|v| (simlin_base::common::canonicalize(&v.name).into_owned(), v))
         .collect();
 
     // Phase 1: parse every variable into one or more `(LinkOffset,
@@ -961,10 +961,11 @@ fn resolve_dim_element_tuples(
     let dim_elements: Vec<Vec<String>> = var_dims
         .iter()
         .filter_map(|dim_name| {
-            let canonical_dim_name = crate::common::canonicalize(dim_name);
+            let canonical_dim_name = simlin_base::common::canonicalize(dim_name);
             dims.iter()
                 .find(|d| {
-                    crate::common::canonicalize(d.name()).as_ref() == canonical_dim_name.as_ref()
+                    simlin_base::common::canonicalize(d.name()).as_ref()
+                        == canonical_dim_name.as_ref()
                 })
                 .map(datamodel_dim_element_names)
         })
@@ -1009,7 +1010,7 @@ fn datamodel_dim_element_names(dim: &datamodel::Dimension) -> Vec<String> {
     match &dim.elements {
         datamodel::DimensionElements::Named(names) => names
             .iter()
-            .map(|n| crate::common::canonicalize(n).into_owned())
+            .map(|n| simlin_base::common::canonicalize(n).into_owned())
             .collect(),
         datamodel::DimensionElements::Indexed(size) => (1..=*size).map(|i| i.to_string()).collect(),
     }
@@ -1097,8 +1098,7 @@ fn trim_synthetic_aggs_from_loop_links(links: &[Link]) -> Option<Vec<Link>> {
 /// owns whatever string/score representation it ultimately serializes.
 /// `score` is `None` for a structural-only caller (no simulation results) and
 /// `Some(series)` for an LTM run; the collapse preserves the distinction.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct CollapsibleLink {
     pub from: Ident<Canonical>,
     pub to: Ident<Canonical>,
@@ -1819,7 +1819,7 @@ fn tarjan_scc_ids_into(
 /// Per-sampled-timestep statistics about the discovery runtime graph.
 ///
 /// See [`DiscoveryGraphStats`].
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
+#[derive(Debug)]
 pub struct DiscoveryStepStats {
     /// The sampled timestep index.
     pub step: usize,
@@ -1853,8 +1853,8 @@ pub struct DiscoveryStepStats {
 /// steps -- not what any particular candidate generator does with it. That is
 /// what makes it usable to explain a discovery cost or a completeness verdict
 /// after the fact, and it is the diagnostics surface behind
-/// `examples/clearn_discover.rs`.
-#[cfg_attr(feature = "debug-derive", derive(Debug))]
+/// `simlin-tests/examples/clearn_discover.rs`.
+#[derive(Debug)]
 pub struct DiscoveryGraphStats {
     /// Total nodes in the runtime graph (link-score edge endpoints + stocks).
     pub n_nodes: usize,
@@ -3182,9 +3182,9 @@ pub(crate) fn discover_loops_with_deadlines(
         for link in &links {
             let offset = link_offset_map
                 .get(&(link.from.clone(), link.to.clone()))
-                .ok_or_else(|| crate::common::Error {
-                    kind: crate::common::ErrorKind::Model,
-                    code: crate::common::ErrorCode::NotSimulatable,
+                .ok_or_else(|| simlin_base::common::Error {
+                    kind: simlin_base::common::ErrorKind::Model,
+                    code: simlin_base::common::ErrorCode::NotSimulatable,
                     details: Some(format!(
                         "Link score variable not found for {} -> {}. \
                          The simulation may not have been compiled with ltm_discovery_mode enabled.",
@@ -3272,7 +3272,7 @@ pub(crate) fn discover_loops_with_deadlines(
         let mut abs_any_inf = false;
 
         for step in 0..step_count {
-            let time = results.data[step * results.step_size + crate::results::TIME_OFF];
+            let time = results.data[step * results.step_size + simlin_base::results::TIME_OFF];
 
             // Compute signed loop score = product of signed link scores
             let mut loop_score = 1.0;

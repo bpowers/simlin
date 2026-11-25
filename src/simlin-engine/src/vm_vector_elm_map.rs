@@ -30,7 +30,7 @@ use crate::vm::{ChunkRegions, Vm, increment_indices};
 /// `vector_simple` rows): `c=[11,12,12]`, `f=[1,5,6]` (broadcast across
 /// DimB), `g=[1,4,5,2,3,6]`.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn vector_elm_map(
+pub fn vector_elm_map(
     source_view: &RuntimeView,
     offset_view: &RuntimeView,
     write_temp_id: TempId,
