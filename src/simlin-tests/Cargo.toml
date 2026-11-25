@@ -119,6 +119,10 @@ name = "ltm_mem_bench"
 required-features = ["instruments"]
 
 [[example]]
+name = "ltm_replay"
+required-features = ["instruments"]
+
+[[example]]
 name = "ltm_search_graph_dump"
 required-features = ["instruments"]
 

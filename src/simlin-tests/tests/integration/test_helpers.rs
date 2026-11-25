@@ -988,3 +988,30 @@ pub fn ltm_series(results: &Results, name: &str, slot: usize) -> Vec<f64> {
     let offset = results.offsets[ident] + slot;
     results.iter().map(|row| row[offset]).collect()
 }
+
+/// Every model file under `test/`, sorted, by its path from the checkout's
+/// root.
+pub fn corpus() -> Vec<String> {
+    let root = std::path::PathBuf::from("../..");
+    let mut files = Vec::new();
+    let mut dirs = vec![root.join("test")];
+    while let Some(dir) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for path in entries.flatten().map(|entry| entry.path()) {
+            let model = path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+                ["mdl", "xmile", "stmx", "itmx"]
+                    .iter()
+                    .any(|x| e.eq_ignore_ascii_case(x))
+            });
+            if path.is_dir() {
+                dirs.push(path);
+            } else if model && let Ok(relative) = path.strip_prefix(&root) {
+                files.push(relative.to_string_lossy().into_owned());
+            }
+        }
+    }
+    files.sort();
+    files
+}
