@@ -8464,7 +8464,8 @@ fn test_discovery_loop_through_agg_scored_on_untrimmed_path() {
 
     let mut saw_nonzero = false;
     let mut traversed_path: Option<&'static str> = None;
-    for step in 2..results.step_count {
+    let loop_scores = &share_loop.scores[..results.step_count];
+    for (step, &(_, loop_score)) in loop_scores.iter().enumerate().skip(2) {
         let share_to_update = at(step, off_share_to_update_big);
         let update_to_pop = at(step, off_update_to_pop_big);
         let prod_via_agg = at(step, off_pop_big_to_agg)
@@ -8472,7 +8473,6 @@ fn test_discovery_loop_through_agg_scored_on_untrimmed_path() {
             * share_to_update
             * update_to_pop;
         let prod_via_numerator = at(step, off_pop_to_share_big) * share_to_update * update_to_pop;
-        let loop_score = share_loop.scores[step].1;
         let matches_agg = (loop_score - prod_via_agg).abs() < 1e-6;
         let matches_numerator = (loop_score - prod_via_numerator).abs() < 1e-6;
         assert!(

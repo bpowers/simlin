@@ -1016,9 +1016,8 @@ unsafe fn slab_from_bytes(slab_ptr: *const u8, slab_len: usize) -> Result<Vec<f6
     let n_f64 = slab_len / 8;
     let bytes = std::slice::from_raw_parts(slab_ptr, slab_len);
     let mut out = Vec::with_capacity(n_f64);
-    for chunk in bytes.chunks_exact(8) {
-        out.push(f64::from_le_bytes(chunk.try_into().unwrap()));
-    }
+    let (chunks, _) = bytes.as_chunks::<8>();
+    out.extend(chunks.iter().map(|chunk| f64::from_le_bytes(*chunk)));
     Ok(out)
 }
 

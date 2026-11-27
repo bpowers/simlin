@@ -10,7 +10,9 @@
 
 use std::path::Path;
 
-fn load_workflow() -> serde_yaml::Value {
+use yaml_rust2::{Yaml, YamlLoader};
+
+fn load_workflow() -> Yaml {
     // CARGO_MANIFEST_DIR is src/simlin-mcp; repo root is two levels up.
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -19,7 +21,9 @@ fn load_workflow() -> serde_yaml::Value {
         .unwrap();
     let wf_path = repo_root.join(".github/workflows/mcp-release.yml");
     let contents = std::fs::read_to_string(&wf_path).expect("read workflow YAML");
-    serde_yaml::from_str(&contents).expect("parse workflow YAML")
+    let mut documents = YamlLoader::load_from_str(&contents).expect("parse workflow YAML");
+    assert_eq!(documents.len(), 1, "a workflow file is one YAML document");
+    documents.remove(0)
 }
 
 fn load_workflow_text() -> String {
@@ -37,7 +41,7 @@ fn load_workflow_text() -> String {
 fn ac1_1_tag_trigger_is_mcp_v_star() {
     let wf = load_workflow();
     let tags = wf["on"]["push"]["tags"]
-        .as_sequence()
+        .as_vec()
         .expect("on.push.tags should be a sequence");
     assert_eq!(
         tags.len(),
@@ -57,7 +61,7 @@ fn ac1_1_tag_trigger_is_mcp_v_star() {
 fn ac1_2_to_1_5_build_matrix_has_all_four_targets() {
     let wf = load_workflow();
     let matrix = wf["jobs"]["build"]["strategy"]["matrix"]["include"]
-        .as_sequence()
+        .as_vec()
         .expect("jobs.build.strategy.matrix.include should be a sequence");
 
     assert_eq!(
@@ -133,15 +137,16 @@ fn ac5_2_only_publish_jobs_have_id_token_write() {
         "publish-wrapper must have id-token: write"
     );
 
-    // build and validate jobs must not grant id-token
+    // build and validate jobs must not grant id-token. Indexing a key that is
+    // not there yields BadValue; an explicit null would be Null.
     let build_id_token = &wf["jobs"]["build"]["permissions"]["id-token"];
     assert!(
-        build_id_token.is_null(),
+        build_id_token.is_badvalue(),
         "build job must not have id-token permission"
     );
     let validate_id_token = &wf["jobs"]["validate"]["permissions"]["id-token"];
     assert!(
-        validate_id_token.is_null(),
+        validate_id_token.is_badvalue(),
         "validate job must not have id-token permission"
     );
 }
@@ -177,7 +182,7 @@ fn ac5_3_no_npm_token_in_workflow() {
 fn ac2_1_publish_wrapper_needs_publish_platform() {
     let wf = load_workflow();
     let needs = wf["jobs"]["publish-wrapper"]["needs"]
-        .as_sequence()
+        .as_vec()
         .expect("publish-wrapper.needs should be a sequence");
     let need_names: Vec<&str> = needs
         .iter()
@@ -368,7 +373,7 @@ fn dockerfile_zig_version_matches_workflow() {
     // rather than doing fragile text matching on `version: '...'` lines.
     let wf = load_workflow();
     let steps = wf["jobs"]["build"]["steps"]
-        .as_sequence()
+        .as_vec()
         .expect("build.steps should be a sequence");
     let zig_step = steps
         .iter()

@@ -663,8 +663,7 @@ impl IndexedGraph {
             // pop+check per duplicate rather than an O(|b_list|) scan
             // per insertion.  Dropping the linear `contains` check is a
             // pure win on dense SCCs.
-            for i in 0..succs_len {
-                let w = self.succ[v as usize][i];
+            for &w in &self.succ[v as usize] {
                 let w_local = global_to_local[w as usize];
                 if w_local < 0 || w < start {
                     continue;

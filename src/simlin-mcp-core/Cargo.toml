@@ -18,7 +18,8 @@ simlin-edit = { version = "0.1", path = "../simlin-edit" }
 simlin-formats = { version = "0.1", path = "../simlin-formats", features = ["schema"] }
 simlin-layout = { version = "0.1", path = "../simlin-layout" }
 simlin-engine = { version = "0.1", path = "../simlin-engine" }
-rmcp = { version = "1", features = ["server", "macros", "schemars"] }
+# Without rmcp's defaults, which add chrono (unmaintained, RUSTSEC-2026-0543).
+rmcp = { version = "3.9", default-features = false, features = ["server", "macros", "schemars"] }
 schemars = { version = "1", features = ["preserve_order"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -31,5 +32,5 @@ anyhow = "1"
 simlin-mcp-core = { path = ".", features = ["test-support"] }
 simlin-engine = { path = "../simlin-engine", features = ["test-support"] }
 tempfile = "3"
-rmcp = { version = "1", features = ["server", "macros", "client", "transport-async-rw"] }
+rmcp = { version = "3.9", default-features = false, features = ["server", "macros", "client", "transport-async-rw"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "fs"] }

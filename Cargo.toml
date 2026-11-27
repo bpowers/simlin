@@ -149,10 +149,13 @@ opt-level = 3
 [profile.dev.package.png]
 opt-level = 3
 
-[profile.dev.package.rustybuzz]
+[profile.dev.package.harfrust]
 opt-level = 3
 
-[profile.dev.package.ttf-parser]
+[profile.dev.package.skrifa]
+opt-level = 3
+
+[profile.dev.package.read-fonts]
 opt-level = 3
 
 [profile.dev.package.fontdb]

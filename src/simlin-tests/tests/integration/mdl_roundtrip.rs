@@ -295,10 +295,7 @@ fn sim_specs_equivalent(a: &datamodel::SimSpecs, b: &datamodel::SimSpecs) -> boo
         Dt::Dt(v) => *v,
         Dt::Reciprocal(v) => 1.0 / *v,
     };
-    if (dt_a - dt_b).abs() > 1e-10 {
-        return false;
-    }
-    true
+    (dt_a - dt_b).abs() <= 1e-10
 }
 
 // ---------------------------------------------------------------------------

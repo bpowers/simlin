@@ -14,8 +14,8 @@
 
 use std::path::Path;
 
-use rmcp::model::ReadResourceRequestParams;
-use rmcp::{ServerHandler, ServiceError, ServiceExt};
+use rmcp::model::{ErrorCode, ProtocolVersion, ReadResourceRequestParams};
+use rmcp::{ClientLifecycleMode, ClientServiceExt, ServerHandler, ServiceError, ServiceExt};
 use simlin_base::datamodel;
 use simlin_mcp_core::access::{OpenedProject, ProjectAccess, SaveOutcome};
 use simlin_mcp_core::errors::AccessError;
@@ -105,6 +105,55 @@ fn get_info_reports_the_mounting_binarys_version_and_instructions() {
     assert_eq!(info.instructions.as_deref(), Some("Test instructions"));
 }
 
+/// A client on a protocol revision with no `initialize` handshake opens with
+/// `server/discover`, so the server is serving before any handshake completes.
+/// The handshake revisions are every other test in this file, whose client
+/// opens with `initialize`.
+#[tokio::test]
+async fn a_client_that_opens_with_discover_is_served() {
+    let (server_io, client_io) = tokio::io::duplex(65536);
+    let server = SimlinMcpServer::new(
+        MockAccess,
+        "Test instructions".into(),
+        vec![sample_resource()],
+        "0.0.0".into(),
+    );
+    let server_task = tokio::spawn(async move { server.serve(server_io).await });
+    let client = ()
+        .serve_with_lifecycle(
+            client_io,
+            ClientLifecycleMode::Discover {
+                preferred_versions: vec![ProtocolVersion::LATEST],
+            },
+        )
+        .await
+        .expect("the server must answer server/discover");
+
+    let result = client
+        .peer()
+        .list_resources(None)
+        .await
+        .expect("resources/list must succeed");
+    assert_eq!(result.resources.len(), 1);
+    assert_eq!(result.resources[0].uri, "simlin://skills/test");
+
+    let missing = client
+        .peer()
+        .read_resource(ReadResourceRequestParams::new("simlin://skills/missing"))
+        .await;
+    match missing {
+        Err(ServiceError::McpError(e)) => assert_eq!(e.code, ErrorCode::INVALID_PARAMS),
+        other => panic!("expected INVALID_PARAMS for an unknown URI, got {other:?}"),
+    }
+
+    let _ = client.cancel().await;
+    let server = server_task
+        .await
+        .expect("server task panicked")
+        .expect("server failed to initialize");
+    let _ = server.cancel().await;
+}
+
 #[tokio::test]
 async fn list_resources_returns_provided_entries() {
     let (client, server) = spawn_server_pair_with_resources(vec![sample_resource()]).await;
@@ -116,7 +165,7 @@ async fn list_resources_returns_provided_entries() {
         .expect("resources/list must succeed");
 
     assert_eq!(result.resources.len(), 1);
-    assert_eq!(result.resources[0].raw.uri, "simlin://skills/test");
+    assert_eq!(result.resources[0].uri, "simlin://skills/test");
 
     let _ = client.cancel().await;
     let _ = server.cancel().await;

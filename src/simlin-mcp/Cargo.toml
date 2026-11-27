@@ -16,7 +16,8 @@ path = "src/main.rs"
 
 [dependencies]
 simlin-mcp-core = { version = "0.1", path = "../simlin-mcp-core" }
-rmcp = { version = "1", features = ["server", "macros", "transport-io"] }
+# Without rmcp's defaults, which add chrono (unmaintained, RUSTSEC-2026-0543).
+rmcp = { version = "3.9", default-features = false, features = ["server", "macros", "transport-io"] }
 mimalloc = "0.1"
 serde_json = "1"
 anyhow = "1"
@@ -26,4 +27,4 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs"] }
 simlin-base = { path = "../simlin-base" }
 simlin-formats = { path = "../simlin-formats" }
 tempfile = "3"
-serde_yaml = "0.9"
+yaml-rust2 = { version = "0.13", default-features = false }

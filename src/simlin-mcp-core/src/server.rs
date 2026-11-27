@@ -20,9 +20,9 @@ use rmcp::ErrorData as McpError;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    AnnotateAble, CallToolResult, ErrorCode, Implementation, ListResourcesResult,
-    PaginatedRequestParams, ProtocolVersion, RawResource, ReadResourceRequestParams,
-    ReadResourceResult, Resource, ResourceContents, ServerCapabilities, ServerInfo,
+    CallToolResult, ErrorCode, Implementation, ListResourcesResult, PaginatedRequestParams,
+    ProtocolVersion, ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource,
+    ResourceContents, ServerCapabilities, ServerConfig,
 };
 use rmcp::service::RequestContext;
 use rmcp::{RoleServer, ServerHandler, tool, tool_handler, tool_router};
@@ -147,14 +147,17 @@ impl<A: ProjectAccess> SimlinMcpServer<A> {
 
 #[tool_handler]
 impl<A: ProjectAccess> ServerHandler for SimlinMcpServer<A> {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(
             ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
                 .build(),
         )
-        .with_protocol_version(ProtocolVersion::LATEST)
+        // What an `initialize` names when it cannot echo the client's own
+        // version. `LATEST` has no `initialize` handshake to answer, so it
+        // can never be that value.
+        .with_protocol_version(ProtocolVersion::LATEST_WITH_INITIALIZE)
         .with_server_info(Implementation::new(
             "simlin-mcp",
             self.version.as_str().to_string(),
@@ -171,18 +174,17 @@ impl<A: ProjectAccess> ServerHandler for SimlinMcpServer<A> {
             .resources
             .iter()
             .map(|r| {
-                let raw = RawResource::new(r.uri.clone(), r.name.clone());
-                let raw = if r.description.is_empty() {
-                    raw
+                let resource = Resource::new(r.uri.clone(), r.name.clone());
+                let resource = if r.description.is_empty() {
+                    resource
                 } else {
-                    raw.with_description(r.description.clone())
+                    resource.with_description(r.description.clone())
                 };
-                let raw = if r.mime_type.is_empty() {
-                    raw
+                if r.mime_type.is_empty() {
+                    resource
                 } else {
-                    raw.with_mime_type(r.mime_type.clone())
-                };
-                raw.no_annotation()
+                    resource.with_mime_type(r.mime_type.clone())
+                }
             })
             .collect();
         Ok(ListResourcesResult::with_all_items(resources))
@@ -192,16 +194,18 @@ impl<A: ProjectAccess> ServerHandler for SimlinMcpServer<A> {
         &self,
         request: ReadResourceRequestParams,
         _: RequestContext<RoleServer>,
-    ) -> Result<ReadResourceResult, McpError> {
+    ) -> Result<ReadResourceResponse, McpError> {
         let uri = request.uri;
         if let Some(content) = self.resources.iter().find(|r| r.uri == uri) {
             return Ok(ReadResourceResult::new(vec![ResourceContents::text(
                 content.body.clone(),
                 uri,
-            )]));
+            )])
+            .into());
         }
-        // ErrorCode::RESOURCE_NOT_FOUND is -32002 in rmcp, matching the
-        // value pre-refactor @simlin/mcp clients see for missing resources.
+        // ErrorCode::RESOURCE_NOT_FOUND is -32002, the code a client that
+        // opened with `initialize` sees for a missing resource. rmcp rewrites
+        // it to INVALID_PARAMS for a client on 2026-07-28 or later.
         Err(McpError::new(
             ErrorCode::RESOURCE_NOT_FOUND,
             format!("resource not found: {uri}"),
